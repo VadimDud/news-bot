@@ -1,0 +1,23 @@
+from typing import Any, Callable, Dict, Awaitable
+from aiogram import BaseMiddleware
+from aiogram.types import Message, CallbackQuery
+
+from . import database as db
+
+
+class LanguageMiddleware(BaseMiddleware):
+    """Attach user's language preference to every event."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, Any], Awaitable[Any]],
+        event: Message | CallbackQuery,
+        data: Dict[str, Any],
+    ) -> Any:
+        user = event.from_user
+        if user:
+            lang = await db.get_language(user.id)
+            data["user_lang"] = lang
+        else:
+            data["user_lang"] = "ru"
+        return await handler(event, data)

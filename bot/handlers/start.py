@@ -202,11 +202,11 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             continue
 
         # Compute sentiment from triggers (0 tokens)
-        impact = compute_sentiment(title, item["summary"], matched_asset)
+        impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
-        # Hybrid fallback: only call AI if ambiguous
-        if impact == "NEUTRAL":
-            ai_impact = await stage2_hybrid(title, item["summary"], matched_asset)
+        # Hybrid fallback: only call AI if ambiguous or low confidence
+        if confidence == "low" or impact == "NEUTRAL":
+            ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
             if ai_impact:
                 impact = ai_impact
 
@@ -238,20 +238,24 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         await _send_or_edit(target, user_id, t(user_lang, "finance_all_seen"), reply_markup=subscriber_menu(user_lang))
         return
 
-    # Format all news in one message
-    text = format_news_batch(batch_items, user_lang)
+    # Format all news in one or more messages
+    messages = format_news_batch(batch_items, user_lang)
 
-    # Add menu button
+    # Add menu button to last message
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
     reply_markup = kb.as_markup()
 
-    # Send as NEW message (not edit) so old one can be deleted
-    if isinstance(target, CallbackQuery):
-        msg = await target.message.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
-    else:
-        msg = await target.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
-    _store_news_msg(user_id, msg.message_id)
+    # Send messages
+    last_msg = None
+    for i, msg_text in enumerate(messages):
+        rm = reply_markup if i == len(messages) - 1 else None
+        if isinstance(target, CallbackQuery):
+            last_msg = await target.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+        else:
+            last_msg = await target.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+    if last_msg:
+        _store_news_msg(user_id, last_msg.message_id)
 
 
 @router.callback_query(F.data == "sub:news")

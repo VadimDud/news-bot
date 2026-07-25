@@ -102,10 +102,10 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
             if not is_relevant:
                 continue
 
-            impact = compute_sentiment(title, item["summary"], matched_asset)
+            impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
-            if impact == "NEUTRAL":
-                ai_impact = await stage2_hybrid(title, item["summary"], matched_asset)
+            if confidence == "low" or impact == "NEUTRAL":
+                ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
                 if ai_impact:
                     impact = ai_impact
 
@@ -134,13 +134,17 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
         user_id = callback.from_user.id
         await _delete_old_news_msg(user_id, callback.message.chat.id, callback.bot)
 
-        # Format all news in one message
-        text = format_news_batch(batch_items, user_lang)
+        # Format all news in one or more messages
+        messages = format_news_batch(batch_items, user_lang)
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
 
-        msg = await callback.message.answer(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
-        _store_news_msg(user_id, msg.message_id)
+        last_msg = None
+        for i, msg_text in enumerate(messages):
+            rm = kb.as_markup() if i == len(messages) - 1 else None
+            last_msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+        if last_msg:
+            _store_news_msg(user_id, last_msg.message_id)
 
 
 # ── Receive ticker/company name to add (text input) ──

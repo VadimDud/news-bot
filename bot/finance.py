@@ -47,7 +47,7 @@ FINANCE_KEYWORDS = [
 
 @async_retry(max_retries=3, base_delay=2.0)
 async def fetch_finance_news() -> list[dict]:
-    """Fetch latest financial news from Russian sources."""
+    """Fetch latest news from Russian sources (no pre-filter — stage1_filter handles relevance)."""
     all_news = []
 
     for feed_info in FINANCE_FEEDS:
@@ -59,33 +59,31 @@ async def fetch_finance_news() -> list[dict]:
 
                 if feed_info["type"] == "rss":
                     feed = feedparser.parse(resp.text)
-                    for entry in feed.entries[:10]:
+                    for entry in feed.entries[:30]:
                         title = entry.get("title", "")
                         summary = entry.get("summary", "")
                         link = entry.get("link", "")
-                        if _is_finance_relevant(title, summary):
-                            all_news.append({
-                                "title": title,
-                                "summary": _clean_html(summary)[:300],
-                                "link": link,
-                                "source": feed_info["name"],
-                                "published": entry.get("published", ""),
-                            })
+                        all_news.append({
+                            "title": title,
+                            "summary": _clean_html(summary)[:300],
+                            "link": link,
+                            "source": feed_info["name"],
+                            "published": entry.get("published", ""),
+                        })
                 elif feed_info["type"] == "json":
                     data = resp.json()
                     items = data.get("items", data.get("news", []))
-                    for item in items[:10]:
+                    for item in items[:30]:
                         title = item.get("title", "")
                         desc = item.get("desc", item.get("description", ""))
                         link = item.get("url", item.get("link", ""))
-                        if _is_finance_relevant(title, desc):
-                            all_news.append({
-                                "title": title,
-                                "summary": _clean_html(desc)[:300],
-                                "link": link,
-                                "source": feed_info["name"],
-                                "published": item.get("publishDate", ""),
-                            })
+                        all_news.append({
+                            "title": title,
+                            "summary": _clean_html(desc)[:300],
+                            "link": link,
+                            "source": feed_info["name"],
+                            "published": item.get("publishDate", ""),
+                        })
         except Exception as e:
             logger.warning(f"Failed to fetch {feed_info['name']}: {e}")
             continue

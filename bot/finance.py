@@ -6,15 +6,16 @@ import feedparser
 from datetime import datetime
 
 from . import config
+from .retry_utils import async_retry
 
 logger = logging.getLogger(__name__)
 
 # RSS feeds for Russian financial news
 FINANCE_FEEDS = [
     {
-        "name": "РБК",
-        "url": "https://www.rbc.ru/v10/ajax/get-news-feed/?project=rbcnews&limit=10",
-        "type": "json",
+        "name": "Коммерсантъ",
+        "url": "https://www.kommersant.ru/RSS/news.xml",
+        "type": "rss",
     },
     {
         "name": "Интерфакс",
@@ -22,8 +23,8 @@ FINANCE_FEEDS = [
         "type": "rss",
     },
     {
-        "name": "ПРАЙМ",
-        "url": "https://www.prime.ru/rss/all.xml",
+        "name": "ТАСС",
+        "url": "https://tass.ru/rss/v2.xml",
         "type": "rss",
     },
     {
@@ -44,6 +45,7 @@ FINANCE_KEYWORDS = [
 ]
 
 
+@async_retry(max_retries=3, base_delay=2.0)
 async def fetch_finance_news() -> list[dict]:
     """Fetch latest financial news from Russian sources."""
     all_news = []
@@ -132,7 +134,7 @@ async def analyze_with_gemini(title: str, summary: str, tickers: list[str]) -> s
 Отвечай ТОЛЬКО на русском, кратко, без лишних слов."""
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, proxy=config.HTTP_PROXY or None) as client:
             resp = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent?key={config.GEMINI_API_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]},

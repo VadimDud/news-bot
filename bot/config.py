@@ -15,8 +15,22 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEEPL_API_KEY: str = os.getenv("DEEPL_API_KEY", "")
 SOCKS5_PROXY: str = os.getenv("SOCKS5_PROXY", "")
+HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
 TELEGRAM_API_SERVER: str = os.getenv("TELEGRAM_API_SERVER", "")
 
-# Gemini API for financial analysis
+# DeepSeek API for financial analysis (primary)
+DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+# Gemini API for financial analysis (fallback)
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Alibaba DashScope (Qwen) API for financial analysis (fallback)
+DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
+DASHSCOPE_BASE_URL: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+DASHSCOPE_MODEL: str = os.getenv("DASHSCOPE_MODEL", "qwen-turbo")
+
+# Auto-scan news interval (in seconds, default 1800 = 30 minutes)
+AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "1800"))

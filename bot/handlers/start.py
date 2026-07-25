@@ -1,26 +1,464 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from ..i18n import t
-from ..keyboards import main_menu
+from ..keyboards import guest_menu, subscriber_menu
 from .. import database as db
 
 router = Router()
+
+TRIAL_DAYS = 30
+
+# Per-user tracking: {user_id: message_id} for single-window mode
+_user_messages: dict[int, int] = {}
+# Per-user news message tracking: {user_id: message_id} — separate for news deletion
+_user_news_messages: dict[int, int] = {}
+
+
+def _store_msg(user_id: int, msg_id: int):
+    _user_messages[user_id] = msg_id
+
+
+def _get_msg_id(user_id: int) -> int | None:
+    return _user_messages.get(user_id)
+
+
+def _store_news_msg(user_id: int, msg_id: int):
+    _user_news_messages[user_id] = msg_id
+
+
+def _get_news_msg_id(user_id: int) -> int | None:
+    return _user_news_messages.get(user_id)
+
+
+async def _delete_old_news_msg(user_id: int, chat_id: int, bot):
+    """Delete previous news message if exists."""
+    old_id = _get_news_msg_id(user_id)
+    if old_id:
+        try:
+            await bot.delete_message(chat_id, old_id)
+        except Exception:
+            pass
+        _user_news_messages.pop(user_id, None)
+
+
+async def _show_home(target, user_lang: str):
+    """Show the appropriate menu based on user access."""
+    if isinstance(target, Message):
+        user_id = target.from_user.id
+    else:
+        user_id = target.from_user.id
+
+    if await db.has_access(user_id):
+        text = t(user_lang, "welcome_sub")
+        reply_markup = subscriber_menu(user_lang)
+    else:
+        text = t(user_lang, "welcome_guest")
+        reply_markup = guest_menu(user_lang)
+
+    await _send_or_edit(target, user_id, text, reply_markup=reply_markup)
+
+
+async def _send_or_edit(target, user_id: int, text: str, reply_markup=None, **kwargs) -> Message:
+    """Send new message or edit existing one for single-window mode."""
+    old_id = _get_msg_id(user_id)
+    if old_id and isinstance(target, CallbackQuery):
+        try:
+            await target.message.edit_text(text, reply_markup=reply_markup, **kwargs)
+            return target.message
+        except Exception:
+            pass
+    if isinstance(target, Message):
+        msg = await target.answer(text, reply_markup=reply_markup, **kwargs)
+    else:
+        msg = await target.message.answer(text, reply_markup=reply_markup, **kwargs)
+    _store_msg(user_id, msg.message_id)
+    return msg
 
 
 @router.message(F.text == "/start")
 async def cmd_start(message: Message, user_lang: str):
     user = message.from_user
     await db.set_user(user.id, user.username, user.full_name, user_lang)
-    await message.answer(t(user_lang, "welcome"), reply_markup=main_menu(user_lang))
+
+    if not await db.has_access(user.id):
+        granted = await db.grant_trial(user.id, days=TRIAL_DAYS)
+        if granted:
+            info = await db.get_access_info(user.id)
+            msg = await message.answer(
+                t(user_lang, "trial_activated", days=info["days_left"], until=info["until"]),
+                reply_markup=subscriber_menu(user_lang),
+            )
+            _store_msg(user.id, msg.message_id)
+            return
+
+    await _show_home(message, user_lang)
 
 
 @router.message(F.text == "/help")
 async def cmd_help(message: Message, user_lang: str):
-    await message.answer(t(user_lang, "help"), reply_markup=main_menu(user_lang))
+    if await db.has_access(message.from_user.id):
+        msg = await message.answer(t(user_lang, "help"), reply_markup=subscriber_menu(user_lang))
+    else:
+        msg = await message.answer(t(user_lang, "help"), reply_markup=guest_menu(user_lang))
+    _store_msg(message.from_user.id, msg.message_id)
+
+
+# ── Guest callbacks ──
+
+@router.callback_query(F.data == "menu:about")
+async def menu_about(callback: CallbackQuery, user_lang: str):
+    await callback.message.edit_text(t(user_lang, "about_text"), reply_markup=guest_menu(user_lang))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:buy")
+async def menu_buy(callback: CallbackQuery, user_lang: str):
+    await callback.message.edit_text(t(user_lang, "buy_text"), reply_markup=guest_menu(user_lang))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:trial")
+async def menu_trial(callback: CallbackQuery, user_lang: str):
+    user_id = callback.from_user.id
+    granted = await db.grant_trial(user_id, days=TRIAL_DAYS)
+    if granted:
+        info = await db.get_access_info(user_id)
+        await callback.message.edit_text(
+            t(user_lang, "trial_activated", days=info["days_left"], until=info["until"]),
+            reply_markup=subscriber_menu(user_lang),
+        )
+    else:
+        await callback.message.edit_text(
+            t(user_lang, "trial_already_used"),
+            reply_markup=guest_menu(user_lang),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:support")
+async def menu_support(callback: CallbackQuery, user_lang: str):
+    await callback.message.edit_text(t(user_lang, "support_text"), reply_markup=guest_menu(user_lang))
+    await callback.answer()
+
+
+# ── Subscriber callbacks ──
+
+@router.callback_query(F.data == "menu:home")
+async def menu_home(callback: CallbackQuery, user_lang: str):
+    if await db.has_access(callback.from_user.id):
+        await callback.message.edit_text(t(user_lang, "welcome_sub"), reply_markup=subscriber_menu(user_lang))
+    else:
+        await callback.message.edit_text(t(user_lang, "welcome_guest"), reply_markup=guest_menu(user_lang))
+    await callback.answer()
 
 
 @router.callback_query(F.data == "back:main")
 async def back_main(callback: CallbackQuery, user_lang: str):
-    await callback.message.edit_text(t(user_lang, "welcome"), reply_markup=main_menu(user_lang))
+    if await db.has_access(callback.from_user.id):
+        await callback.message.edit_text(t(user_lang, "welcome_sub"), reply_markup=subscriber_menu(user_lang))
+    else:
+        await callback.message.edit_text(t(user_lang, "welcome_guest"), reply_markup=guest_menu(user_lang))
     await callback.answer()
+
+
+# ── News scanning (keyword-based, batch in one message) ──
+
+async def _scan_and_show_news(target, user_id: int, user_lang: str):
+    """Core news scan logic: filter by tracked_assets keywords, show batch in one message."""
+    from ..finance import fetch_finance_news
+    from ..news_processor import (
+        stage1_filter, compute_sentiment, stage2_hybrid,
+        format_news_batch, compute_hash,
+    )
+
+    # Load all tracked assets for keyword matching
+    tracked_assets = await db.get_all_tracked_assets()
+    if not tracked_assets:
+        text = t(user_lang, "finance_empty") if user_lang == "ru" else "💰 <b>Financial Analysis</b>\n\nAdd a ticker first to track news."
+        await _send_or_edit(target, user_id, text, reply_markup=subscriber_menu(user_lang))
+        return
+
+    news = await fetch_finance_news()
+    if not news:
+        await _send_or_edit(target, user_id, t(user_lang, "finance_no_news"), reply_markup=subscriber_menu(user_lang))
+        return
+
+    batch_items = []
+
+    for item in news[:20]:
+        title = item["title"]
+        content_hash = compute_hash(title)
+
+        if await db.is_news_seen(content_hash):
+            continue
+
+        is_relevant, matched_ticker, matched_asset = stage1_filter(
+            title, item["summary"], tracked_assets
+        )
+        if not is_relevant:
+            continue
+
+        # Compute sentiment from triggers (0 tokens)
+        impact = compute_sentiment(title, item["summary"], matched_asset)
+
+        # Hybrid fallback: only call AI if ambiguous
+        if impact == "NEUTRAL":
+            ai_impact = await stage2_hybrid(title, item["summary"], matched_asset)
+            if ai_impact:
+                impact = ai_impact
+
+        summary = item["summary"][:200] if item["summary"] else title[:200]
+
+        await db.save_news(
+            content_hash, item["source"], title, item.get("link", ""),
+            matched_ticker, summary, impact,
+        )
+
+        batch_items.append({
+            "title": title,
+            "source": item["source"],
+            "ticker": matched_ticker,
+            "summary": summary,
+            "impact": impact,
+            "link": item.get("link", ""),
+        })
+
+    # Delete old news message
+    chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
+    bot_instance = target.message.bot if isinstance(target, CallbackQuery) else target.bot
+    try:
+        await _delete_old_news_msg(user_id, chat_id, bot_instance)
+    except Exception:
+        pass
+
+    if not batch_items:
+        await _send_or_edit(target, user_id, t(user_lang, "finance_all_seen"), reply_markup=subscriber_menu(user_lang))
+        return
+
+    # Format all news in one message
+    text = format_news_batch(batch_items, user_lang)
+
+    # Add menu button
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+    reply_markup = kb.as_markup()
+
+    # Send as NEW message (not edit) so old one can be deleted
+    if isinstance(target, CallbackQuery):
+        msg = await target.message.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
+    else:
+        msg = await target.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
+    _store_news_msg(user_id, msg.message_id)
+
+
+@router.callback_query(F.data == "sub:news")
+async def sub_news(callback: CallbackQuery, user_lang: str):
+    user_id = callback.from_user.id
+    if not await db.has_access(user_id):
+        await callback.message.edit_text(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        await callback.answer()
+        return
+    await callback.answer("🔄 Сканирую новости...")
+    await callback.message.edit_text("🔄 Сканирую новости...")
+    await _scan_and_show_news(callback, user_id, user_lang)
+
+
+# ── Subscriber menu callbacks ──
+
+@router.callback_query(F.data == "sub:tickers")
+async def sub_tickers(callback: CallbackQuery, user_lang: str):
+    user_id = callback.from_user.id
+    if not await db.has_access(user_id):
+        await callback.message.edit_text(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        await callback.answer()
+        return
+    subs = await db.get_finance_subscriptions(user_id)
+    if subs:
+        ticker_list = ", ".join(f"<code>{s['ticker']}</code>" for s in subs)
+        text = t(user_lang, "finance_menu", tickers=ticker_list)
+    else:
+        text = t(user_lang, "finance_empty")
+    await callback.message.edit_text(text, reply_markup=_ticker_management_kb(user_lang, subs), parse_mode="HTML")
+    await callback.answer()
+
+
+def _ticker_management_kb(lang: str, subs: list[dict]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    common_tickers = ["SBER", "GAZP", "LKOH", "ROSN", "YDEX", "VTB", "TCS", "GMKN", "NLMK", "ALRS"]
+    for ticker in common_tickers:
+        is_sub = any(s["ticker"] == ticker for s in subs)
+        prefix = "✅" if is_sub else "➕"
+        action = f"fin:del:{ticker}" if is_sub else f"fin:add:{ticker}"
+        kb.row(InlineKeyboardButton(text=f"{prefix} {ticker}", callback_data=action))
+    kb.row(InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="back:main"))
+    return kb.as_markup()
+
+
+async def _do_analyze_and_add(callback: CallbackQuery, user_lang: str, ticker: str, user_id: int):
+    """Core logic: analyze ticker via Gemini, save, show feedback with retry option."""
+    already_tracked = await db.has_tracked_asset(ticker)
+
+    if not already_tracked:
+        await callback.answer()
+        await callback.message.edit_text(t(user_lang, "finance_analyzing", ticker=ticker), parse_mode="HTML")
+
+        from ..asset_analyzer import analyze_ticker
+        analysis = await analyze_ticker(ticker)
+
+        if analysis:
+            # Check if keywords are meaningful (more than just the ticker itself)
+            kw = analysis.get("keywords", [])
+            meaningful_kw = [k for k in kw if k.upper() != ticker.upper() and len(k) > 2]
+
+            await db.save_tracked_asset(
+                ticker=ticker,
+                name=analysis.get("company_name", ticker),
+                keywords=kw,
+                positive_triggers=analysis.get("positive_triggers", []),
+                negative_triggers=analysis.get("negative_triggers", []),
+                description=analysis.get("description", ""),
+            )
+
+            if len(meaningful_kw) >= 3:
+                # Good analysis
+                info_text = t(user_lang, "finance_analysis_ok",
+                    ticker=ticker, name=analysis.get("company_name", ticker),
+                    description=analysis.get("description", ""),
+                    kw_count=len(kw), pos_count=len(analysis.get("positive_triggers", [])),
+                    neg_count=len(analysis.get("negative_triggers", [])))
+            else:
+                # AI responded but keywords are too generic
+                info_text = t(user_lang, "finance_analysis_fallback", ticker=ticker)
+        else:
+            # AI failed completely
+            info_text = t(user_lang, "finance_analysis_fallback", ticker=ticker)
+    else:
+        info_text = t(user_lang, "finance_added", ticker=ticker)
+        await callback.answer(f"✅ {ticker}", show_alert=False)
+
+    # Show feedback, then menu after short delay
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="sub:tickers"))
+    await callback.message.edit_text(info_text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "fin:add")
+async def ticker_add_prompt(callback: CallbackQuery, user_lang: str):
+    """Show instruction when user clicks 'Add' button without a specific ticker."""
+    user_id = callback.from_user.id
+    if not await db.has_access(user_id):
+        await callback.message.edit_text(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        await callback.answer()
+        return
+    await callback.message.edit_text(t(user_lang, "finance_add_ask"), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("fin:add:"))
+async def ticker_add(callback: CallbackQuery, user_lang: str):
+    """Add ticker via inline button — calls Gemini once for keyword analysis."""
+    ticker = callback.data.split(":")[2]
+    user_id = callback.from_user.id
+
+    await db.add_finance_subscription(user_id, ticker, ticker)
+    await _do_analyze_and_add(callback, user_lang, ticker, user_id)
+
+
+@router.callback_query(F.data.startswith("fin:del:"))
+async def ticker_del(callback: CallbackQuery, user_lang: str):
+    ticker = callback.data.split(":")[2]
+    await db.remove_finance_subscription(callback.from_user.id, ticker)
+    await callback.answer(f"❌ {ticker} удалён", show_alert=False)
+    subs = await db.get_finance_subscriptions(callback.from_user.id)
+    if subs:
+        ticker_list = ", ".join(f"<code>{s['ticker']}</code>" for s in subs)
+        text = t(user_lang, "finance_menu", tickers=ticker_list)
+    else:
+        text = t(user_lang, "finance_empty")
+    await callback.message.edit_text(text, reply_markup=_ticker_management_kb(user_lang, subs), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "sub:settings")
+async def sub_settings(callback: CallbackQuery, user_lang: str):
+    user_id = callback.from_user.id
+    if not await db.has_access(user_id):
+        await callback.message.edit_text(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        await callback.answer()
+        return
+    from ..keyboards import settings_menu
+    await callback.message.edit_text(t(user_lang, "settings_text"), reply_markup=settings_menu(user_lang))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sub:profile")
+async def sub_profile(callback: CallbackQuery, user_lang: str):
+    user_id = callback.from_user.id
+    username = callback.from_user.full_name or callback.from_user.username or "—"
+    info = await db.get_access_info(user_id)
+    if info["has_access"]:
+        text = t(user_lang, "profile_text",
+                 user_id=user_id, username=username,
+                 status="✅ Активна" if user_lang == "ru" else "✅ Active",
+                 until=info["until"], days=info["days_left"])
+    else:
+        text = t(user_lang, "profile_no_access", user_id=user_id, username=username)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.answer()
+
+
+# ── Legacy reply keyboard handlers (fallback) ──
+
+@router.message(F.text.in_({"🔥 Главные новости", "🔥 Top News"}))
+async def btn_news(message: Message, user_lang: str):
+    if not await db.has_access(message.from_user.id):
+        await message.answer(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        return
+    await _scan_and_show_news(message, message.from_user.id, user_lang)
+
+
+@router.message(F.text.in_({"🎯 Фильтр по тикерам", "🎯 Ticker Filter"}))
+async def btn_tickers(message: Message, user_lang: str):
+    if not await db.has_access(message.from_user.id):
+        await message.answer(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        return
+    subs = await db.get_finance_subscriptions(message.from_user.id)
+    if subs:
+        ticker_list = ", ".join(f"<code>{s['ticker']}</code>" for s in subs)
+        text = t(user_lang, "finance_menu", tickers=ticker_list)
+    else:
+        text = t(user_lang, "finance_empty")
+    msg = await message.answer(text, reply_markup=_ticker_management_kb(user_lang, subs), parse_mode="HTML")
+    _store_msg(message.from_user.id, msg.message_id)
+
+
+@router.message(F.text.in_({"⚙️ Настройки", "⚙️ Settings"}))
+async def btn_settings(message: Message, user_lang: str):
+    if not await db.has_access(message.from_user.id):
+        await message.answer(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
+        return
+    from ..keyboards import settings_menu
+    msg = await message.answer(t(user_lang, "settings_text"), reply_markup=settings_menu(user_lang))
+    _store_msg(message.from_user.id, msg.message_id)
+
+
+@router.message(F.text.in_({"👤 Мой профиль", "👤 My Profile"}))
+async def btn_profile(message: Message, user_lang: str):
+    user_id = message.from_user.id
+    username = message.from_user.full_name or message.from_user.username or "—"
+    info = await db.get_access_info(user_id)
+    if info["has_access"]:
+        text = t(user_lang, "profile_text",
+                 user_id=user_id, username=username,
+                 status="✅ Активна" if user_lang == "ru" else "✅ Active",
+                 until=info["until"], days=info["days_left"])
+    else:
+        text = t(user_lang, "profile_no_access", user_id=user_id, username=username)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+    msg = await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    _store_msg(user_id, msg.message_id)

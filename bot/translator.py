@@ -21,7 +21,7 @@ async def _translate_openai(text: str) -> str:
         f"Текст:\n{text}"
     )
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, proxy=config.HTTP_PROXY or None) as client:
         resp = await client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={

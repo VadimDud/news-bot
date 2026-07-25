@@ -6,16 +6,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from ..i18n import t
-from ..keyboards import main_menu
+from ..keyboards import guest_menu, subscriber_menu
 from .. import database as db
-from ..finance import (
-    fetch_finance_news,
-    analyze_with_gemini,
-    format_finance_alert,
+from ..finance import fetch_finance_news
+from ..news_processor import (
+    stage1_filter,
+    compute_sentiment,
+    stage2_hybrid,
+    format_news_batch,
+    compute_hash,
 )
-from ..database import is_news_sent, mark_news_sent
 
 router = Router()
+
 
 # ── /finance command ──
 
@@ -27,7 +30,9 @@ async def cmd_finance(message: Message, user_lang: str):
         text = t(user_lang, "finance_menu", tickers=ticker_list)
     else:
         text = t(user_lang, "finance_empty")
-    await message.answer(text, reply_markup=finance_menu(user_lang), parse_mode="HTML")
+    msg = await message.answer(text, reply_markup=finance_menu(user_lang), parse_mode="HTML")
+    from .start import _store_msg
+    _store_msg(message.from_user.id, msg.message_id)
 
 
 # ── Finance menu callbacks ──
@@ -36,6 +41,10 @@ async def cmd_finance(message: Message, user_lang: str):
 async def finance_handler(callback: CallbackQuery, user_lang: str):
     parts = callback.data.split(":")
     action = parts[1]
+
+    # Skip inline add/del handlers (handled by start.py)
+    if action in ("add", "del") and len(parts) >= 3:
+        return
 
     if action == "list":
         subs = await db.get_finance_subscriptions(callback.from_user.id)
@@ -66,74 +75,153 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
     elif action == "scan":
         await callback.answer()
         await callback.message.edit_text("🔄 Сканирую новости...", parse_mode="HTML")
+
+        # Load tracked assets for keyword filtering
+        tracked_assets = await db.get_all_tracked_assets()
+        if not tracked_assets:
+            await callback.message.edit_text(t(user_lang, "finance_empty"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
+            return
+
         news = await fetch_finance_news()
         if not news:
             await callback.message.edit_text(t(user_lang, "finance_no_news"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
             return
-        sent_count = 0
-        for item in news[:5]:
-            if await is_news_sent(item["title"]):
+
+        batch_items = []
+
+        for item in news[:20]:
+            title = item["title"]
+            content_hash = compute_hash(title)
+
+            if await db.is_news_seen(content_hash):
                 continue
-            user_tickers = await db.get_user_tickers(callback.from_user.id)
-            analysis = await analyze_with_gemini(item["title"], item["summary"], user_tickers)
-            alert = format_finance_alert(item["title"], item["summary"], item["source"], analysis, item["link"])
-            try:
-                await callback.message.answer(alert, disable_web_page_preview=True, parse_mode="HTML")
-                await mark_news_sent(item["title"], item["source"])
-                sent_count += 1
-            except Exception:
+
+            is_relevant, matched_ticker, matched_asset = stage1_filter(
+                title, item["summary"], tracked_assets
+            )
+            if not is_relevant:
                 continue
-        if sent_count == 0:
-            await callback.message.edit_text(t(user_lang, "finance_all_seen"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
-        else:
-            await callback.message.edit_text(
-                t(user_lang, "finance_scan_done", count=sent_count),
-                reply_markup=finance_menu(user_lang),
-                parse_mode="HTML",
+
+            impact = compute_sentiment(title, item["summary"], matched_asset)
+
+            if impact == "NEUTRAL":
+                ai_impact = await stage2_hybrid(title, item["summary"], matched_asset)
+                if ai_impact:
+                    impact = ai_impact
+
+            summary = item["summary"][:200] if item["summary"] else title[:200]
+
+            await db.save_news(
+                content_hash, item["source"], title, item.get("link", ""),
+                matched_ticker, summary, impact,
             )
 
-    elif action == "del" and len(parts) >= 3:
-        ticker = parts[2]
-        await db.remove_finance_subscription(callback.from_user.id, ticker)
-        await callback.answer(f"❌ {ticker} удалён", show_alert=True)
-        subs = await db.get_finance_subscriptions(callback.from_user.id)
-        if subs:
-            ticker_list = ", ".join(f"<code>{s['ticker']}</code>" for s in subs)
-            text = t(user_lang, "finance_menu", tickers=ticker_list)
-        else:
-            text = t(user_lang, "finance_empty")
-        await callback.message.edit_text(text, reply_markup=finance_menu(user_lang), parse_mode="HTML")
+            batch_items.append({
+                "title": title,
+                "source": item["source"],
+                "ticker": matched_ticker,
+                "summary": summary,
+                "impact": impact,
+                "link": item.get("link", ""),
+            })
+
+        if not batch_items:
+            await callback.message.edit_text(t(user_lang, "finance_all_seen"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
+            return
+
+        # Delete old news message
+        from .start import _delete_old_news_msg, _store_news_msg
+        user_id = callback.from_user.id
+        await _delete_old_news_msg(user_id, callback.message.chat.id, callback.bot)
+
+        # Format all news in one message
+        text = format_news_batch(batch_items, user_lang)
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+
+        msg = await callback.message.answer(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+        _store_news_msg(user_id, msg.message_id)
 
 
-# ── Receive ticker to add ──
+# ── Receive ticker/company name to add (text input) ──
 
 @router.message(F.text)
 async def finance_receive_ticker(message: Message, user_lang: str):
-    text = message.text.strip().upper()
+    raw = message.text.strip()
+    text = raw.upper()
 
-    # Skip commands
     if text.startswith("/"):
         return
 
-    # Skip if it's a known non-ticker text
     if text in ("ДА", "НЕТ", "YES", "NO", "ОК", "OK"):
         return
 
-    # Only process if it looks like a ticker (2-10 uppercase chars, no spaces)
-    if len(text) > 10 or " " in text or len(text) < 2:
-        await message.answer(
-            t(user_lang, "finance_invalid_ticker"),
-            reply_markup=finance_menu(user_lang),
-            parse_mode="HTML",
-        )
+    # Accept both short tickers (2-10 chars) and longer company names (up to 50 chars)
+    if len(raw) < 2 or len(raw) > 50:
         return
 
-    await db.add_finance_subscription(message.from_user.id, text, text)
-    await message.answer(
-        t(user_lang, "finance_added", ticker=text),
-        reply_markup=finance_menu(user_lang),
-        parse_mode="HTML",
-    )
+    # Use raw text for AI analysis (preserves case for company names like "ФосАгро")
+    ticker_for_ai = raw if len(raw) > 10 else text
+
+    # Check if already tracked globally
+    already_tracked = await db.has_tracked_asset(text)
+
+    await db.add_finance_subscription(message.from_user.id, text, raw)
+
+    from .start import _store_msg, _get_msg_id
+
+    if not already_tracked:
+        # Show analyzing message
+        analyzing_msg = await message.answer(t(user_lang, "finance_analyzing", ticker=raw), parse_mode="HTML")
+
+        from ..asset_analyzer import analyze_ticker
+        analysis = await analyze_ticker(raw)
+
+        if analysis:
+            kw = analysis.get("keywords", [])
+            meaningful_kw = [k for k in kw if k.upper() != text and len(k) > 2]
+
+            await db.save_tracked_asset(
+                ticker=text,
+                name=analysis.get("company_name", raw),
+                keywords=kw,
+                positive_triggers=analysis.get("positive_triggers", []),
+                negative_triggers=analysis.get("negative_triggers", []),
+                description=analysis.get("description", ""),
+            )
+
+            if len(meaningful_kw) >= 3:
+                result_text = t(user_lang, "finance_analysis_ok",
+                    ticker=text, name=analysis.get("company_name", raw),
+                    description=analysis.get("description", ""),
+                    kw_count=len(kw), pos_count=len(analysis.get("positive_triggers", [])),
+                    neg_count=len(analysis.get("negative_triggers", [])))
+            else:
+                result_text = t(user_lang, "finance_analysis_fallback", ticker=text)
+        else:
+            result_text = t(user_lang, "finance_analysis_fallback", ticker=text)
+
+        # Update the analyzing message with result
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="sub:tickers"))
+        try:
+            await analyzing_msg.edit_text(result_text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        except Exception:
+            pass
+    else:
+        old_id = _get_msg_id(message.from_user.id)
+        result_text = t(user_lang, "finance_added", ticker=text)
+        if old_id:
+            try:
+                await message.bot.edit_message_text(
+                    result_text, chat_id=message.chat.id, message_id=old_id,
+                    reply_markup=finance_menu(user_lang), parse_mode="HTML",
+                )
+                return
+            except Exception:
+                pass
+        msg = await message.answer(result_text, reply_markup=finance_menu(user_lang), parse_mode="HTML")
+        _store_msg(message.from_user.id, msg.message_id)
 
 
 # ── Keyboard ──

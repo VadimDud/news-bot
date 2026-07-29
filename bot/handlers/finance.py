@@ -151,7 +151,7 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
                 rm = kb.as_markup() if i == len(messages) - 1 else None
                 last_msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
                 if i < len(messages) - 1:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.3)
             if last_msg:
                 _store_news_msg(user_id, last_msg.message_id)
 

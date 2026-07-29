@@ -197,6 +197,7 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
 async def global_scan(
     news_items: list[dict],
     all_channels: list[dict],
+    skip_ai: bool = False,
 ) -> dict[int, list[dict]]:
     """Process all news against all user channels.
 
@@ -232,7 +233,7 @@ async def global_scan(
                 neg_triggers = asset.get("negative_triggers", [])
 
         sentiment, confidence = compute_sentiment(title, summary, asset, pos_triggers, neg_triggers)
-        if confidence == "low" or sentiment == "NEUTRAL":
+        if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL"):
             ai_sentiment = await stage2_hybrid(
                 title, summary, asset, pos_triggers, neg_triggers, confidence
             )

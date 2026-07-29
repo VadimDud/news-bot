@@ -549,11 +549,10 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
         return
 
     await callback.answer()
+    source_tags = ch.get("source_tags", [])
     await callback.message.edit_text(t(user_lang, "channel_scan_start", name=ch["name"]))
 
     async def _do_scan():
-        source_tags = ch.get("source_tags", [])
-        await callback.message.edit_text(t(user_lang, "scan_progress_rss"))
         news = await fetch_news(source_tags if source_tags else None)
         if not news:
             await callback.message.edit_text(
@@ -562,10 +561,7 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
             )
             return
 
-        await callback.message.edit_text(
-            t(user_lang, "scan_progress_analyze", count=len(news))
-        )
-        results = await global_scan(news, [ch])
+        results = await global_scan(news, [ch], skip_ai=True)
         matched = results.get(channel_id, [])
 
         new_items = []
@@ -580,10 +576,37 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
             )
             return
 
+        cn_items = []
+        n_items = []
+        dl_items = []
         for item in new_items:
-            await db.save_channel_news(channel_id, item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
-            await db.save_news(item["content_hash"], callback.from_user.id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
-            await db.log_news_delivery(callback.from_user.id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+            cn_items.append({
+                "channel_id": channel_id,
+                "content_hash": item["content_hash"],
+                "matched_keyword": item.get("matched_keyword", ""),
+                "ticker_hint": item.get("ticker_hint", ""),
+                "impact": item["impact"],
+            })
+            n_items.append({
+                "content_hash": item["content_hash"],
+                "user_id": callback.from_user.id,
+                "source": item["source"],
+                "title": item["title"],
+                "link": item.get("link", ""),
+                "ticker_hint": item.get("ticker_hint", ""),
+                "summary": item["summary"],
+                "impact": item["impact"],
+            })
+            dl_items.append({
+                "user_id": callback.from_user.id,
+                "ticker_hint": item.get("ticker_hint", ""),
+                "title": item["title"],
+                "source": item["source"],
+                "impact": item["impact"],
+            })
+        await db.save_channel_news_batch(cn_items)
+        await db.save_news_batch(n_items)
+        await db.log_news_delivery_batch(dl_items)
 
         messages = format_channel_news(ch["name"], new_items, user_lang)
 
@@ -596,7 +619,7 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
             if i == 0:
                 await db.save_pinned_news(callback.from_user.id, callback.message.chat.id, msg.message_id, channel_id)
             if i < len(messages) - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
 
     try:
         await asyncio.wait_for(_do_scan(), timeout=config.SCAN_TIMEOUT)
@@ -643,15 +666,42 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
         all_channels = await db.get_all_user_channels()
         results = await global_scan(news, all_channels)
 
-        total_new = 0
+        cn_items = []
+        n_items = []
+        dl_items = []
         for ch in channels:
             matched = results.get(ch["id"], [])
             for item in matched:
                 if not await db.is_channel_news_seen(ch["id"], item["content_hash"]):
-                    await db.save_channel_news(ch["id"], item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
-                    await db.save_news(item["content_hash"], user_id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
-                    await db.log_news_delivery(user_id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
-                    total_new += 1
+                    cn_items.append({
+                        "channel_id": ch["id"],
+                        "content_hash": item["content_hash"],
+                        "matched_keyword": item.get("matched_keyword", ""),
+                        "ticker_hint": item.get("ticker_hint", ""),
+                        "impact": item["impact"],
+                    })
+                    n_items.append({
+                        "content_hash": item["content_hash"],
+                        "user_id": user_id,
+                        "source": item["source"],
+                        "title": item["title"],
+                        "link": item.get("link", ""),
+                        "ticker_hint": item.get("ticker_hint", ""),
+                        "summary": item["summary"],
+                        "impact": item["impact"],
+                    })
+                    dl_items.append({
+                        "user_id": user_id,
+                        "ticker_hint": item.get("ticker_hint", ""),
+                        "title": item["title"],
+                        "source": item["source"],
+                        "impact": item["impact"],
+                    })
+        total_new = len(cn_items)
+        if cn_items:
+            await db.save_channel_news_batch(cn_items)
+            await db.save_news_batch(n_items)
+            await db.log_news_delivery_batch(dl_items)
 
         text = t(user_lang, "scan_progress_done", count=total_new)
         kb = _channels_menu_kb(user_lang, channels)

@@ -6,7 +6,6 @@ from . import database as db
 
 
 class LanguageMiddleware(BaseMiddleware):
-    """Attach user's language preference and subscription status to every event."""
 
     async def __call__(
         self,
@@ -14,11 +13,23 @@ class LanguageMiddleware(BaseMiddleware):
         event: Message | CallbackQuery,
         data: Dict[str, Any],
     ) -> Any:
-        user = event.from_user
-        if user:
-            lang = await db.get_language(user.id)
-            data["user_lang"] = lang
-            data["is_subscriber"] = await db.has_access(user.id)
+        event_user = event.from_user
+        if event_user:
+            user_data = await db.get_user(event_user.id)
+            if user_data:
+                data["user_lang"] = user_data.get("language", "ru")
+                until_str = user_data.get("access_until")
+                if until_str:
+                    import datetime
+                    try:
+                        data["is_subscriber"] = datetime.datetime.fromisoformat(until_str) > datetime.datetime.now()
+                    except (ValueError, TypeError):
+                        data["is_subscriber"] = False
+                else:
+                    data["is_subscriber"] = False
+            else:
+                data["user_lang"] = "ru"
+                data["is_subscriber"] = False
         else:
             data["user_lang"] = "ru"
             data["is_subscriber"] = False

@@ -278,7 +278,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         else:
             last_msg = await target.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
         if i < len(messages) - 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
     if last_msg:
         _store_news_msg(user_id, last_msg.message_id)
 

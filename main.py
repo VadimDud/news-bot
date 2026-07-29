@@ -13,7 +13,7 @@ from aiogram.client.telegram import TelegramAPIServer
 
 from bot import config
 from bot.database import (
-    init_db, get_due_deletions, remove_deletion,
+    init_db, close_db, get_due_deletions, remove_deletion,
     cleanup_old_news,
     get_users_expiring_soon, get_language,
     get_active_users_with_assets, get_all_user_channels,
@@ -23,6 +23,7 @@ from bot.database import (
     is_channel_news_seen, save_channel_news,
     cleanup_old_delivery_logs, cleanup_old_channel_news,
     save_scan_metrics, log_news_delivery,
+    save_news_batch, save_channel_news_batch, log_news_delivery_batch,
     get_all_tracked_assets,
 )
 from bot.finance import fetch_news
@@ -181,21 +182,38 @@ async def auto_scan_job(bot: Bot):
 
             messages = format_channel_news(channel["name"], new_items, lang)
 
-            # Save news to channel_news log
+            # Save news to channel_news log (batch)
+            cn_items = []
+            n_items = []
+            dl_items = []
             for item in new_items:
-                await save_channel_news(
-                    channel_id, item["content_hash"],
-                    item.get("matched_keyword", ""),
-                    item.get("ticker_hint", ""),
-                    item["impact"],
-                )
-                # Also save to legacy news table for backward compat
-                await save_news(
-                    item["content_hash"], uid, item["source"], item["title"],
-                    item.get("link", ""), item.get("ticker_hint", ""),
-                    item["summary"], item["impact"],
-                )
-                await log_news_delivery(uid, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+                cn_items.append({
+                    "channel_id": channel_id,
+                    "content_hash": item["content_hash"],
+                    "matched_keyword": item.get("matched_keyword", ""),
+                    "ticker_hint": item.get("ticker_hint", ""),
+                    "impact": item["impact"],
+                })
+                n_items.append({
+                    "content_hash": item["content_hash"],
+                    "user_id": uid,
+                    "source": item["source"],
+                    "title": item["title"],
+                    "link": item.get("link", ""),
+                    "ticker_hint": item.get("ticker_hint", ""),
+                    "summary": item["summary"],
+                    "impact": item["impact"],
+                })
+                dl_items.append({
+                    "user_id": uid,
+                    "ticker_hint": item.get("ticker_hint", ""),
+                    "title": item["title"],
+                    "source": item["source"],
+                    "impact": item["impact"],
+                })
+            await save_channel_news_batch(cn_items)
+            await save_news_batch(n_items)
+            await log_news_delivery_batch(dl_items)
 
             # Send/edit pinned message per channel
             pinned = await get_pinned_news_by_channel(channel_id)
@@ -229,7 +247,7 @@ async def auto_scan_job(bot: Bot):
                         logger.warning(f"Auto-scan: failed to send to {uid}: {e}")
                         break
                     if i < len(messages) - 1:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.3)
                 if sent_ok:
                     metrics["messages_sent"] += len(messages)
                 if messages:
@@ -304,6 +322,7 @@ async def main():
     finally:
         scheduler.shutdown(wait=False)
         await bot.session.close()
+        await close_db()
         logger.info("Bot stopped.")
 
 

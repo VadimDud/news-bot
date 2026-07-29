@@ -35,21 +35,18 @@ async def _call_deepseek(system_prompt: str, user_message: str,
         return None
     url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json={
-                "model": config.DEEPSEEK_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }, headers=headers)
-            if resp.status_code == 200:
-                return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    except Exception as e:
-        logger.warning(f"DeepSeek error: {e}")
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json={
+            "model": config.DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }, headers=headers)
+        if resp.status_code == 200:
+            return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
     return None
 
 
@@ -62,18 +59,15 @@ async def _call_gemini(system_prompt: str, user_message: str,
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
     headers = {"Content-Type": "application/json", "X-goog-api-key": config.GEMINI_API_KEY}
     prompt = f"{system_prompt}\n\n{user_message}"
-    try:
-        proxy = config.HTTP_PROXY or None
-        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
-            resp = await client.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
-            }, headers=headers)
-            if resp.status_code == 200:
-                parts = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                return parts[0].get("text", "") if parts else None
-    except Exception as e:
-        logger.warning(f"Gemini error: {e}")
+    proxy = config.HTTP_PROXY or None
+    async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+        resp = await client.post(url, json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+        }, headers=headers)
+        if resp.status_code == 200:
+            parts = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            return parts[0].get("text", "") if parts else None
     return None
 
 
@@ -84,30 +78,27 @@ async def _call_dashscope(system_prompt: str, user_message: str,
     if not config.DASHSCOPE_API_KEY:
         return None
     base_url = config.DASHSCOPE_BASE_URL.rstrip("/")
-    try:
-        proxy = config.HTTP_PROXY or None
-        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
-            resp = await client.post(
-                f"{base_url}/services/aigc/text-generation/generation",
-                headers={
-                    "Authorization": f"Bearer {config.DASHSCOPE_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": config.DASHSCOPE_MODEL,
-                    "input": {"messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ]},
-                    "parameters": {"max_tokens": max_tokens, "temperature": temperature},
-                },
-            )
-            if resp.status_code == 200:
-                choices = resp.json().get("output", {}).get("choices", [])
-                if choices:
-                    return choices[0].get("message", {}).get("content", "")
-    except Exception as e:
-        logger.warning(f"DashScope error: {e}")
+    proxy = config.HTTP_PROXY or None
+    async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+        resp = await client.post(
+            f"{base_url}/services/aigc/text-generation/generation",
+            headers={
+                "Authorization": f"Bearer {config.DASHSCOPE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": config.DASHSCOPE_MODEL,
+                "input": {"messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ]},
+                "parameters": {"max_tokens": max_tokens, "temperature": temperature},
+            },
+        )
+        if resp.status_code == 200:
+            choices = resp.json().get("output", {}).get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "")
     return None
 
 

@@ -35,7 +35,8 @@ async def fetch_finance_news() -> list[dict]:
                 if resp.status_code != 200:
                     return []
                 if feed_info["type"] == "rss":
-                    feed = feedparser.parse(resp.text)
+                    loop = asyncio.get_event_loop()
+                    feed = await loop.run_in_executor(None, feedparser.parse, resp.text)
                     return [
                         {
                             "title": e.get("title", ""),
@@ -114,7 +115,8 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
                 if resp.status_code != 200:
                     return []
                 if feed_info["type"] == "rss":
-                    feed = feedparser.parse(resp.text)
+                    loop = asyncio.get_event_loop()
+                    feed = await loop.run_in_executor(None, feedparser.parse, resp.text)
                     return [
                         {
                             "title": e.get("title", ""),

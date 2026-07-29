@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from aiogram import Router, F
 from aiogram.filters import BaseFilter
@@ -18,10 +19,12 @@ from ..config import ADMIN_ID
 from ..finance import fetch_finance_news
 from ..news_processor import (
     stage1_filter, compute_sentiment, stage2_hybrid,
-    format_news_batch, compute_hash,
+    format_news_batch, compute_hash, MAX_AI_CALLS_PER_SCAN,
 )
 
 router = Router()
+
+logger = logging.getLogger(__name__)
 
 TRIAL_DAYS = 30
 
@@ -216,6 +219,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         )
 
     batch_items = []
+    ai_calls_count = 0
 
     for item in news[:20]:
         title = item["title"]
@@ -232,10 +236,11 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
 
         impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
-        if confidence == "low" or impact == "NEUTRAL":
+        if (confidence == "low" or impact == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
             ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
             if ai_impact:
                 impact = ai_impact
+            ai_calls_count += 1
 
         summary = item["summary"][:200] if item["summary"] else title[:200]
 
@@ -298,6 +303,14 @@ async def sub_news(callback: CallbackQuery, user_lang: str):
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
         await callback.message.edit_text(t(user_lang, "scan_timeout"), reply_markup=kb.as_markup())
+    except Exception as e:
+        logger.warning(f"News scan failed for user {user_id}: {e}")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+        try:
+            await callback.message.edit_text(t(user_lang, "scan_timeout"), reply_markup=kb.as_markup())
+        except Exception:
+            pass
 
 
 # ── Subscriber menu callbacks ──
@@ -541,6 +554,12 @@ async def text_button_handler(message: Message, user_lang: str):
             await asyncio.wait_for(_scan_and_show_news(message, user_id, user_lang), timeout=config.SCAN_TIMEOUT)
         except asyncio.TimeoutError:
             await message.answer(t(user_lang, "scan_timeout"))
+        except Exception as e:
+            logger.warning(f"News scan failed for user {user_id}: {e}")
+            try:
+                await message.answer(t(user_lang, "scan_timeout"))
+            except Exception:
+                pass
 
     elif action == "ch:list":
         if not await db.has_access(user_id):

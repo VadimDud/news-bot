@@ -22,6 +22,14 @@ docker compose up -d
 
 No linter, formatter, or type checker is configured. No CI workflows exist.
 
+## Deployment
+
+After every code change, always push to GitHub:
+
+```bash
+git add -A && git commit -m "<message>" && git push origin master
+```
+
 ## Architecture
 
 - `main.py` — entry point, APScheduler setup, background jobs (cleanup, expiry reminders, auto-scan)

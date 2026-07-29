@@ -1,6 +1,7 @@
 """Channel management handler — create, list, edit, delete, scan topic channels."""
 
 import asyncio
+import logging
 
 from aiogram import Router, F
 from aiogram.filters import BaseFilter
@@ -19,6 +20,8 @@ from ..topic_analyzer import analyze_topic
 from .start import _store_msg, _get_text_buttons
 
 router = Router()
+
+logger = logging.getLogger(__name__)
 
 # Channel creation state machine: {user_id: {"step": ..., "name": ..., "keywords": ..., "ai_keywords": ..., "ticker": ..., "source_tags": [...]}}
 _channel_state: dict[int, dict] = {}
@@ -630,6 +633,17 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
             t(user_lang, "scan_timeout"),
             reply_markup=kb.as_markup(),
         )
+    except Exception as e:
+        logger.warning(f"Channel scan failed for channel {channel_id}: {e}")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data=f"ch:view:{channel_id}"))
+        try:
+            await callback.message.edit_text(
+                t(user_lang, "scan_timeout"),
+                reply_markup=kb.as_markup(),
+            )
+        except Exception:
+            pass
 
 
 # ── Scan all channels ──
@@ -715,3 +729,13 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
             t(user_lang, "scan_timeout"),
             reply_markup=kb,
         )
+    except Exception as e:
+        logger.warning(f"Channel scan all failed for user {user_id}: {e}")
+        kb = _channels_menu_kb(user_lang, channels)
+        try:
+            await callback.message.edit_text(
+                t(user_lang, "scan_timeout"),
+                reply_markup=kb,
+            )
+        except Exception:
+            pass

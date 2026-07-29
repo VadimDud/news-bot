@@ -1,6 +1,7 @@
 """Finance news handler — subscriptions, monitoring, analysis."""
 
 import asyncio
+import logging
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -19,10 +20,13 @@ from ..news_processor import (
     stage2_hybrid,
     format_news_batch,
     compute_hash,
+    MAX_AI_CALLS_PER_SCAN,
 )
 from .start import _store_msg, _store_news_msg, _delete_old_news_msg, _get_msg_id, _feedback_state, _get_text_buttons
 
 router = Router()
+
+logger = logging.getLogger(__name__)
 
 
 # ── /finance command ──
@@ -99,6 +103,7 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
             )
 
             batch_items = []
+            ai_calls_count = 0
 
             for item in news[:20]:
                 title = item["title"]
@@ -115,10 +120,11 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
 
                 impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
-                if confidence == "low" or impact == "NEUTRAL":
+                if (confidence == "low" or impact == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
                     ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
                     if ai_impact:
                         impact = ai_impact
+                    ai_calls_count += 1
 
                 summary = item["summary"][:200] if item["summary"] else title[:200]
 
@@ -163,6 +169,16 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
                 reply_markup=finance_menu(user_lang),
                 parse_mode="HTML",
             )
+        except Exception as e:
+            logger.warning(f"Finance scan failed for user {user_id}: {e}")
+            try:
+                await callback.message.edit_text(
+                    t(user_lang, "scan_timeout"),
+                    reply_markup=finance_menu(user_lang),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
 
 
 # ── Receive ticker/company name to add (text input) ──

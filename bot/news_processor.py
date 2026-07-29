@@ -17,6 +17,9 @@ from .database import get_tracked_asset
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of AI calls per scan to prevent blocking
+MAX_AI_CALLS_PER_SCAN = 5
+
 
 # ── MinHash / dedup ──
 
@@ -208,6 +211,7 @@ async def global_scan(
         return {}
 
     results: dict[int, list[dict]] = {}
+    ai_calls_count = 0
 
     for item in news_items[:20]:
         title = item["title"]
@@ -233,12 +237,13 @@ async def global_scan(
                 neg_triggers = asset.get("negative_triggers", [])
 
         sentiment, confidence = compute_sentiment(title, summary, asset, pos_triggers, neg_triggers)
-        if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL"):
+        if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
             ai_sentiment = await stage2_hybrid(
                 title, summary, asset, pos_triggers, neg_triggers, confidence
             )
             if ai_sentiment:
                 sentiment = ai_sentiment
+            ai_calls_count += 1
 
         impact = sentiment
 

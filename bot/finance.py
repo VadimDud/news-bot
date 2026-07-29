@@ -1,37 +1,23 @@
 """Financial news analysis module."""
 
 import logging
+import re
 import httpx
 import feedparser
 from datetime import datetime
 
 from . import config
 from .retry_utils import async_retry
+from .sources import get_sources_by_tags
 
 logger = logging.getLogger(__name__)
 
-# RSS feeds for Russian financial news
+# Legacy RSS feeds (kept for backward compat)
 FINANCE_FEEDS = [
-    {
-        "name": "Коммерсантъ",
-        "url": "https://www.kommersant.ru/RSS/news.xml",
-        "type": "rss",
-    },
-    {
-        "name": "Интерфакс",
-        "url": "https://www.interfax.ru/rss.asp",
-        "type": "rss",
-    },
-    {
-        "name": "ТАСС",
-        "url": "https://tass.ru/rss/v2.xml",
-        "type": "rss",
-    },
-    {
-        "name": "Ведомости",
-        "url": "https://www.vedomosti.ru/rss/news.xml",
-        "type": "rss",
-    },
+    {"name": "Коммерсантъ", "url": "https://www.kommersant.ru/RSS/news.xml", "type": "rss"},
+    {"name": "Интерфакс", "url": "https://www.interfax.ru/rss.asp", "type": "rss"},
+    {"name": "ТАСС", "url": "https://tass.ru/rss/v2.xml", "type": "rss"},
+    {"name": "Ведомости", "url": "https://www.vedomosti.ru/rss/news.xml", "type": "rss"},
 ]
 
 # Keywords that indicate financial/market news
@@ -96,6 +82,94 @@ async def fetch_finance_news() -> list[dict]:
         if key not in seen:
             seen.add(key)
             unique.append(item)
+
+    return unique
+
+
+# Cache for fetch_news results: {frozenset(source_tags): (timestamp, news)}
+_fetch_cache: dict[frozenset, tuple[float, list[dict]]] = {}
+_FETCH_CACHE_TTL = 300  # 5 minutes
+
+
+@async_retry(max_retries=3, base_delay=2.0)
+async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
+    """Fetch news from sources matching the given tags.
+
+    Args:
+        source_tags: List of category tags (e.g. ["finance", "macro"]).
+                     None or empty = fetch from all sources.
+
+    Returns:
+        Deduplicated list of news dicts.
+    """
+    import time
+    cache_key = frozenset(source_tags or [])
+    now = time.time()
+
+    # Check cache
+    if cache_key in _fetch_cache:
+        cached_time, cached_news = _fetch_cache[cache_key]
+        if now - cached_time < _FETCH_CACHE_TTL:
+            logger.info(f"fetch_news: cache hit for {list(cache_key) or 'all'} ({len(cached_news)} items)")
+            return cached_news
+
+    sources = get_sources_by_tags(source_tags)
+    if not sources:
+        sources = get_sources_by_tags([])
+
+    all_news = []
+    for feed_info in sources:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(feed_info["url"], follow_redirects=True)
+                if resp.status_code != 200:
+                    continue
+
+                if feed_info["type"] == "rss":
+                    feed = feedparser.parse(resp.text)
+                    for entry in feed.entries[:30]:
+                        title = entry.get("title", "")
+                        summary = entry.get("summary", "")
+                        link = entry.get("link", "")
+                        all_news.append({
+                            "title": title,
+                            "summary": _clean_html(summary)[:300],
+                            "link": link,
+                            "source": feed_info["name"],
+                            "source_tag": feed_info.get("tag", ""),
+                            "published": entry.get("published", ""),
+                        })
+                elif feed_info["type"] == "json":
+                    data = resp.json()
+                    items = data.get("items", data.get("news", []))
+                    for item in items[:30]:
+                        title = item.get("title", "")
+                        desc = item.get("desc", item.get("description", ""))
+                        link = item.get("url", item.get("link", ""))
+                        all_news.append({
+                            "title": title,
+                            "summary": _clean_html(desc)[:300],
+                            "link": link,
+                            "source": feed_info["name"],
+                            "source_tag": feed_info.get("tag", ""),
+                            "published": item.get("publishDate", ""),
+                        })
+        except Exception as e:
+            logger.warning(f"Failed to fetch {feed_info['name']}: {e}")
+            continue
+
+    # Deduplicate by title
+    seen = set()
+    unique = []
+    for item in all_news:
+        key = item["title"].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    # Update cache
+    _fetch_cache[cache_key] = (now, unique)
+    logger.info(f"fetch_news: fetched {len(unique)} unique items from {len(sources)} sources (tags: {list(cache_key) or 'all'})")
 
     return unique
 

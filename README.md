@@ -1,16 +1,18 @@
-# Finance News Bot
+# Tech News Bot
 
-Telegram-бот для отслеживания финансовых новостей с AI-анализом тональности.
+Telegram-бот для создания тематических лент новостей с AI-анализом.
 
 ## Возможности
 
-- Мониторинг 4 новостных источников: Коммерсантъ, Интерфакс, ТАСС, Ведомости
-- Автоматический скан каждые 30 минут (настраивается)
-- Фильтрация по тикерам: SBER, GAZP, LKOH, GMKN и др.
-- Анализ тональности через DeepSeek AI (позитив / негатив / нейтрально)
-- Edit-in-place — одно сообщение обновляется без спама
-- 30-дневный бесплатный период
-- Поддержка русского и английского языков
+- **Тематические ленты** — создавайте каналы по темам (финансы, IT, крипта, энергетика и др.)
+- **Умные ключевые слова** — бот ищет новости по вашим ключевым словам
+- **AI-расширение** — DeepSeek/Gemini/DashScope предлагают дополнительные ключевые слова
+- **Динамические источники** — 9 категорий RSS-лент (финансы, макро, сырьё, IT, крипта, политика, рынки, наука, недвижимость)
+- **Автоматический скан** — фоновый скан каждые 30 минут (настраивается)
+- **Edit-in-place** — одно сообщение обновляется без спама
+- **Анализ тональности** — AI определяет позитив/негатив/нейтрально
+- **Поддержка ru/en** — интернационализация, переключение языка
+- **Админ-панель** — статистика, регистрации, рассылка
 
 ## Архитектура
 
@@ -19,18 +21,22 @@ main.py                    — точка входа, APScheduler, фоновы�
 bot/
   config.py                — конфигурация из .env
   database.py              — SQLite (aiosqlite), все запросы
-  finance.py               — RSS-парсер, источники новостей
-  news_processor.py        — 3-стадийный пайплайн: фильтр → sentiment → AI
-  asset_analyzer.py        — AI-анализ тикеров (DeepSeek/Gemini)
-  retry_utils.py           — async retry с exponential backoff
+  sources.py               — каталог RSS-источников по категориям
+  finance.py               — RSS-парсер с кэшированием
+  news_processor.py        — 4-стадийный пайплайн: фильтр → sentiment → dedup → распределение
+  topic_analyzer.py        — AI-анализ тем для расширения ключевых слов
+  asset_analyzer.py        — AI-анализ тикеров
   rate_limiter.py          — per-user rate limiting
+  retry_utils.py           — async retry с exponential backoff
   scheduler.py             — APScheduler integration
   i18n.py                  — интернационализация (ru/en)
   keyboards.py             — inline-клавиатуры
   middlewares.py           — language detection middleware
+  translator.py            — перевод текста через OpenAI
   handlers/
     start.py               — /start, главное меню, навигация
-    finance.py             — добавление/удаление тикеров
+    channels.py            — создание/управление лентами, сканирование
+    finance.py             — добавление/удаление тикеров (legacy)
     admin.py               — админ-панель
     language.py            — переключение языка
 ```
@@ -53,15 +59,27 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Обязательные переменные:
-- `BOT_TOKEN` — токен от @BotFather
-- `ADMIN_ID` — ваш Telegram ID (узнать через @userinfobot)
+### Обязательные переменные
 
-Опциональные:
-- `DEEPSEEK_API_KEY` — API-ключ DeepSeek (для AI-анализа)
-- `GEMINI_API_KEY` — API-ключ Gemini (фолбэк)
-- `HTTP_PROXY` — прокси для Telegram API
-- `AUTO_SCAN_INTERVAL` — интервал скана в секундах (по умолчанию 1800)
+| Переменная | Описание |
+|---|---|
+| `BOT_TOKEN` | Токен бота от @BotFather |
+| `ADMIN_ID` | Ваш Telegram ID (узнать через @userinfobot) |
+
+### Опциональные переменные
+
+| Переменная | Описание |
+|---|---|
+| `DEEPSEEK_API_KEY` | API-ключ DeepSeek (AI-анализ, основной) |
+| `DEEPSEEK_BASE_URL` | URL API DeepSeek |
+| `DEEPSEEK_MODEL` | Модель DeepSeek |
+| `GEMINI_API_KEY` | API-ключ Gemini (fallback) |
+| `GEMINI_MODEL` | Модель Gemini |
+| `DASHSCOPE_API_KEY` | API-ключ DashScope/Qwen (fallback) |
+| `DASHSCOPE_BASE_URL` | URL API DashScope |
+| `DASHSCOPE_MODEL` | Модель DashScope |
+| `HTTP_PROXY` | Прокси для Telegram API |
+| `AUTO_SCAN_INTERVAL` | Интервал скана в секундах (по умолчанию 1800) |
 
 ## Запуск
 
@@ -72,23 +90,33 @@ python main.py
 ## Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d
+```
+
+## Тесты
+
+```bash
+pip install pytest-asyncio
+pytest tests/ -q
 ```
 
 ## Использование
 
 1. Отправьте `/start` в бот
 2. Нажмите «Попробовать бесплатно» (30 дней)
-3. Добавьте тикеры: отправьте `SBER`, `GAZP` и др.
-4. Нажмите «Новости» для получения отчёта
-5. Бот обновляет сообщение каждые 30 минут
+3. Создайте ленту: нажмите «📡 Мои ленты» → «➕ Создать ленту»
+4. Введите название (например, «Макроэкономика»)
+5. Введите ключевые слова через запятую (например, «инфляция, ключевая ставка, ЦБ»)
+6. Введите тикер или пропустите
+7. Выберите категории источников (или «Все»)
+8. Нажмите «🔍 Сканировать» для ручного обновления
 
 ## Технологии
 
-- Python 3.11+
+- Python 3.14+
 - aiogram 3.30 — Telegram Bot API
 - aiosqlite — асинхронный SQLite
 - APScheduler — планировщик задач
-- DeepSeek AI — анализ тональности
+- DeepSeek/Gemini/DashScope — AI-анализ
 - httpx — асинхронные HTTP-запросы
 - feedparser — парсинг RSS

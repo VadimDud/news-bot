@@ -292,7 +292,7 @@ class TestCallbackParsing:
 class TestI18n:
     def test_ru_strings_present(self):
         required_keys = [
-            "welcome", "finance_menu", "finance_empty", "finance_add_ask",
+            "welcome_guest", "welcome_sub", "finance_menu", "finance_empty", "finance_add_ask",
             "finance_added", "finance_invalid_ticker", "finance_remove_ask",
             "finance_list", "finance_scan_done", "finance_no_news",
             "finance_all_seen", "admin_welcome", "admin_not_admin",
@@ -303,7 +303,7 @@ class TestI18n:
 
     def test_en_strings_present(self):
         required_keys = [
-            "welcome", "finance_menu", "finance_empty", "finance_add_ask",
+            "welcome_guest", "welcome_sub", "finance_menu", "finance_empty", "finance_add_ask",
             "finance_added", "finance_invalid_ticker", "finance_remove_ask",
             "finance_list", "finance_scan_done", "finance_no_news",
             "finance_all_seen", "admin_welcome", "admin_not_admin",
@@ -315,7 +315,7 @@ class TestI18n:
     def test_t_function_with_kwargs(self):
         result = t("ru", "finance_added", ticker="SBER")
         assert "SBER" in result
-        assert "добавлена" in result
+        assert "добавлен" in result
 
     def test_t_function_missing_key_returns_key(self):
         result = t("ru", "nonexistent_key")
@@ -597,18 +597,28 @@ class TestNewsTable:
 class TestNewsProcessor:
     def test_stage1_filter_finance_relevant(self):
         from bot.news_processor import stage1_filter
-        relevant, ticker = stage1_filter("Сбербанк снизил ставку по кредитам", "Банк понизил ставки")
+        assets = [
+            {"ticker": "SBER", "keywords": ["Сбербанк", "SBER", "сбер"]},
+            {"ticker": "GAZP", "keywords": ["Газпром", "GAZP", "газ"]},
+        ]
+        relevant, ticker, _ = stage1_filter("Сбербанк снизил ставку по кредитам", "Банк понизил ставки", assets)
         assert relevant is True
         assert ticker == "SBER"
 
     def test_stage1_filter_irrelevant(self):
         from bot.news_processor import stage1_filter
-        relevant, ticker = stage1_filter("Погода в Москве завтра", "Ожидается дождь")
+        assets = [
+            {"ticker": "SBER", "keywords": ["Сбербанк", "SBER"]},
+        ]
+        relevant, ticker, _ = stage1_filter("Погода в Москве завтра", "Ожидается дождь", assets)
         assert relevant is False
 
     def test_stage1_filter_macro(self):
         from bot.news_processor import stage1_filter
-        relevant, ticker = stage1_filter("ЦБ России повысил ключевую ставку", "Решение о ставке")
+        assets = [
+            {"ticker": "MACRO", "keywords": ["ЦБ", "ключевая ставка", "инфляция"]},
+        ]
+        relevant, ticker, _ = stage1_filter("ЦБ России повысил ключевую ставку", "Решение о ставке", assets)
         assert relevant is True
         assert ticker == "MACRO"
 
@@ -628,9 +638,14 @@ class TestNewsProcessor:
         assert "POSITIVE" in alert
         assert "🟢" in alert
 
-    def test_stage2_fallback(self):
-        from bot.news_processor import stage2_fallback
-        result = stage2_fallback("Дефолт компании XYZ")
-        assert result["impact"] == "NEGATIVE"
-        result = stage2_fallback("Дивиденды Газпрома выросли")
-        assert result["impact"] == "POSITIVE"
+    def test_compute_sentiment(self):
+        from bot.news_processor import compute_sentiment
+        asset = {
+            "ticker": "SBER",
+            "positive_triggers": ["рост", "дивиденды", "прибыль"],
+            "negative_triggers": ["дефолт", "падение", "убыток"],
+        }
+        sentiment, confidence = compute_sentiment("Дефолт компании XYZ", "", asset)
+        assert sentiment == "NEGATIVE"
+        sentiment, confidence = compute_sentiment("Дивиденды Газпрома выросли", "", asset)
+        assert sentiment == "POSITIVE"

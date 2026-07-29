@@ -1,8 +1,9 @@
-"""3-stage news processing pipeline (updated):
+"""4-stage news processing pipeline (universal channels):
 
-   1. Quick Python filter: keywords from tracked_assets table (0 tokens)
+   1. Quick Python filter: keywords from user_channels table (0 tokens)
    2. Sentiment by trigger counting (0 tokens) — hybrid AI for ambiguous cases
-   3. SQLite storage (news table)
+   3. Global dedup (MinHash)
+   4. Distribution to matched channels
 """
 
 import hashlib
@@ -19,52 +20,48 @@ from .retry_utils import async_retry
 logger = logging.getLogger(__name__)
 
 
+# ── MinHash / dedup ──
+
 def _shingle(text: str, n: int = 3):
-    """Yield n-character shingles from text."""
     for i in range(len(text) - n + 1):
         yield text[i:i+n]
 
 
 def compute_minhash(text: str) -> list:
-    """Compute MinHash signature (4 ints) using 3-char shingles and 4 seeds."""
     text = text.lower().strip()
     seeds = [b'\x01', b'\x02', b'\x03', b'\x04']
     max_hash = (1 << 64) - 1
     min_hashes = [max_hash] * 4
-
     for shingle in _shingle(text):
         for i, seed in enumerate(seeds):
             h = hashlib.sha256(seed + shingle.encode()).digest()[:8]
             val = struct.unpack('>Q', h)[0]
             if val < min_hashes[i]:
                 min_hashes[i] = val
-
     if min_hashes[0] == max_hash:
         return [0] * 4
     return min_hashes
 
 
 def compute_hash(text: str) -> str:
-    """Return a hex string representation of the MinHash signature."""
     sig = compute_minhash(text)
     return ''.join(f'{i:016x}' for i in sig)
 
 
 def is_similar(hash1: str, hash2: str, threshold: float = 0.75) -> bool:
-    """Compare two MinHash hex signatures and return True if Jaccard similarity >= threshold."""
     sig1 = [int(hash1[i:i+16], 16) for i in range(0, 64, 16)]
     sig2 = [int(hash2[i:i+16], 16) for i in range(0, 64, 16)]
     equal = sum(1 for a, b in zip(sig1, sig2) if a == b)
     return (equal / 4.0) >= threshold
 
 
+# ── Text helpers ──
+
 def _normalize(text: str) -> str:
-    """Lowercase and strip for matching."""
     return text.lower().strip()
 
 
 def _simple_stem(word: str) -> str:
-    """Very basic Russian stemming — strip common endings for matching."""
     word = word.lower()
     for ending in ("ого", "ему", "ать", "ить", "еть", "ятся", "ются", "тся",
                     "ий", "ый", "ой", "ая", "яя", "ое", "ее", "ов", "ев",
@@ -74,52 +71,78 @@ def _simple_stem(word: str) -> str:
     return word
 
 
-def stage1_filter(title: str, summary: str, tracked_assets: list[dict]) -> tuple[bool, str | None, dict | None]:
-    """Filter news against tracked_assets keywords.
+# ── Stage 1: keyword matching against user channels ──
 
-    Returns (is_relevant, matched_ticker_or_None, matched_asset_or_None).
+def match_news_to_channels(
+    title: str,
+    summary: str,
+    all_channels: list[dict],
+) -> list[dict]:
+    """Check a single news item against all user channels.
+
+    Returns list of matches: [{channel_id, user_id, language, ticker, matched_keyword}]
     """
     combined = _normalize(title + " " + summary)
-    combined_stems = _simple_stem(combined)
+    combined_stems = {_simple_stem(combined)}
+    matches = []
 
-    for asset in tracked_assets:
-        keywords = asset.get("keywords", [])
-        ticker = asset["ticker"]
-
+    for ch in all_channels:
+        keywords = ch.get("keywords", [])
         for kw in keywords:
             kw_lower = _normalize(kw)
             if len(kw_lower) < 2:
                 continue
-            # Check exact or stemmed match
             if kw_lower in combined or _simple_stem(kw_lower) in combined_stems:
-                logger.info(f"Stage1 MATCH: {title[:50]} -> {ticker} (keyword: {kw})")
+                matches.append({
+                    "channel_id": ch["id"],
+                    "user_id": ch["user_id"],
+                    "language": ch.get("language", "ru"),
+                    "ticker": ch.get("ticker"),
+                    "matched_keyword": kw,
+                })
+                break  # one match per channel is enough
+
+    return matches
+
+
+def stage1_filter(title: str, summary: str, tracked_assets: list[dict]) -> tuple[bool, str | None, dict | None]:
+    """Legacy filter against tracked_assets (kept for backward compat).
+
+    Returns (is_relevant, matched_ticker_or_None, matched_asset_or_None).
+    """
+    combined = _normalize(title + " " + summary)
+    combined_stems = {_simple_stem(combined)}
+
+    for asset in tracked_assets:
+        keywords = asset.get("keywords", [])
+        ticker = asset["ticker"]
+        for kw in keywords:
+            kw_lower = _normalize(kw)
+            if len(kw_lower) < 2:
+                continue
+            if kw_lower in combined or _simple_stem(kw_lower) in combined_stems:
                 return True, ticker, asset
 
-    # No keyword match — skip
-    logger.debug(f"Stage1 SKIP: {title[:60]}")
     return False, None, None
 
 
-def compute_sentiment(title: str, summary: str, asset: dict) -> tuple[str, str]:
+# ── Stage 2: sentiment analysis ──
+
+def compute_sentiment(title: str, summary: str, asset: dict | None = None,
+                      positive_triggers: list[str] | None = None,
+                      negative_triggers: list[str] | None = None) -> tuple[str, str]:
     """Compute sentiment by counting positive/negative triggers in text.
 
     Returns (sentiment, confidence) where confidence is 'high' or 'low'.
-    High confidence: >=3 triggers, all same polarity.
-    Low confidence: all other cases.
     """
     combined = _normalize(title + " " + summary)
-    pos_count = 0
-    neg_count = 0
 
-    for trigger in asset.get("positive_triggers", []):
-        if _normalize(trigger) in combined:
-            pos_count += 1
+    pos_triggers = positive_triggers or (asset.get("positive_triggers", []) if asset else [])
+    neg_triggers = negative_triggers or (asset.get("negative_triggers", []) if asset else [])
 
-    for trigger in asset.get("negative_triggers", []):
-        if _normalize(trigger) in combined:
-            neg_count += 1
+    pos_count = sum(1 for t in pos_triggers if _normalize(t) in combined)
+    neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined)
 
-    total = pos_count + neg_count
     if pos_count > neg_count:
         sentiment = "POSITIVE"
         confidence = "high" if pos_count >= 3 and neg_count == 0 else "low"
@@ -133,22 +156,25 @@ def compute_sentiment(title: str, summary: str, asset: dict) -> tuple[str, str]:
     return sentiment, confidence
 
 
-async def stage2_hybrid(title: str, summary: str, asset: dict, trigger_confidence: str = "low") -> str | None:
+async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
+                        positive_triggers: list[str] | None = None,
+                        negative_triggers: list[str] | None = None,
+                        trigger_confidence: str = "low") -> str | None:
     """Hybrid AI fallback: called for ambiguous or low-confidence cases.
 
     Returns sentiment string or None if AI unavailable.
     """
-    pos_count = sum(1 for t in asset.get("positive_triggers", []) if _normalize(t) in _normalize(title + " " + summary))
-    neg_count = sum(1 for t in asset.get("negative_triggers", []) if _normalize(t) in _normalize(title + " " + summary))
+    combined = _normalize(title + " " + summary)
+    pos_triggers = positive_triggers or (asset.get("positive_triggers", []) if asset else [])
+    neg_triggers = negative_triggers or (asset.get("negative_triggers", []) if asset else [])
 
-    # Call AI when:
-    # 1. Both positive and negative triggers found (ambiguous)
-    # 2. Low confidence (few triggers or mixed polarity)
-    # 3. Zero triggers (no signal from triggers at all)
+    pos_count = sum(1 for t in pos_triggers if _normalize(t) in combined)
+    neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined)
+
     should_call_ai = (
-        (pos_count > 0 and neg_count > 0)  # ambiguous
-        or trigger_confidence == "low"       # low confidence
-        or (pos_count == 0 and neg_count == 0)  # no trigger signal
+        (pos_count > 0 and neg_count > 0)
+        or trigger_confidence == "low"
+        or (pos_count == 0 and neg_count == 0)
     )
 
     if not should_call_ai:
@@ -164,13 +190,13 @@ async def stage2_hybrid(title: str, summary: str, asset: dict, trigger_confidenc
 
 
 @async_retry(max_retries=2, base_delay=1.0)
-async def _call_deepseek_sentiment(title: str, summary: str, asset: dict) -> str | None:
-    """Quick DeepSeek call for ambiguous sentiment."""
+async def _call_deepseek_sentiment(title: str, summary: str, asset: dict | None = None) -> str | None:
     if not config.DEEPSEEK_API_KEY:
         return None
+    label = asset.get("name", asset["ticker"]) if asset else "тема"
     prompt = (
         f"Новость: {title}\nСуть: {summary[:200]}\n\n"
-        f"Актив: {asset.get('company_name', asset['ticker'])}\n\n"
+        f"Актив/тема: {label}\n\n"
         f"Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. "
         f"Ответь одним словом."
     )
@@ -200,13 +226,13 @@ async def _call_deepseek_sentiment(title: str, summary: str, asset: dict) -> str
 
 
 @async_retry(max_retries=2, base_delay=1.0)
-async def _call_gemini_sentiment(title: str, summary: str, asset: dict) -> str | None:
-    """Quick Gemini call for ambiguous sentiment."""
+async def _call_gemini_sentiment(title: str, summary: str, asset: dict | None = None) -> str | None:
     if not config.GEMINI_API_KEY:
         return None
+    label = asset.get("name", asset["ticker"]) if asset else "тема"
     prompt = (
         f"Новость: {title}\nСуть: {summary[:200]}\n\n"
-        f"Актив: {asset.get('company_name', asset['ticker'])}\n\n"
+        f"Актив/тема: {label}\n\n"
         f"Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. "
         f"Ответь одним словом."
     )
@@ -232,14 +258,14 @@ async def _call_gemini_sentiment(title: str, summary: str, asset: dict) -> str |
 
 
 @async_retry(max_retries=2, base_delay=1.0)
-async def _call_dashscope_sentiment(title: str, summary: str, asset: dict) -> str | None:
-    """Quick DashScope call for ambiguous sentiment."""
+async def _call_dashscope_sentiment(title: str, summary: str, asset: dict | None = None) -> str | None:
     if not config.DASHSCOPE_API_KEY:
         return None
     base_url = config.DASHSCOPE_BASE_URL.rstrip("/")
+    label = asset.get("name", asset["ticker"]) if asset else "тема"
     prompt = (
         f"Новость: {title}\nСуть: {summary[:200]}\n\n"
-        f"Актив: {asset.get('company_name', asset['ticker'])}\n\n"
+        f"Актив/тема: {label}\n\n"
         f"Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. "
         f"Ответь одним словом."
     )
@@ -265,11 +291,77 @@ async def _call_dashscope_sentiment(title: str, summary: str, asset: dict) -> st
     return None
 
 
-def split_news_text(text: str, max_len: int = 4000) -> list[str]:
-    """Split text into chunks for Telegram (4096 char limit).
+# ── Global scan: process all news against all channels ──
 
-    Splits at numbered item boundaries (1. 2. etc), never mid-item.
+async def global_scan(
+    news_items: list[dict],
+    all_channels: list[dict],
+) -> dict[int, list[dict]]:
+    """Process all news against all user channels.
+
+    Returns {channel_id: [matched_news_item_with_sentiment]}.
+    Each matched item: {title, source, link, summary, impact, matched_keyword, ticker_hint}
     """
+    if not all_channels:
+        return {}
+
+    results: dict[int, list[dict]] = {}
+
+    for item in news_items[:20]:
+        title = item["title"]
+        summary = item.get("summary", "")
+        content_hash = compute_hash(title)
+
+        matches = match_news_to_channels(title, summary, all_channels)
+        if not matches:
+            continue
+
+        # Compute sentiment once per news item (use first match's triggers as hint)
+        first_channel = next(
+            (ch for ch in all_channels if ch["id"] == matches[0]["channel_id"]),
+            None,
+        )
+        pos_triggers = []
+        neg_triggers = []
+        asset = None
+        if first_channel and first_channel.get("ticker"):
+            from .database import get_tracked_asset
+            asset = await get_tracked_asset(first_channel["ticker"])
+            if asset:
+                pos_triggers = asset.get("positive_triggers", [])
+                neg_triggers = asset.get("negative_triggers", [])
+
+        sentiment, confidence = compute_sentiment(title, summary, asset, pos_triggers, neg_triggers)
+        if confidence == "low" or sentiment == "NEUTRAL":
+            ai_sentiment = await stage2_hybrid(
+                title, summary, asset, pos_triggers, neg_triggers, confidence
+            )
+            if ai_sentiment:
+                sentiment = ai_sentiment
+
+        impact = sentiment
+
+        for match in matches:
+            ch_id = match["channel_id"]
+            if ch_id not in results:
+                results[ch_id] = []
+            results[ch_id].append({
+                "title": title,
+                "source": item.get("source", ""),
+                "link": item.get("link", ""),
+                "summary": (summary or title)[:200],
+                "impact": impact,
+                "matched_keyword": match["matched_keyword"],
+                "ticker_hint": match.get("ticker") or "",
+                "content_hash": content_hash,
+            })
+
+    return results
+
+
+# ── Formatting ──
+
+def split_news_text(text: str, max_len: int = 4000) -> list[str]:
     if not text:
         return []
     items = re.split(r'(?=\d+\.\s)', text)
@@ -290,10 +382,9 @@ def split_news_text(text: str, max_len: int = 4000) -> list[str]:
 
 
 def format_news_batch(items: list[dict], lang: str = "ru") -> list[str]:
-    """Format multiple news items into Telegram messages (split if >4096 chars).
+    """Format multiple news items into Telegram messages.
 
     Each item: {title, source, ticker, summary, impact, link}
-    Returns list of message strings.
     """
     if not items:
         return []
@@ -301,19 +392,22 @@ def format_news_batch(items: list[dict], lang: str = "ru") -> list[str]:
     import datetime
     now = datetime.datetime.now().strftime("%H:%M")
     emoji = {"POSITIVE": "🟢", "NEGATIVE": "🔴", "NEUTRAL": "🟡"}
-    disclaimer = "\n\n⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
+    disclaimer_ru = "\n\n⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
+    disclaimer_en = "\n\n⚠️ <i>Not an individual investment recommendation.</i>"
+    disclaimer = disclaimer_ru if lang == "ru" else disclaimer_en
     parts = []
 
     for i, item in enumerate(items, 1):
         impact_emoji = emoji.get(item["impact"], "🟡")
+        ticker_line = f"  |  🏷 <code>{item['ticker']}</code>" if item.get("ticker") else ""
         block = (
             f"<b>{i}. {item['title']}</b>\n"
-            f"📡 {item['source']}  |  🏷 <code>{item['ticker']}</code>\n"
+            f"📡 {item['source']}{ticker_line}\n"
             f"📌 {item['summary']}\n"
             f"{impact_emoji} {item['impact']}"
         )
         if item.get("link"):
-            block += f'\n🔗 <a href="{item["link"]}">Подробнее</a>'
+            block += f'\n🔗 <a href="{item["link"]}">Подробнее</a>' if lang == "ru" else f'\n🔗 <a href="{item["link"]}">Read more</a>'
         parts.append(block)
 
     if lang == "ru":
@@ -324,20 +418,59 @@ def format_news_batch(items: list[dict], lang: str = "ru") -> list[str]:
     full_text = header + "\n\n".join(parts) + disclaimer
     chunks = split_news_text(full_text, max_len=4000)
 
-    # Add disclaimer only to last chunk if multiple
     if len(chunks) > 1:
         chunks[-1] += disclaimer
-        # Remove disclaimer from full_text for first chunks
+        chunks = [c.replace(disclaimer, "") for c in chunks[:-1]] + [chunks[-1]]
+
+    return chunks if chunks else [full_text]
+
+
+def format_channel_news(channel_name: str, items: list[dict], lang: str = "ru") -> list[str]:
+    """Format news for a specific channel with channel name header."""
+    if not items:
+        return []
+
+    import datetime
+    now = datetime.datetime.now().strftime("%H:%M")
+    emoji = {"POSITIVE": "🟢", "NEGATIVE": "🔴", "NEUTRAL": "🟡"}
+    disclaimer_ru = "\n\n⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
+    disclaimer_en = "\n\n⚠️ <i>Not an individual investment recommendation.</i>"
+    disclaimer = disclaimer_ru if lang == "ru" else disclaimer_en
+    parts = []
+
+    for i, item in enumerate(items, 1):
+        impact_emoji = emoji.get(item["impact"], "🟡")
+        kw_hint = f"  🔑 {item['matched_keyword']}" if item.get("matched_keyword") else ""
+        ticker_hint = f"  🏷 <code>{item['ticker_hint']}</code>" if item.get("ticker_hint") else ""
+        block = (
+            f"<b>{i}. {item['title']}</b>\n"
+            f"📡 {item['source']}{ticker_hint}{kw_hint}\n"
+            f"📌 {item['summary']}\n"
+            f"{impact_emoji} {item['impact']}"
+        )
+        if item.get("link"):
+            link_text = "Подробнее" if lang == "ru" else "Read more"
+            block += f'\n🔗 <a href="{item["link"]}">{link_text}</a>'
+        parts.append(block)
+
+    if lang == "ru":
+        header = f"📰 <b>{channel_name}</b> ({len(items)} шт.) — {now}\n{'─' * 20}\n\n"
+    else:
+        header = f"📰 <b>{channel_name}</b> ({len(items)} items) — {now}\n{'─' * 20}\n\n"
+
+    full_text = header + "\n\n".join(parts) + disclaimer
+    chunks = split_news_text(full_text, max_len=4000)
+
+    if len(chunks) > 1:
+        chunks[-1] += disclaimer
         chunks = [c.replace(disclaimer, "") for c in chunks[:-1]] + [chunks[-1]]
 
     return chunks if chunks else [full_text]
 
 
 def format_news_alert(title: str, source: str, analysis: dict, link: str) -> str:
-    """Format analyzed news for Telegram (single item)."""
     emoji = {"POSITIVE": "🟢", "NEGATIVE": "🔴", "NEUTRAL": "🟡"}
     impact_emoji = emoji.get(analysis["impact"], "🟡")
-
     msg = (
         f"🔔 <b>ФИНАНСОВАЯ НОВОСТЬ</b>\n"
         f"📰 {title}\n"

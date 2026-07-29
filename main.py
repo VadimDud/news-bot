@@ -14,10 +14,10 @@ from bot.database import (
     cleanup_old_news_sent, cleanup_old_news,
     get_users_expiring_soon, get_active_users_with_assets,
     get_pinned_news, save_pinned_news,
-    cleanup_old_delivery_logs,
+    cleanup_old_delivery_logs, cleanup_old_channel_news,
 )
 from bot.middlewares import LanguageMiddleware
-from bot.handlers import start, language, finance, admin
+from bot.handlers import start, language, finance, admin, channels
 from bot.retry_utils import async_retry
 from bot.rate_limiter import RateLimiter
 
@@ -51,6 +51,10 @@ async def cleanup_job(bot: Bot):
         removed_logs = await cleanup_old_delivery_logs(max_age_days=30)
         if removed_logs:
             logger.info(f"Cleaned {removed_logs} old delivery log entries")
+
+        removed_channel_news = await cleanup_old_channel_news(max_age_hours=24)
+        if removed_channel_news:
+            logger.info(f"Cleaned {removed_channel_news} old channel_news entries")
     except Exception as e:
         logger.warning(f"Cleanup error: {e}")
 
@@ -89,18 +93,19 @@ _rate_limiter = RateLimiter(max_per_minute=10)
 
 
 async def auto_scan_job(bot: Bot):
-    """Single execution: auto-scan news and send/edit to active subscribers."""
+    """Single execution: auto-scan news and send/edit to active subscribers per channel."""
     global _cached_news
     import time
-    from bot.finance import fetch_finance_news
+    from bot.finance import fetch_news
     from bot.news_processor import (
-        stage1_filter, compute_sentiment, stage2_hybrid,
-        format_news_batch, compute_hash,
+        global_scan, format_channel_news, compute_hash,
     )
     from bot.database import (
         get_all_tracked_assets, is_news_seen, save_news,
         get_active_users_with_assets, get_pinned_news, save_pinned_news,
         save_scan_metrics, log_news_delivery,
+        get_all_user_channels, save_channel_news, is_channel_news_seen,
+        get_pinned_news_by_channel,
     )
     start_time = time.monotonic()
     metrics = {
@@ -111,19 +116,27 @@ async def auto_scan_job(bot: Bot):
     try:
         users = await get_active_users_with_assets()
         if not users:
-            logger.info("Auto-scan: no active users with assets, skipping")
+            logger.info("Auto-scan: no active users with channels, skipping")
             return
 
         metrics["users_count"] = len(users)
         logger.info(f"Auto-scan: found {len(users)} active users")
-        tracked_assets = await get_all_tracked_assets()
-        if not tracked_assets:
-            logger.info("Auto-scan: no tracked assets configured, skipping")
+
+        all_channels = await get_all_user_channels()
+        if not all_channels:
+            logger.info("Auto-scan: no user channels configured, skipping")
             return
 
-        logger.info(f"Auto-scan: {len(tracked_assets)} tracked assets: {[a['ticker'] for a in tracked_assets]}")
+        logger.info(f"Auto-scan: {len(all_channels)} channels from {len(users)} users")
+
+        # Collect union of all source_tags from active channels
+        all_tags = set()
+        for ch in all_channels:
+            for tag in ch.get("source_tags", []):
+                all_tags.add(tag)
+
         try:
-            news = await fetch_finance_news()
+            news = await fetch_news(list(all_tags) if all_tags else None)
             _cached_news = news
         except Exception as e:
             logger.warning(f"Auto-scan: fetch failed ({e}), using cache")
@@ -135,59 +148,33 @@ async def auto_scan_job(bot: Bot):
 
         metrics["news_fetched"] = len(news)
         logger.info(f"Auto-scan: fetched {len(news)} news items")
-        for user in users:
-            uid = user["user_id"]
-            lang = user.get("language", "ru")
-            batch_items = []
-            skipped_seen = 0
-            skipped_irrelevant = 0
 
-            for item in news[:20]:
-                title = item["title"]
-                content_hash = compute_hash(title)
+        channel_results = await global_scan(news, all_channels)
+        if not channel_results:
+            logger.info("Auto-scan: no matches found for any channel")
+            return
 
-                if await is_news_seen(content_hash):
-                    skipped_seen += 1
+        total_matched = sum(len(v) for v in channel_results.values())
+        metrics["news_matched"] = total_matched
+        logger.info(f"Auto-scan: {total_matched} matches across {len(channel_results)} channels")
+
+        for channel_id, matched_items in channel_results.items():
+            # Find channel owner
+            channel = next((ch for ch in all_channels if ch["id"] == channel_id), None)
+            if not channel:
+                continue
+            uid = channel["user_id"]
+            lang = channel.get("language", "ru")
+
+            # Filter already-seen news for this channel
+            new_items = []
+            for item in matched_items:
+                if await is_channel_news_seen(channel_id, item["content_hash"]):
+                    metrics["news_skipped_seen"] += 1
                     continue
+                new_items.append(item)
 
-                is_relevant, matched_ticker, matched_asset = stage1_filter(
-                    title, item["summary"], tracked_assets
-                )
-                if not is_relevant:
-                    skipped_irrelevant += 1
-                    continue
-
-                impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
-
-                if confidence == "low" or impact == "NEUTRAL":
-                    ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
-                    if ai_impact:
-                        impact = ai_impact
-
-                summary = item["summary"][:200] if item["summary"] else title[:200]
-
-                await save_news(
-                    content_hash, item["source"], title, item.get("link", ""),
-                    matched_ticker, summary, impact,
-                )
-
-                logger.info(f"Auto-scan: MATCH [{item['source']}] {title[:50]} -> {matched_ticker} ({impact})")
-                await log_news_delivery(uid, matched_ticker, title, item["source"], impact)
-                batch_items.append({
-                    "title": title,
-                    "source": item["source"],
-                    "ticker": matched_ticker,
-                    "summary": summary,
-                    "impact": impact,
-                    "link": item.get("link", ""),
-                })
-
-            metrics["news_matched"] += len(batch_items)
-            metrics["news_skipped_seen"] += skipped_seen
-            metrics["news_skipped_irrelevant"] += skipped_irrelevant
-            logger.info(f"Auto-scan: user {uid} - {len(batch_items)} matched, {skipped_seen} seen, {skipped_irrelevant} irrelevant")
-
-            if not batch_items:
+            if not new_items:
                 continue
 
             if not await _rate_limiter.can_send(uid):
@@ -195,9 +182,26 @@ async def auto_scan_job(bot: Bot):
                 logger.info(f"Auto-scan: rate limited for {uid}, wait {wait:.0f}s")
                 continue
 
-            messages = format_news_batch(batch_items, lang)
+            messages = format_channel_news(channel["name"], new_items, lang)
 
-            pinned = await get_pinned_news(uid)
+            # Save news to channel_news log
+            for item in new_items:
+                await save_channel_news(
+                    channel_id, item["content_hash"],
+                    item.get("matched_keyword", ""),
+                    item.get("ticker_hint", ""),
+                    item["impact"],
+                )
+                # Also save to legacy news table for backward compat
+                await save_news(
+                    item["content_hash"], uid, item["source"], item["title"],
+                    item.get("link", ""), item.get("ticker_hint", ""),
+                    item["summary"], item["impact"],
+                )
+                await log_news_delivery(uid, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+
+            # Send/edit pinned message per channel
+            pinned = await get_pinned_news_by_channel(channel_id)
             edited = False
             if pinned and messages:
                 try:
@@ -208,20 +212,20 @@ async def auto_scan_job(bot: Bot):
                         parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
-                    await save_pinned_news(uid, pinned["chat_id"], pinned["message_id"])
+                    await save_pinned_news(uid, pinned["chat_id"], pinned["message_id"], channel_id)
                     await _rate_limiter.record_send(uid)
                     metrics["messages_sent"] += 1
-                    logger.info(f"Auto-scan: edited pinned message for {uid} ({len(batch_items)} news)")
+                    logger.info(f"Auto-scan: edited pinned msg for channel {channel['name']} ({len(new_items)} news)")
                     edited = True
                 except Exception as e:
-                    logger.warning(f"Auto-scan: edit failed for {uid}: {e}")
+                    logger.warning(f"Auto-scan: edit failed for channel {channel['name']}: {e}")
 
             if not edited:
                 sent_ok = False
                 for msg_text in messages:
                     try:
                         msg = await bot.send_message(uid, msg_text, parse_mode="HTML", disable_web_page_preview=True)
-                        await save_pinned_news(uid, uid, msg.message_id)
+                        await save_pinned_news(uid, uid, msg.message_id, channel_id)
                         await _rate_limiter.record_send(uid)
                         sent_ok = True
                     except Exception as e:
@@ -230,7 +234,7 @@ async def auto_scan_job(bot: Bot):
                 if sent_ok:
                     metrics["messages_sent"] += len(messages)
                 if messages:
-                    logger.info(f"Auto-scan: sent {len(messages)} message(s) to {uid} ({len(batch_items)} news)")
+                    logger.info(f"Auto-scan: sent {len(messages)} msg(s) for channel {channel['name']} ({len(new_items)} news)")
 
     except Exception as e:
         logger.warning(f"Auto-scan error: {e}")
@@ -283,6 +287,7 @@ async def main():
         language.router,
         admin.router,
         finance.router,
+        channels.router,
     )
 
     logger.info("Bot is now polling. Press Ctrl+C to stop.")

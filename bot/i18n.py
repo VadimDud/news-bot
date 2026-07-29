@@ -55,6 +55,9 @@ STRINGS = {
             "@VP135792"
         ),
         "btn_back": "◀️ Назад",
+        "btn_edit_keywords": "✏️ Ключевые слова",
+        "btn_ai_expand": "🤖 AI расширить",
+        "btn_delete": "❌ Удалить",
 
         # ── Subscriber menu ──
         "welcome_sub": (
@@ -65,6 +68,20 @@ STRINGS = {
         "sub_btn_tickers": "🎯 Тикеры",
         "sub_btn_settings": "⚙️ Настройки",
         "sub_btn_profile": "👤 Профиль",
+        "sub_btn_feedback": "💬 Обратная связь",
+
+        "feedback_ask": (
+            "💬 <b>Обратная связь</b>\n\n"
+            "Напишите ваше замечание, предложение или отзыв.\n"
+            "Сообщение будет передано администратору.\n\n"
+            "«◀️ Назад» — отмена."
+        ),
+        "feedback_sent": (
+            "✅ <b>Спасибо!</b>\n\n"
+            "Ваше сообщение отправлено администратору.\n"
+            "Мы постараемся ответить в ближайшее время."
+        ),
+        "feedback_cancelled": "↩️ Отправка отменена.",
 
         "profile_text": (
             "👤 <b>Мой профиль</b>\n\n"
@@ -157,6 +174,87 @@ STRINGS = {
         "fin_btn_list": "📋 Подписки",
         "fin_btn_add": "➕ Добавить",
         "fin_btn_remove": "❌ Удалить",
+
+        # ── Channels (universal topics) ──
+        "channels_menu": (
+            "📡 <b>Мои ленты</b>\n\n"
+            "Создавайте ленты по темам. Бот находит новости по ключевым словам.\n\n"
+            "{channels_list}"
+        ),
+        "channels_empty": (
+            "📡 <b>Мои ленты</b>\n\n"
+            "Пока нет ни одной ленты.\n"
+            "Нажмите «➕ Создать ленту» чтобы начать."
+        ),
+        "btn_create_channel": "➕ Создать ленту",
+        "btn_my_channels": "📡 Мои ленты",
+        "channel_ask_name": (
+            "📝 <b>Новая лента</b>\n\n"
+            "Введите <b>название</b> для ленты.\n"
+            "Например: <i>Макроэкономика</i>, <i>Газпром</i>, <i>Криптовалюта</i>\n\n"
+            "«◀️ Назад» — отмена."
+        ),
+        "channel_ask_keywords": (
+            "🔑 <b>{name}</b>\n\n"
+            "Введите <b>ключевые слова</b> через запятую.\n"
+            "Бот будет искать новости, где встречаются эти слова.\n\n"
+            "<b>Примеры:</b>\n"
+            "• <i>инфляция, ключевая ставка, курс рубля</i>\n"
+            "• <i>добыча, экспорт, санкции</i>\n"
+            "• <i>Газпром, газ, трубопровод</i>\n\n"
+            "«◀️ Назад» — отмена."
+        ),
+        "channel_ask_ticker": (
+            "🏷 <b>{name}</b>\n\n"
+            "Введите <b>тикер</b> для привязки к бумаге (или <b>—</b> чтобы пропустить).\n\n"
+            "<b>Примеры:</b> <code>SBER</code>, <code>GAZP</code>, <code>LKOH</code>\n\n"
+            "«◀️ Назад» — отмена."
+        ),
+        "channel_created": (
+            "✅ <b>Лента создана!</b>\n\n"
+            "📡 {name}\n"
+            "🔑 Ключевые слова: {keywords}\n"
+            "{ticker_line}"
+        ),
+        "channel_created_with_ticker": "🏷 Тикер: <code>{ticker}</code>",
+        "channel_created_no_ticker": "🏷 Тикер: не привязана",
+        "channel_already_exists": "⚠️ Лента с таким именем уже существует.",
+        "channel_list_item": (
+            "📡 <b>{name}</b>\n"
+            "   🔑 {keywords}\n"
+            "{ticker_line}"
+        ),
+        "channel_delete_confirm": (
+            "❌ Удалить ленту <b>{name}</b>?\n\n"
+            "Это действие необратимо."
+        ),
+        "channel_deleted": "✅ Лента «{name}» удалена.",
+        "channel_scan_start": "🔄 Сканирую ленту <b>{name}</b>...",
+        "channel_scan_done": "✅ Найдено {count} новых новостей.",
+        "channel_no_news": "ℹ️ Свежих новостей в ленте нет.",
+        "channel_keywords_hint": (
+            "💡 <b>Совет:</b> Используйте cụ体ные слова для точного поиска.\n"
+            "Чем точнее ключевые слова, тем лучше результат."
+        ),
+        "channel_edit_keywords": (
+            "🔑 Редактирование ключевых слов ленты <b>{name}</b>\n\n"
+            "Текущие: {keywords}\n\n"
+            "Введите новые ключевые слова через запятую:"
+        ),
+        "channel_keywords_updated": "✅ Ключевые слова обновлены для ленты «{name}».",
+        "channel_scan_all": "🔍 Сканирую все ленты...",
+        "channel_scan_all_done": "✅ Сканирование завершено. Найдено {count} новых новостей.",
+        "channel_ai_expanding": "🤖 AI расширяет ключевые слова для темы «{name}»...",
+        "channel_ai_expanded": (
+            "🤖 <b>AI предложил расширение:</b>\n\n"
+            "🔑 Ваши ключевые слова: {user_keywords}\n\n"
+            "🤖 Расширенный набор: {ai_keywords}\n\n"
+            "Связанные тикеры: {related_tickers}\n\n"
+            "Использовать расширенный набор?"
+        ),
+        "channel_ai_use_expanded": "✅ Использовать расширенный набор",
+        "channel_ai_use_original": "📝 Оставить мои ключевые слова",
+        "channel_ai_no_expansion": "ℹ️ AI не смог предложить расширение. Используем ваши ключевые слова.",
 
         # ── Admin ──
         "admin_welcome": (
@@ -270,6 +368,9 @@ STRINGS = {
             "@VP135792"
         ),
         "btn_back": "◀️ Back",
+        "btn_edit_keywords": "✏️ Keywords",
+        "btn_ai_expand": "🤖 AI Expand",
+        "btn_delete": "❌ Delete",
 
         # ── Subscriber menu ──
         "welcome_sub": (
@@ -280,6 +381,20 @@ STRINGS = {
         "sub_btn_tickers": "🎯 Tickers",
         "sub_btn_settings": "⚙️ Settings",
         "sub_btn_profile": "👤 Profile",
+        "sub_btn_feedback": "💬 Feedback",
+
+        "feedback_ask": (
+            "💬 <b>Feedback</b>\n\n"
+            "Write your remark, suggestion or review.\n"
+            "The message will be forwarded to the administrator.\n\n"
+            "«◀️ Back» — cancel."
+        ),
+        "feedback_sent": (
+            "✅ <b>Thank you!</b>\n\n"
+            "Your message has been sent to the administrator.\n"
+            "We'll try to respond as soon as possible."
+        ),
+        "feedback_cancelled": "↩️ Sending cancelled.",
 
         "profile_text": (
             "👤 <b>My Profile</b>\n\n"
@@ -372,6 +487,87 @@ STRINGS = {
         "fin_btn_list": "📋 Tickers",
         "fin_btn_add": "➕ Add",
         "fin_btn_remove": "❌ Remove",
+
+        # ── Channels (universal topics) ──
+        "channels_menu": (
+            "📡 <b>My Channels</b>\n\n"
+            "Create topic channels. Bot finds news by keywords.\n\n"
+            "{channels_list}"
+        ),
+        "channels_empty": (
+            "📡 <b>My Channels</b>\n\n"
+            "No channels yet.\n"
+            "Tap «➕ Create Channel» to start."
+        ),
+        "btn_create_channel": "➕ Create Channel",
+        "btn_my_channels": "📡 My Channels",
+        "channel_ask_name": (
+            "📝 <b>New Channel</b>\n\n"
+            "Enter a <b>name</b> for the channel.\n"
+            "e.g.: <i>Macroeconomics</i>, <i>Gazprom</i>, <i>Crypto</i>\n\n"
+            "«◀️ Back» — cancel."
+        ),
+        "channel_ask_keywords": (
+            "🔑 <b>{name}</b>\n\n"
+            "Enter <b>keywords</b> separated by commas.\n"
+            "Bot will find news containing these words.\n\n"
+            "<b>Examples:</b>\n"
+            "• <i>inflation, key rate, ruble exchange rate</i>\n"
+            "• <i>production, export, sanctions</i>\n"
+            "• <i>Gazprom, gas, pipeline</i>\n\n"
+            "«◀️ Back» — cancel."
+        ),
+        "channel_ask_ticker": (
+            "🏷 <b>{name}</b>\n\n"
+            "Enter a <b>ticker</b> to link to a stock (or <b>—</b> to skip).\n\n"
+            "<b>Examples:</b> <code>SBER</code>, <code>GAZP</code>, <code>LKOH</code>\n\n"
+            "«◀️ Back» — cancel."
+        ),
+        "channel_created": (
+            "✅ <b>Channel created!</b>\n\n"
+            "📡 {name}\n"
+            "🔑 Keywords: {keywords}\n"
+            "{ticker_line}"
+        ),
+        "channel_created_with_ticker": "🏷 Ticker: <code>{ticker}</code>",
+        "channel_created_no_ticker": "🏷 Ticker: not linked",
+        "channel_already_exists": "⚠️ Channel with this name already exists.",
+        "channel_list_item": (
+            "📡 <b>{name}</b>\n"
+            "   🔑 {keywords}\n"
+            "{ticker_line}"
+        ),
+        "channel_delete_confirm": (
+            "❌ Delete channel <b>{name}</b>?\n\n"
+            "This action is irreversible."
+        ),
+        "channel_deleted": "✅ Channel «{name}» deleted.",
+        "channel_scan_start": "🔄 Scanning channel <b>{name}</b>...",
+        "channel_scan_done": "✅ Found {count} new news items.",
+        "channel_no_news": "ℹ️ No new news in this channel.",
+        "channel_keywords_hint": (
+            "💡 <b>Tip:</b> Use specific words for better search.\n"
+            "The more precise the keywords, the better the results."
+        ),
+        "channel_edit_keywords": (
+            "🔑 Editing keywords for channel <b>{name}</b>\n\n"
+            "Current: {keywords}\n\n"
+            "Enter new keywords separated by commas:"
+        ),
+        "channel_keywords_updated": "✅ Keywords updated for channel «{name}».",
+        "channel_scan_all": "🔍 Scanning all channels...",
+        "channel_scan_all_done": "✅ Scan complete. Found {count} new news items.",
+        "channel_ai_expanding": "🤖 AI expanding keywords for topic «{name}»...",
+        "channel_ai_expanded": (
+            "🤖 <b>AI suggested expansion:</b>\n\n"
+            "🔑 Your keywords: {user_keywords}\n\n"
+            "🤖 Expanded set: {ai_keywords}\n\n"
+            "Related tickers: {related_tickers}\n\n"
+            "Use expanded set?"
+        ),
+        "channel_ai_use_expanded": "✅ Use expanded set",
+        "channel_ai_use_original": "📝 Keep my keywords",
+        "channel_ai_no_expansion": "ℹ️ AI couldn't suggest expansion. Using your keywords.",
 
         # ── Admin ──
         "admin_welcome": (

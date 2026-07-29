@@ -160,6 +160,16 @@ async def finance_receive_ticker(message: Message, user_lang: str):
     if text in ("ДА", "НЕТ", "YES", "NO", "ОК", "OK"):
         return
 
+    # Skip if user is in feedback mode
+    from .start import _feedback_state
+    if message.from_user.id in _feedback_state:
+        return
+
+    # Skip if text matches a menu button
+    from .start import _get_text_buttons
+    if raw in _get_text_buttons(user_lang) or raw in _get_text_buttons("ru") or raw in _get_text_buttons("en"):
+        return
+
     # Accept both short tickers (2-10 chars) and longer company names (up to 50 chars)
     if len(raw) < 2 or len(raw) > 50:
         return

@@ -1,4 +1,5 @@
 import datetime
+import json
 import aiosqlite
 from pathlib import Path
 from . import config
@@ -51,6 +52,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS news (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 content_hash TEXT NOT NULL,
+                user_id    INTEGER NOT NULL,
                 source     TEXT,
                 title      TEXT NOT NULL,
                 url        TEXT,
@@ -62,6 +64,9 @@ async def init_db():
         """)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_news_hash ON news(content_hash)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_news_user_hash ON news(user_id, content_hash)"
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_news_created ON news(created_at)"
@@ -110,14 +115,80 @@ async def init_db():
             )
         """)
 
+        # ── New tables: user_channels, channel_news ──
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_channels (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id      INTEGER NOT NULL,
+                name         TEXT NOT NULL,
+                keywords_json TEXT NOT NULL DEFAULT '[]',
+                ticker       TEXT,
+                source_tags  TEXT NOT NULL DEFAULT '[]',
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                UNIQUE(user_id, name)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_channels_user ON user_channels(user_id)"
+        )
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_news (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id      INTEGER NOT NULL,
+                news_content_hash TEXT NOT NULL,
+                matched_keyword TEXT,
+                ticker_hint     TEXT,
+                impact          TEXT,
+                sent_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (channel_id) REFERENCES user_channels(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_channel_news_channel ON channel_news(channel_id)"
+        )
+
         # ── Migrations ──
         cols = {row[1] for row in await (await db.execute("PRAGMA table_info(users)")).fetchall()}
         if "access_until" not in cols:
             await db.execute("ALTER TABLE users ADD COLUMN access_until TEXT")
         if "is_trial_used" not in cols:
             await db.execute("ALTER TABLE users ADD COLUMN is_trial_used INTEGER NOT NULL DEFAULT 0")
-        # Drop old columns if they exist (SQLite can't DROP COLUMN in older versions)
-        # Old subscribed column is ignored — we use access_until now
+
+        news_cols = {row[1] for row in await (await db.execute("PRAGMA table_info(news)")).fetchall()}
+        if "user_id" not in news_cols:
+            await db.execute("ALTER TABLE news ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+
+        pinned_cols = {row[1] for row in await (await db.execute("PRAGMA table_info(pinned_news)")).fetchall()}
+        if "channel_id" not in pinned_cols:
+            await db.execute("ALTER TABLE pinned_news ADD COLUMN channel_id INTEGER")
+
+        # Add source_tags to user_channels if missing
+        uc_cols = {row[1] for row in await (await db.execute("PRAGMA table_info(user_channels)")).fetchall()}
+        if "source_tags" not in uc_cols:
+            await db.execute("ALTER TABLE user_channels ADD COLUMN source_tags TEXT NOT NULL DEFAULT '[]'")
+
+        # Migrate finance_subscriptions -> user_channels
+        async with db.execute(
+            "SELECT COUNT(*) FROM user_channels"
+        ) as cur:
+            existing_channels = (await cur.fetchone())[0]
+        if existing_channels == 0:
+            async with db.execute(
+                "SELECT user_id, ticker, name FROM finance_subscriptions"
+            ) as cur:
+                old_subs = await cur.fetchall()
+            if old_subs:
+                for user_id, ticker, name in old_subs:
+                    ch_name = name if name else ticker
+                    await db.execute("""
+                        INSERT OR IGNORE INTO user_channels (user_id, name, keywords_json, ticker)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, ch_name, json.dumps([ticker.lower()]), ticker.upper()))
+                import logging
+                logging.getLogger(__name__).info(
+                    f"Migrated {len(old_subs)} finance_subscriptions to user_channels"
+                )
 
         await db.commit()
 
@@ -175,10 +246,15 @@ async def has_access(user_id: int) -> bool:
 
 
 async def grant_trial(user_id: int, days: int = 30):
-    """Activate trial period for a new user. Only once."""
+    """Activate trial/subscription for a user.
+    Only grants if user currently has no active access."""
     user = await get_user(user_id)
-    if user and user["is_trial_used"]:
-        return False
+    if user and user.get("access_until"):
+        try:
+            if datetime.datetime.fromisoformat(user["access_until"]) > datetime.datetime.now():
+                return False
+        except (ValueError, TypeError):
+            pass
     until = datetime.datetime.now() + datetime.timedelta(days=days)
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         await db.execute(
@@ -243,7 +319,7 @@ async def get_users_expiring_soon(days: int = 2) -> list[dict]:
             return [dict(row) for row in await cur.fetchall()]
 
 
-# ── Finance subscriptions ──
+# ── Finance subscriptions (legacy, kept for migration) ──
 
 async def add_finance_subscription(user_id: int, ticker: str, name: str = ""):
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
@@ -283,13 +359,13 @@ async def get_all_finance_users() -> list[dict]:
 
 
 async def get_active_users_with_assets() -> list[dict]:
-    """Get users with active access and at least one tracked asset."""
+    """Get users with active access and at least one user channel."""
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT DISTINCT u.user_id, u.language
             FROM users u
-            INNER JOIN finance_subscriptions fs ON u.user_id = fs.user_id
+            INNER JOIN user_channels uc ON u.user_id = uc.user_id
             WHERE u.access_until IS NOT NULL
               AND u.access_until > datetime('now')
         """) as cur:
@@ -316,6 +392,195 @@ async def mark_news_sent(title: str, source: str = ""):
             (title, source),
         )
         await db.commit()
+
+
+# ── User Channels (universal topic subscriptions) ──
+
+async def create_channel(user_id: int, name: str, keywords: list[str],
+                         ticker: str | None = None,
+                         source_tags: list[str] | None = None) -> int | None:
+    """Create a new channel for a user. Returns channel id or None on conflict."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        try:
+            cursor = await db.execute("""
+                INSERT INTO user_channels (user_id, name, keywords_json, ticker, source_tags)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, name, json.dumps(keywords, ensure_ascii=False),
+                  ticker.upper() if ticker else None,
+                  json.dumps(source_tags or [], ensure_ascii=False)))
+            await db.commit()
+            return cursor.lastrowid
+        except aiosqlite.IntegrityError:
+            return None
+
+
+async def get_user_channels(user_id: int) -> list[dict]:
+    """Get all channels for a user."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_channels WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        ) as cur:
+            results = []
+            for row in await cur.fetchall():
+                d = dict(row)
+                d["keywords"] = json.loads(d["keywords_json"])
+                d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+                results.append(d)
+            return results
+
+
+async def get_channel(channel_id: int) -> dict | None:
+    """Get a single channel by id."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_channels WHERE id = ?", (channel_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["keywords"] = json.loads(d["keywords_json"])
+            d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+            return d
+
+
+async def get_channel_by_name(user_id: int, name: str) -> dict | None:
+    """Get a channel by user_id and name."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_channels WHERE user_id = ? AND name = ?",
+            (user_id, name),
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["keywords"] = json.loads(d["keywords_json"])
+            return d
+
+
+async def update_channel_keywords(channel_id: int, keywords: list[str]):
+    """Replace keywords for a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE user_channels SET keywords_json = ? WHERE id = ?",
+            (json.dumps(keywords, ensure_ascii=False), channel_id),
+        )
+        await db.commit()
+
+
+async def update_channel_name(channel_id: int, name: str):
+    """Rename a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE user_channels SET name = ? WHERE id = ?",
+            (name, channel_id),
+        )
+        await db.commit()
+
+
+async def update_channel_ticker(channel_id: int, ticker: str | None):
+    """Set or clear the ticker for a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE user_channels SET ticker = ? WHERE id = ?",
+            (ticker.upper() if ticker else None, channel_id),
+        )
+        await db.commit()
+
+
+async def update_channel_source_tags(channel_id: int, source_tags: list[str]):
+    """Update source tags for a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE user_channels SET source_tags = ? WHERE id = ?",
+            (json.dumps(source_tags, ensure_ascii=False), channel_id),
+        )
+        await db.commit()
+
+
+async def delete_channel(channel_id: int):
+    """Delete a channel and its news (CASCADE)."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute("DELETE FROM user_channels WHERE id = ?", (channel_id,))
+        await db.commit()
+
+
+async def delete_user_channels(user_id: int):
+    """Delete all channels for a user."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute("DELETE FROM user_channels WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def get_all_user_channels() -> list[dict]:
+    """Get all channels with user info (for global scan)."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT uc.*, u.language
+            FROM user_channels uc
+            INNER JOIN users u ON uc.user_id = u.user_id
+            WHERE u.access_until IS NOT NULL
+              AND u.access_until > datetime('now')
+        """) as cur:
+            results = []
+            for row in await cur.fetchall():
+                d = dict(row)
+                d["keywords"] = json.loads(d["keywords_json"])
+                d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+                results.append(d)
+            return results
+
+
+# ── Channel News (delivery tracking per channel) ──
+
+async def save_channel_news(channel_id: int, news_content_hash: str,
+                            matched_keyword: str, ticker_hint: str = "",
+                            impact: str = "NEUTRAL"):
+    """Log that a news item was delivered to a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO channel_news (channel_id, news_content_hash, matched_keyword, ticker_hint, impact)
+            VALUES (?, ?, ?, ?, ?)
+        """, (channel_id, news_content_hash, matched_keyword, ticker_hint, impact))
+        await db.commit()
+
+
+async def is_channel_news_seen(channel_id: int, news_content_hash: str) -> bool:
+    """Check if a news item was already sent to a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM channel_news WHERE channel_id = ? AND news_content_hash = ?",
+            (channel_id, news_content_hash),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def get_channel_news_log(channel_id: int, limit: int = 50) -> list[dict]:
+    """Get recent news delivered to a channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM channel_news WHERE channel_id = ? ORDER BY sent_at DESC LIMIT ?",
+            (channel_id, limit),
+        ) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
+
+async def cleanup_old_channel_news(max_age_hours: int = 24) -> int:
+    """Remove old channel_news entries."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM channel_news WHERE sent_at < datetime('now', ?)",
+            (f"-{max_age_hours} hours",),
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 # ── Statistics ──
@@ -364,6 +629,20 @@ async def get_finance_tickers_count() -> int:
             return (await cur.fetchone())[0]
 
 
+async def get_user_channels_count() -> int:
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM user_channels"
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def get_channels_count() -> int:
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM user_channels") as cur:
+            return (await cur.fetchone())[0]
+
+
 async def get_news_sent_count() -> int:
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM finance_news_sent") as cur:
@@ -387,6 +666,8 @@ async def get_full_stats() -> dict:
     fin_subs = await get_finance_subscribers_count()
     fin_tickers = await get_finance_tickers_count()
     news_sent = await get_news_sent_count()
+    user_channels = await get_user_channels_count()
+    channels = await get_channels_count()
     return {
         "total": total,
         "new_today": new_today,
@@ -396,6 +677,8 @@ async def get_full_stats() -> dict:
         "finance_subs": fin_subs,
         "finance_tickers": fin_tickers,
         "news_sent": news_sent,
+        "user_channels": user_channels,
+        "channels": channels,
     }
 
 
@@ -446,21 +729,21 @@ async def cleanup_old_news_sent(max_age_hours: int = 24) -> int:
 
 # ── News table (3-stage pipeline) ──
 
-async def is_news_seen(content_hash: str) -> bool:
+async def is_news_seen(content_hash: str, user_id: int) -> bool:
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         async with db.execute(
-            "SELECT 1 FROM news WHERE content_hash = ?", (content_hash,)
+            "SELECT 1 FROM news WHERE content_hash = ? AND user_id = ?", (content_hash, user_id)
         ) as cur:
             return await cur.fetchone() is not None
 
 
-async def save_news(content_hash: str, source: str, title: str, url: str,
+async def save_news(content_hash: str, user_id: int, source: str, title: str, url: str,
                     ticker: str, summary: str, impact: str):
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         await db.execute(
-            "INSERT INTO news (content_hash, source, title, url, ticker, summary, impact) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (content_hash, source, title, url, ticker, summary, impact),
+            "INSERT INTO news (content_hash, user_id, source, title, url, ticker, summary, impact) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (content_hash, user_id, source, title, url, ticker, summary, impact),
         )
         await db.commit()
 
@@ -556,22 +839,59 @@ async def get_pinned_news(user_id: int) -> dict | None:
             return dict(row) if row else None
 
 
-async def save_pinned_news(user_id: int, chat_id: int, message_id: int):
+async def get_pinned_news_by_channel(channel_id: int) -> dict | None:
+    """Get pinned message for a specific channel."""
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        await db.execute("""
-            INSERT INTO pinned_news (user_id, chat_id, message_id, updated_at)
-            VALUES (?, ?, ?, datetime('now'))
-            ON CONFLICT(user_id) DO UPDATE SET
-                chat_id = excluded.chat_id,
-                message_id = excluded.message_id,
-                updated_at = datetime('now')
-        """, (user_id, chat_id, message_id))
-        await db.commit()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM pinned_news WHERE channel_id = ?", (channel_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def save_pinned_news(user_id: int, chat_id: int, message_id: int,
+                           channel_id: int | None = None):
+    if channel_id is not None:
+        async with aiosqlite.connect(config.DATABASE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            existing = await (await db.execute(
+                "SELECT user_id FROM pinned_news WHERE channel_id = ?", (channel_id,)
+            )).fetchone()
+            if existing:
+                await db.execute("""
+                    UPDATE pinned_news SET chat_id = ?, message_id = ?, updated_at = datetime('now')
+                    WHERE channel_id = ?
+                """, (chat_id, message_id, channel_id))
+            else:
+                await db.execute("""
+                    INSERT INTO pinned_news (user_id, chat_id, message_id, channel_id, updated_at)
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                """, (user_id, chat_id, message_id, channel_id))
+            await db.commit()
+    else:
+        async with aiosqlite.connect(config.DATABASE_PATH) as db:
+            await db.execute("""
+                INSERT INTO pinned_news (user_id, chat_id, message_id, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    chat_id = excluded.chat_id,
+                    message_id = excluded.message_id,
+                    updated_at = datetime('now')
+            """, (user_id, chat_id, message_id))
+            await db.commit()
 
 
 async def remove_pinned_news(user_id: int):
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         await db.execute("DELETE FROM pinned_news WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def remove_pinned_news_by_channel(channel_id: int):
+    """Remove pinned message for a specific channel."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        await db.execute("DELETE FROM pinned_news WHERE channel_id = ?", (channel_id,))
         await db.commit()
 
 

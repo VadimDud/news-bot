@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.finance import (
-    _clean_html, _is_finance_relevant, _fallback_analysis,
+    _clean_html, _fallback_analysis,
     format_finance_alert, fetch_news,
 )
 import bot.finance as finance_mod
@@ -40,20 +40,6 @@ class TestCleanHtml:
 
     def test_empty(self):
         assert _clean_html("") == ""
-
-
-class TestIsFinanceRelevant:
-    def test_relevant(self):
-        assert _is_finance_relevant("ЦБ повысил ключевую ставку", "") is True
-
-    def test_irrelevant(self):
-        assert _is_finance_relevant("Погода в Москве", "завтра дождь") is False
-
-    def test_case_insensitive(self):
-        assert _is_finance_relevant("КЛЮЧЕВАЯ СТАВКА", "") is True
-
-    def test_keyword_in_summary(self):
-        assert _is_finance_relevant("Заголовок", "дивиденды выросли") is True
 
 
 class TestFallbackAnalysis:

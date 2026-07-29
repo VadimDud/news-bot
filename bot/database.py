@@ -4,9 +4,6 @@ import aiosqlite
 from pathlib import Path
 from . import config
 
-_db_lock = None
-
-
 async def init_db():
     Path(config.DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
@@ -21,6 +18,11 @@ async def init_db():
                 created       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        for col, coltype in (("access_until", "TEXT"), ("is_trial_used", "INTEGER NOT NULL DEFAULT 0"), ("created", "TIMESTAMP")):
+            try:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS finance_subscriptions (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,14 +32,6 @@ async def init_db():
                 created   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(user_id),
                 UNIQUE(user_id, ticker)
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS finance_news_sent (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                title     TEXT NOT NULL,
-                source    TEXT,
-                sent_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await db.execute("""
@@ -62,6 +56,11 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        for col, coltype in (("user_id", "INTEGER"), ("source", "TEXT"), ("url", "TEXT"), ("ticker", "TEXT"), ("summary", "TEXT"), ("impact", "TEXT"), ("created_at", "TIMESTAMP")):
+            try:
+                await db.execute(f"ALTER TABLE news ADD COLUMN {col} {coltype}")
+            except Exception:
+                pass
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_news_hash ON news(content_hash)"
         )
@@ -377,23 +376,6 @@ async def get_user_tickers(user_id: int) -> list[str]:
     return [s["ticker"] for s in subs]
 
 
-async def is_news_sent(title: str) -> bool:
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT 1 FROM finance_news_sent WHERE title = ?", (title,)
-        ) as cur:
-            return await cur.fetchone() is not None
-
-
-async def mark_news_sent(title: str, source: str = ""):
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        await db.execute(
-            "INSERT INTO finance_news_sent (title, source) VALUES (?, ?)",
-            (title, source),
-        )
-        await db.commit()
-
-
 # ── User Channels (universal topic subscriptions) ──
 
 async def create_channel(user_id: int, name: str, keywords: list[str],
@@ -645,7 +627,7 @@ async def get_channels_count() -> int:
 
 async def get_news_sent_count() -> int:
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM finance_news_sent") as cur:
+        async with db.execute("SELECT COUNT(*) FROM news") as cur:
             return (await cur.fetchone())[0]
 
 
@@ -717,16 +699,6 @@ async def remove_deletion(deletion_id: int):
         await db.commit()
 
 
-async def cleanup_old_news_sent(max_age_hours: int = 24) -> int:
-    async with aiosqlite.connect(config.DATABASE_PATH) as db:
-        cursor = await db.execute(
-            "DELETE FROM finance_news_sent WHERE sent_at < datetime('now', ?)",
-            (f"-{max_age_hours} hours",),
-        )
-        await db.commit()
-        return cursor.rowcount
-
-
 # ── News table (3-stage pipeline) ──
 
 async def is_news_seen(content_hash: str, user_id: int) -> bool:
@@ -763,7 +735,6 @@ async def cleanup_old_news(max_age_hours: int = 24) -> int:
 async def save_tracked_asset(ticker: str, name: str, keywords: list[str],
                               positive_triggers: list[str], negative_triggers: list[str],
                               description: str = ""):
-    import json
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         await db.execute("""
             INSERT INTO tracked_assets (ticker, name, keywords_json, positive_triggers, negative_triggers, description, updated_at)
@@ -782,7 +753,6 @@ async def save_tracked_asset(ticker: str, name: str, keywords: list[str],
 
 
 async def get_tracked_asset(ticker: str) -> dict | None:
-    import json
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -799,7 +769,6 @@ async def get_tracked_asset(ticker: str) -> dict | None:
 
 
 async def get_all_tracked_assets() -> list[dict]:
-    import json
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM tracked_assets") as cur:

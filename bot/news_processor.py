@@ -7,15 +7,13 @@
 """
 
 import hashlib
-import json
 import logging
 import re
 import struct
 
-import httpx
-
 from . import config
-from .retry_utils import async_retry
+from .ai_client import analyze
+from .database import get_tracked_asset
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +158,6 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
                         positive_triggers: list[str] | None = None,
                         negative_triggers: list[str] | None = None,
                         trigger_confidence: str = "low") -> str | None:
-    """Hybrid AI fallback: called for ambiguous or low-confidence cases.
-
-    Returns sentiment string or None if AI unavailable.
-    """
     combined = _normalize(title + " " + summary)
     pos_triggers = positive_triggers or (asset.get("positive_triggers", []) if asset else [])
     neg_triggers = negative_triggers or (asset.get("negative_triggers", []) if asset else [])
@@ -180,114 +174,20 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
     if not should_call_ai:
         return None
 
-    if config.DEEPSEEK_API_KEY:
-        return await _call_deepseek_sentiment(title, summary, asset)
-    elif config.GEMINI_API_KEY:
-        return await _call_gemini_sentiment(title, summary, asset)
-    elif config.DASHSCOPE_API_KEY:
-        return await _call_dashscope_sentiment(title, summary, asset)
-    return None
-
-
-@async_retry(max_retries=2, base_delay=1.0)
-async def _call_deepseek_sentiment(title: str, summary: str, asset: dict | None = None) -> str | None:
-    if not config.DEEPSEEK_API_KEY:
-        return None
     label = asset.get("name", asset["ticker"]) if asset else "тема"
-    prompt = (
+    system_prompt = "Ты финансовый аналитик. Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. Ответь одним словом."
+    user_message = (
         f"Новость: {title}\nСуть: {summary[:200]}\n\n"
         f"Актив/тема: {label}\n\n"
         f"Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. "
         f"Ответь одним словом."
     )
-    url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json={
-                "model": config.DEEPSEEK_MODEL,
-                "messages": [
-                    {"role": "system", "content": "Ты финансовый аналитик. Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. Ответь одним словом."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 150,
-            }, headers=headers)
-            if resp.status_code == 200:
-                text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip().upper()
-                if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
-                    return text
-    except Exception:
-        pass
-    return None
-
-
-@async_retry(max_retries=2, base_delay=1.0)
-async def _call_gemini_sentiment(title: str, summary: str, asset: dict | None = None) -> str | None:
-    if not config.GEMINI_API_KEY:
-        return None
-    label = asset.get("name", asset["ticker"]) if asset else "тема"
-    prompt = (
-        f"Новость: {title}\nСуть: {summary[:200]}\n\n"
-        f"Актив/тема: {label}\n\n"
-        f"Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. "
-        f"Ответь одним словом."
-    )
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{config.GEMINI_MODEL}:generateContent"
-    )
-    headers = {"Content-Type": "application/json", "X-goog-api-key": config.GEMINI_API_KEY}
-    try:
-        proxy = config.HTTP_PROXY or None
-        async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
-            resp = await client.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 10},
-            }, headers=headers)
-            if resp.status_code == 200:
-                text = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip().upper()
-                if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
-                    return text
-    except Exception:
-        pass
-    return None
-
-
-@async_retry(max_retries=2, base_delay=1.0)
-async def _call_dashscope_sentiment(title: str, summary: str, asset: dict | None = None) -> str | None:
-    if not config.DASHSCOPE_API_KEY:
-        return None
-    base_url = config.DASHSCOPE_BASE_URL.rstrip("/")
-    label = asset.get("name", asset["ticker"]) if asset else "тема"
-    prompt = (
-        f"Новость: {title}\nСуть: {summary[:200]}\n\n"
-        f"Актив/тема: {label}\n\n"
-        f"Определи общий тон новости: POSITIVE, NEGATIVE или NEUTRAL. "
-        f"Ответь одним словом."
-    )
-    try:
-        proxy = config.HTTP_PROXY or None
-        async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
-            resp = await client.post(
-                f"{base_url}/services/aigc/text-generation/generation",
-                headers={"Authorization": f"Bearer {config.DASHSCOPE_API_KEY}", "Content-Type": "application/json"},
-                json={"model": config.DASHSCOPE_MODEL, "input": {"messages": [
-                    {"role": "system", "content": "Отвечай одним словом: POSITIVE, NEGATIVE или NEUTRAL."},
-                    {"role": "user", "content": prompt},
-                ]}, "parameters": {"max_tokens": 10, "temperature": 0.1}},
-            )
-            if resp.status_code == 200:
-                choices = resp.json().get("output", {}).get("choices", [])
-                if choices:
-                    text = choices[0].get("message", {}).get("content", "").strip().upper()
-                    if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
-                        return text
-    except Exception:
-        pass
+    result = await analyze(system_prompt, user_message, parse_json=False,
+                           temperature=0.1, max_tokens=10)
+    if result:
+        text = result.strip().upper()
+        if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
+            return text
     return None
 
 
@@ -325,7 +225,6 @@ async def global_scan(
         neg_triggers = []
         asset = None
         if first_channel and first_channel.get("ticker"):
-            from .database import get_tracked_asset
             asset = await get_tracked_asset(first_channel["ticker"])
             if asset:
                 pos_triggers = asset.get("positive_triggers", [])
@@ -381,15 +280,15 @@ def split_news_text(text: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
-def format_news_batch(items: list[dict], lang: str = "ru") -> list[str]:
-    """Format multiple news items into Telegram messages.
+import datetime
 
-    Each item: {title, source, ticker, summary, impact, link}
-    """
+
+def _format_items(items: list[dict], lang: str, header_prefix: str,
+                  ticker_key: str = "ticker",
+                  extra_keys: tuple = ()) -> list[str]:
     if not items:
         return []
 
-    import datetime
     now = datetime.datetime.now().strftime("%H:%M")
     emoji = {"POSITIVE": "🟢", "NEGATIVE": "🔴", "NEUTRAL": "🟡"}
     disclaimer_ru = "\n\n⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
@@ -399,52 +298,16 @@ def format_news_batch(items: list[dict], lang: str = "ru") -> list[str]:
 
     for i, item in enumerate(items, 1):
         impact_emoji = emoji.get(item["impact"], "🟡")
-        ticker_line = f"  |  🏷 <code>{item['ticker']}</code>" if item.get("ticker") else ""
+        extra = ""
+        for key in extra_keys:
+            val = item.get(key)
+            if val:
+                extra += f"  🔑 {val}"
+        ticker_val = item.get(ticker_key)
+        ticker_info = f"  🏷 <code>{ticker_val}</code>" if ticker_val else ""
         block = (
             f"<b>{i}. {item['title']}</b>\n"
-            f"📡 {item['source']}{ticker_line}\n"
-            f"📌 {item['summary']}\n"
-            f"{impact_emoji} {item['impact']}"
-        )
-        if item.get("link"):
-            block += f'\n🔗 <a href="{item["link"]}">Подробнее</a>' if lang == "ru" else f'\n🔗 <a href="{item["link"]}">Read more</a>'
-        parts.append(block)
-
-    if lang == "ru":
-        header = f"📰 <b>Новости</b> ({len(items)} шт.) — обновлено {now}\n{'─' * 20}\n\n"
-    else:
-        header = f"📰 <b>News</b> ({len(items)} items) — updated {now}\n{'─' * 20}\n\n"
-
-    full_text = header + "\n\n".join(parts) + disclaimer
-    chunks = split_news_text(full_text, max_len=4000)
-
-    if len(chunks) > 1:
-        chunks[-1] += disclaimer
-        chunks = [c.replace(disclaimer, "") for c in chunks[:-1]] + [chunks[-1]]
-
-    return chunks if chunks else [full_text]
-
-
-def format_channel_news(channel_name: str, items: list[dict], lang: str = "ru") -> list[str]:
-    """Format news for a specific channel with channel name header."""
-    if not items:
-        return []
-
-    import datetime
-    now = datetime.datetime.now().strftime("%H:%M")
-    emoji = {"POSITIVE": "🟢", "NEGATIVE": "🔴", "NEUTRAL": "🟡"}
-    disclaimer_ru = "\n\n⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
-    disclaimer_en = "\n\n⚠️ <i>Not an individual investment recommendation.</i>"
-    disclaimer = disclaimer_ru if lang == "ru" else disclaimer_en
-    parts = []
-
-    for i, item in enumerate(items, 1):
-        impact_emoji = emoji.get(item["impact"], "🟡")
-        kw_hint = f"  🔑 {item['matched_keyword']}" if item.get("matched_keyword") else ""
-        ticker_hint = f"  🏷 <code>{item['ticker_hint']}</code>" if item.get("ticker_hint") else ""
-        block = (
-            f"<b>{i}. {item['title']}</b>\n"
-            f"📡 {item['source']}{ticker_hint}{kw_hint}\n"
+            f"📡 {item['source']}{ticker_info}{extra}\n"
             f"📌 {item['summary']}\n"
             f"{impact_emoji} {item['impact']}"
         )
@@ -454,9 +317,13 @@ def format_channel_news(channel_name: str, items: list[dict], lang: str = "ru") 
         parts.append(block)
 
     if lang == "ru":
-        header = f"📰 <b>{channel_name}</b> ({len(items)} шт.) — {now}\n{'─' * 20}\n\n"
+        header = f"📰 <b>{header_prefix}</b> ({len(items)} шт.)"
+        header += " — обновлено " if "Новости" in header_prefix else " — "
+        header += f"{now}\n{'─' * 20}\n\n"
     else:
-        header = f"📰 <b>{channel_name}</b> ({len(items)} items) — {now}\n{'─' * 20}\n\n"
+        header = f"📰 <b>{header_prefix}</b> ({len(items)} items)"
+        header += " — updated " if "News" in header_prefix else " — "
+        header += f"{now}\n{'─' * 20}\n\n"
 
     full_text = header + "\n\n".join(parts) + disclaimer
     chunks = split_news_text(full_text, max_len=4000)
@@ -466,6 +333,17 @@ def format_channel_news(channel_name: str, items: list[dict], lang: str = "ru") 
         chunks = [c.replace(disclaimer, "") for c in chunks[:-1]] + [chunks[-1]]
 
     return chunks if chunks else [full_text]
+
+
+def format_news_batch(items: list[dict], lang: str = "ru") -> list[str]:
+    return _format_items(items, lang, "Новости" if lang == "ru" else "News",
+                         ticker_key="ticker")
+
+
+def format_channel_news(channel_name: str, items: list[dict], lang: str = "ru") -> list[str]:
+    return _format_items(items, lang, channel_name,
+                         ticker_key="ticker_hint",
+                         extra_keys=("matched_keyword",))
 
 
 def format_news_alert(title: str, source: str, analysis: dict, link: str) -> str:

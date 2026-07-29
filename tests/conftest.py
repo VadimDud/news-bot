@@ -22,7 +22,7 @@ async def _clean_db():
 
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         for table in [
-            "users", "finance_subscriptions", "finance_news_sent",
+            "users", "finance_subscriptions",
             "pending_deletions", "news", "tracked_assets",
             "pinned_news", "scan_metrics", "news_delivery_log",
             "user_channels", "channel_news",

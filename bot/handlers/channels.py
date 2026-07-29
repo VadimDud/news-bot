@@ -1,15 +1,21 @@
 """Channel management handler — create, list, edit, delete, scan topic channels."""
 
+import asyncio
+
 from aiogram import Router, F
 from aiogram.filters import BaseFilter
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from ..finance import fetch_news
 from ..i18n import t
 from ..keyboards import subscriber_menu
 from .. import database as db
+from ..news_processor import global_scan, format_channel_news
 from ..sources import get_source_tags_display
+from ..topic_analyzer import analyze_topic
+from .start import _store_msg, _get_text_buttons
 
 router = Router()
 
@@ -83,7 +89,6 @@ async def cmd_channels(message: Message, user_lang: str):
     text = _channel_list_text(channels, user_lang)
     kb = _channels_menu_kb(user_lang, channels)
     msg = await message.answer(text, reply_markup=kb, parse_mode="HTML")
-    from .start import _store_msg
     _store_msg(user_id, msg.message_id)
 
 
@@ -122,7 +127,6 @@ async def channel_state_handler(message: Message, user_lang: str):
     if not state:
         return
 
-    from .start import _get_text_buttons
     if message.text in _get_text_buttons(user_lang) or message.text in _get_text_buttons("ru") or message.text in _get_text_buttons("en"):
         return
 
@@ -154,7 +158,6 @@ async def channel_state_handler(message: Message, user_lang: str):
         state["step"] = "confirm_keywords"
 
         # Try AI expansion
-        from ..topic_analyzer import analyze_topic
         analysis = await analyze_topic(state["name"], keywords)
 
         if analysis and analysis.get("keywords"):
@@ -334,8 +337,7 @@ async def channel_view(callback: CallbackQuery, user_lang: str):
         src_line = "\n📡 Источники: все"
 
     # Count news delivered
-    from ..database import get_channel_news_log
-    recent_news = await get_channel_news_log(channel_id, limit=100)
+    recent_news = await db.get_channel_news_log(channel_id, limit=100)
     news_count = len(recent_news)
 
     text = (
@@ -380,8 +382,7 @@ async def channel_delete_yes(callback: CallbackQuery, user_lang: str):
 
     name = ch["name"]
     await db.delete_channel(channel_id)
-    from ..database import remove_pinned_news_by_channel
-    await remove_pinned_news_by_channel(channel_id)
+    await db.remove_pinned_news_by_channel(channel_id)
 
     channels = await db.get_user_channels(callback.from_user.id)
     text = t(user_lang, "channel_deleted", name=name) + "\n\n" + _channel_list_text(channels, user_lang)
@@ -403,7 +404,6 @@ async def channel_ai_expand(callback: CallbackQuery, user_lang: str):
     await callback.answer()
     await callback.message.edit_text(t(user_lang, "channel_ai_expanding", name=ch["name"]))
 
-    from ..topic_analyzer import analyze_topic
     analysis = await analyze_topic(ch["name"], ch["keywords"])
 
     if not analysis or not analysis.get("keywords"):
@@ -550,9 +550,6 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
     await callback.answer()
     await callback.message.edit_text(t(user_lang, "channel_scan_start", name=ch["name"]))
 
-    from ..finance import fetch_news
-    from ..news_processor import global_scan
-
     source_tags = ch.get("source_tags", [])
     news = await fetch_news(source_tags if source_tags else None)
     if not news:
@@ -562,8 +559,7 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
         )
         return
 
-    from ..news_processor import global_scan
-    results = await global_scan(news, single_channel_list)
+    results = await global_scan(news, [ch])
     matched = results.get(channel_id, [])
 
     new_items = []
@@ -578,12 +574,10 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
         )
         return
 
-    from ..database import save_channel_news, save_news, log_news_delivery, save_pinned_news, get_pinned_news_by_channel
-
     for item in new_items:
-        await save_channel_news(channel_id, item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
-        await save_news(item["content_hash"], callback.from_user.id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
-        await log_news_delivery(callback.from_user.id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+        await db.save_channel_news(channel_id, item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
+        await db.save_news(item["content_hash"], callback.from_user.id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
+        await db.log_news_delivery(callback.from_user.id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
 
     messages = format_channel_news(ch["name"], new_items, user_lang)
 
@@ -594,7 +588,9 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
         rm = kb.as_markup() if i == len(messages) - 1 else None
         msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
         if i == 0:
-            await save_pinned_news(callback.from_user.id, callback.message.chat.id, msg.message_id, channel_id)
+            await db.save_pinned_news(callback.from_user.id, callback.message.chat.id, msg.message_id, channel_id)
+        if i < len(messages) - 1:
+            await asyncio.sleep(1)
 
 
 # ── Scan all channels ──
@@ -609,10 +605,6 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
 
     await callback.answer()
     await callback.message.edit_text(t(user_lang, "channel_scan_all"))
-
-    from ..finance import fetch_news
-    from ..news_processor import global_scan
-    from ..database import save_channel_news, save_news, log_news_delivery
 
     # Collect all source_tags from all channels
     all_tags = set()
@@ -636,9 +628,9 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
         matched = results.get(ch["id"], [])
         for item in matched:
             if not await db.is_channel_news_seen(ch["id"], item["content_hash"]):
-                await save_channel_news(ch["id"], item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
-                await save_news(item["content_hash"], user_id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
-                await log_news_delivery(user_id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+                await db.save_channel_news(ch["id"], item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
+                await db.save_news(item["content_hash"], user_id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
+                await db.log_news_delivery(user_id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
                 total_new += 1
 
     text = t(user_lang, "channel_scan_all_done", count=total_new)

@@ -280,7 +280,7 @@ class TestChannelStateHandler:
         from bot.handlers.channels import channel_state_handler, _channel_state
         _channel_state[100] = {"step": "keywords", "name": "Ch"}
         msg = _make_message(text="слово1, слово2", user_id=100)
-        with patch("bot.topic_analyzer.analyze_topic", new_callable=AsyncMock, return_value=None):
+        with patch("bot.handlers.channels.analyze_topic", new_callable=AsyncMock, return_value=None):
             await channel_state_handler(message=msg, user_lang="ru")
         assert _channel_state[100]["step"] == "ticker"
         assert _channel_state[100]["keywords"] == ["слово1", "слово2"]
@@ -291,7 +291,7 @@ class TestChannelStateHandler:
         _channel_state[100] = {"step": "keywords", "name": "Ch"}
         msg = _make_message(text="слово1, слово2", user_id=100)
         mock_ai = {"keywords": ["слово1", "слово2", "ai_extra"], "related_tickers": ["TICK"]}
-        with patch("bot.topic_analyzer.analyze_topic", new_callable=AsyncMock, return_value=mock_ai):
+        with patch("bot.handlers.channels.analyze_topic", new_callable=AsyncMock, return_value=mock_ai):
             await channel_state_handler(message=msg, user_lang="ru")
         assert _channel_state[100]["step"] == "confirm_keywords"
         assert _channel_state[100]["ai_keywords"] == ["слово1", "слово2", "ai_extra"]
@@ -464,7 +464,7 @@ class TestChannelScan:
         cb = _make_callback(data=f"ch:scan:{ch_id}", user_id=100)
         cb.message.edit_text = AsyncMock()
         cb.message.answer = AsyncMock()
-        with patch("bot.finance.fetch_news", new_callable=AsyncMock, return_value=[]) as mock_fetch:
+        with patch("bot.handlers.channels.fetch_news", new_callable=AsyncMock, return_value=[]) as mock_fetch:
             await channel_scan(callback=cb, user_lang="ru")
         cb.answer.assert_called_once()
         mock_fetch.assert_called_once()
@@ -475,7 +475,7 @@ class TestChannelScan:
         await grant_trial(100, days=30)
         await create_channel(100, "Ch", ["kw"])
         cb = _make_callback(data="ch:scan_all", user_id=100)
-        with patch("bot.finance.fetch_news", new_callable=AsyncMock, return_value=[]) as mock_fetch:
+        with patch("bot.handlers.channels.fetch_news", new_callable=AsyncMock, return_value=[]) as mock_fetch:
             await channel_scan_all(callback=cb, user_lang="ru")
         cb.answer.assert_called_once()
         mock_fetch.assert_called_once()

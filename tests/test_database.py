@@ -9,7 +9,6 @@ from bot.database import (
     add_finance_subscription, remove_finance_subscription,
     get_finance_subscriptions, get_all_finance_users,
     get_active_users_with_assets, get_user_tickers,
-    is_news_sent, mark_news_sent,
     create_channel, get_user_channels, get_channel, get_channel_by_name,
     update_channel_keywords, update_channel_name, update_channel_ticker,
     update_channel_source_tags, delete_channel, delete_user_channels,
@@ -23,7 +22,7 @@ from bot.database import (
     save_tracked_asset, get_tracked_asset, get_all_tracked_assets,
     remove_tracked_asset, has_tracked_asset,
     schedule_deletion, get_due_deletions, remove_deletion,
-    cleanup_old_news_sent, cleanup_old_news,
+    cleanup_old_news,
     is_news_seen as is_news_seen_2, save_news,
     get_total_users, get_new_users_today, get_new_users_this_week,
     get_language_stats, get_finance_subscribers_count,
@@ -223,16 +222,6 @@ class TestFinanceSubscriptions:
         assert len(await get_finance_subscriptions(1002)) == 1
         await remove_finance_subscription(1001, "SBER")
         assert len(await get_finance_subscriptions(1002)) == 1
-
-
-# ── News dedup ──
-
-
-class TestNewsDedup:
-    async def test_mark_and_check(self):
-        assert await is_news_sent("Test Title") is False
-        await mark_news_sent("Test Title", "РБК")
-        assert await is_news_sent("Test Title") is True
 
 
 # ── User Channels ──
@@ -559,24 +548,6 @@ class TestPendingDeletions:
 
 
 class TestCleanup:
-    async def test_cleanup_old_news_sent(self):
-        import aiosqlite
-        await mark_news_sent("Old News", "РБК")
-        async with aiosqlite.connect(config.DATABASE_PATH) as db:
-            await db.execute(
-                "UPDATE finance_news_sent SET sent_at = datetime('now', '-25 hours') WHERE title = 'Old News'"
-            )
-            await db.commit()
-        removed = await cleanup_old_news_sent(max_age_hours=24)
-        assert removed == 1
-        assert await is_news_sent("Old News") is False
-
-    async def test_cleanup_keeps_recent_news_sent(self):
-        await mark_news_sent("Fresh", "РБК")
-        removed = await cleanup_old_news_sent(max_age_hours=24)
-        assert removed == 0
-        assert await is_news_sent("Fresh") is True
-
     async def test_cleanup_old_news(self):
         import aiosqlite
         await save_news("old1", 100, "РБК", "Old", "", "SBER", "Old", "NEUTRAL")
@@ -676,16 +647,15 @@ class TestStatistics:
         assert await get_channels_count() == 2
 
     async def test_news_sent_count(self):
-        await mark_news_sent("N1", "S")
-        await mark_news_sent("N2", "S")
-        assert await get_news_sent_count() == 2
+        await save_news("h1", 100, "РБК", "N1", "", "SBER", "Sum", "NEUTRAL")
+        assert await get_news_sent_count() == 1
 
     async def test_full_stats(self):
         await set_user(1, "u1", "U1", "ru")
         await set_user(2, "u2", "U2", "en")
         await add_finance_subscription(1, "SBER", "SBER")
         await create_channel(1, "Ch1", ["k"])
-        await mark_news_sent("N1", "S")
+        await save_news("h1", 1, "РБК", "N1", "", "SBER", "Sum", "NEUTRAL")
         stats = await get_full_stats()
         assert stats["total"] == 2
         assert stats["lang_ru"] == 1

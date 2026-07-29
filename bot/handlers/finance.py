@@ -1,10 +1,13 @@
 """Finance news handler — subscriptions, monitoring, analysis."""
 
+import asyncio
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from ..asset_analyzer import analyze_ticker
 from ..i18n import t
 from ..keyboards import guest_menu, subscriber_menu
 from .. import database as db
@@ -16,6 +19,7 @@ from ..news_processor import (
     format_news_batch,
     compute_hash,
 )
+from .start import _store_msg, _store_news_msg, _delete_old_news_msg, _get_msg_id, _feedback_state, _get_text_buttons
 
 router = Router()
 
@@ -31,7 +35,6 @@ async def cmd_finance(message: Message, user_lang: str):
     else:
         text = t(user_lang, "finance_empty")
     msg = await message.answer(text, reply_markup=finance_menu(user_lang), parse_mode="HTML")
-    from .start import _store_msg
     _store_msg(message.from_user.id, msg.message_id)
 
 
@@ -130,7 +133,6 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
             return
 
         # Delete old news message
-        from .start import _delete_old_news_msg, _store_news_msg
         user_id = callback.from_user.id
         await _delete_old_news_msg(user_id, callback.message.chat.id, callback.bot)
 
@@ -143,6 +145,8 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
         for i, msg_text in enumerate(messages):
             rm = kb.as_markup() if i == len(messages) - 1 else None
             last_msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+            if i < len(messages) - 1:
+                await asyncio.sleep(1)
         if last_msg:
             _store_news_msg(user_id, last_msg.message_id)
 
@@ -161,12 +165,10 @@ async def finance_receive_ticker(message: Message, user_lang: str):
         return
 
     # Skip if user is in feedback mode
-    from .start import _feedback_state
     if message.from_user.id in _feedback_state:
         return
 
     # Skip if text matches a menu button
-    from .start import _get_text_buttons
     if raw in _get_text_buttons(user_lang) or raw in _get_text_buttons("ru") or raw in _get_text_buttons("en"):
         return
 
@@ -182,13 +184,10 @@ async def finance_receive_ticker(message: Message, user_lang: str):
 
     await db.add_finance_subscription(message.from_user.id, text, raw)
 
-    from .start import _store_msg, _get_msg_id
-
     if not already_tracked:
         # Show analyzing message
         analyzing_msg = await message.answer(t(user_lang, "finance_analyzing", ticker=raw), parse_mode="HTML")
 
-        from ..asset_analyzer import analyze_ticker
         analysis = await analyze_ticker(raw)
 
         if analysis:

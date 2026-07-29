@@ -1,25 +1,40 @@
 import asyncio
+import datetime
 import logging
 import sys
+import time
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.client.telegram import TelegramAPIServer
 
 from bot import config
 from bot.database import (
     init_db, get_due_deletions, remove_deletion,
-    cleanup_old_news_sent, cleanup_old_news,
-    get_users_expiring_soon, get_active_users_with_assets,
+    cleanup_old_news,
+    get_users_expiring_soon, get_language,
+    get_active_users_with_assets, get_all_user_channels,
     get_pinned_news, save_pinned_news,
+    get_pinned_news_by_channel,
+    is_news_seen, save_news,
+    is_channel_news_seen, save_channel_news,
     cleanup_old_delivery_logs, cleanup_old_channel_news,
+    save_scan_metrics, log_news_delivery,
+    get_all_tracked_assets,
 )
+from bot.finance import fetch_news
+from bot.i18n import t
 from bot.middlewares import LanguageMiddleware
 from bot.handlers import start, language, finance, admin, channels
+from bot.news_processor import (
+    global_scan, format_channel_news, compute_hash,
+)
 from bot.retry_utils import async_retry
 from bot.rate_limiter import RateLimiter
+from bot.scheduler import setup_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,10 +54,7 @@ async def cleanup_job(bot: Bot):
             except Exception:
                 pass
             await remove_deletion(entry["id"])
-
-        removed = await cleanup_old_news_sent(max_age_hours=24)
-        if removed:
-            logger.info(f"Cleaned {removed} old finance_news_sent entries")
+            await asyncio.sleep(0.05)
 
         removed_news = await cleanup_old_news(max_age_hours=24)
         if removed_news:
@@ -64,10 +76,6 @@ _expiry_sent_today: set[int] = set()
 
 async def expiry_reminder_job(bot: Bot):
     """Single execution: notify users whose subscription expires soon."""
-    import datetime
-    from bot.i18n import t
-    from bot.database import get_language
-
     try:
         expiring = await get_users_expiring_soon(days=2)
         for user in expiring:
@@ -81,6 +89,7 @@ async def expiry_reminder_job(bot: Bot):
                 logger.info(f"Sent expiry reminder to {uid}")
             except Exception:
                 pass
+            await asyncio.sleep(0.3)
         now = datetime.datetime.now()
         if now.hour == 9 and now.minute < 2:
             _expiry_sent_today.clear()
@@ -95,18 +104,6 @@ _rate_limiter = RateLimiter(max_per_minute=10)
 async def auto_scan_job(bot: Bot):
     """Single execution: auto-scan news and send/edit to active subscribers per channel."""
     global _cached_news
-    import time
-    from bot.finance import fetch_news
-    from bot.news_processor import (
-        global_scan, format_channel_news, compute_hash,
-    )
-    from bot.database import (
-        get_all_tracked_assets, is_news_seen, save_news,
-        get_active_users_with_assets, get_pinned_news, save_pinned_news,
-        save_scan_metrics, log_news_delivery,
-        get_all_user_channels, save_channel_news, is_channel_news_seen,
-        get_pinned_news_by_channel,
-    )
     start_time = time.monotonic()
     metrics = {
         "users_count": 0, "news_fetched": 0, "news_matched": 0,
@@ -222,7 +219,7 @@ async def auto_scan_job(bot: Bot):
 
             if not edited:
                 sent_ok = False
-                for msg_text in messages:
+                for i, msg_text in enumerate(messages):
                     try:
                         msg = await bot.send_message(uid, msg_text, parse_mode="HTML", disable_web_page_preview=True)
                         await save_pinned_news(uid, uid, msg.message_id, channel_id)
@@ -231,6 +228,8 @@ async def auto_scan_job(bot: Bot):
                     except Exception as e:
                         logger.warning(f"Auto-scan: failed to send to {uid}: {e}")
                         break
+                    if i < len(messages) - 1:
+                        await asyncio.sleep(1)
                 if sent_ok:
                     metrics["messages_sent"] += len(messages)
                 if messages:
@@ -275,7 +274,6 @@ async def main():
         bot.session = AiohttpSession(proxy=config.HTTP_PROXY)
     elif config.TELEGRAM_API_SERVER:
         logger.info(f"Using Telegram API mirror: {config.TELEGRAM_API_SERVER}")
-        from aiogram.client.telegram import TelegramAPIServer
         bot.session.api = TelegramAPIServer.from_base(config.TELEGRAM_API_SERVER)
     dp = Dispatcher()
 
@@ -292,7 +290,6 @@ async def main():
 
     logger.info("Bot is now polling. Press Ctrl+C to stop.")
 
-    from bot.scheduler import setup_scheduler
     scheduler = setup_scheduler(
         bot,
         cleanup_func=cleanup_job,

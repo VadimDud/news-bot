@@ -1,3 +1,5 @@
+import asyncio
+
 from aiogram import Router, F
 from aiogram.filters import BaseFilter
 from aiogram.types import Message, CallbackQuery
@@ -5,9 +7,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from ..i18n import t, STRINGS
-from ..keyboards import guest_menu, subscriber_menu, guest_reply_keyboard, subscriber_reply_keyboard
+from ..keyboards import (
+    guest_menu, subscriber_menu, guest_reply_keyboard, subscriber_reply_keyboard,
+    settings_menu,
+)
 from .. import database as db
+from ..asset_analyzer import analyze_ticker
 from ..config import ADMIN_ID
+from ..finance import fetch_finance_news
+from ..news_processor import (
+    stage1_filter, compute_sentiment, stage2_hybrid,
+    format_news_batch, compute_hash,
+)
 
 router = Router()
 
@@ -180,11 +191,6 @@ async def back_main(callback: CallbackQuery, user_lang: str):
 
 async def _scan_and_show_news(target, user_id: int, user_lang: str):
     """Core news scan logic: filter by tracked_assets keywords, show batch in one message."""
-    from ..finance import fetch_finance_news
-    from ..news_processor import (
-        stage1_filter, compute_sentiment, stage2_hybrid,
-        format_news_batch, compute_hash,
-    )
 
     # Load all tracked assets for keyword matching
     tracked_assets = await db.get_all_tracked_assets()
@@ -266,6 +272,8 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             last_msg = await target.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
         else:
             last_msg = await target.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+        if i < len(messages) - 1:
+            await asyncio.sleep(1)
     if last_msg:
         _store_news_msg(user_id, last_msg.message_id)
 
@@ -328,7 +336,6 @@ async def _do_analyze_and_add(callback: CallbackQuery, user_lang: str, ticker: s
         await callback.answer()
         await callback.message.edit_text(t(user_lang, "finance_analyzing", ticker=ticker), parse_mode="HTML")
 
-        from ..asset_analyzer import analyze_ticker
         analysis = await analyze_ticker(ticker)
 
         if analysis:
@@ -413,7 +420,6 @@ async def sub_settings(callback: CallbackQuery, user_lang: str):
         await callback.message.edit_text(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
         await callback.answer()
         return
-    from ..keyboards import settings_menu
     await callback.message.edit_text(t(user_lang, "settings_text"), reply_markup=settings_menu(user_lang))
     await callback.answer()
 
@@ -527,7 +533,7 @@ async def text_button_handler(message: Message, user_lang: str):
             await message.answer(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
             return
         channels = await db.get_user_channels(user_id)
-        from ..handlers.channels import _channel_list_text, _channels_menu_kb
+        from .channels import _channel_list_text, _channels_menu_kb
         text = _channel_list_text(channels, user_lang)
         kb = _channels_menu_kb(user_lang, channels)
         msg = await message.answer(text, reply_markup=kb, parse_mode="HTML")
@@ -550,7 +556,6 @@ async def text_button_handler(message: Message, user_lang: str):
         if not await db.has_access(user_id):
             await message.answer(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
             return
-        from ..keyboards import settings_menu
         msg = await message.answer(t(user_lang, "settings_text"), reply_markup=settings_menu(user_lang))
         _store_msg(user_id, msg.message_id)
 

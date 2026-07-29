@@ -20,15 +20,7 @@ FINANCE_FEEDS = [
     {"name": "Ведомости", "url": "https://www.vedomosti.ru/rss/news.xml", "type": "rss"},
 ]
 
-# Keywords that indicate financial/market news
-FINANCE_KEYWORDS = [
-    "ставк", "инфляц", "дефолт", "рейтинг", "купон", "облигац",
-    "ОФЗ", "евробонд", "акци", "дивиденд", "выручк", "прибыл",
-    "ЦБ", "Росстат", "Мосбирж", "Сбербанк", "Газпром", "ЛУКОЙЛ",
-    "Роснефть", "Норникель", "Яндекс", "Т-Банк", "ВТБ", "Россельхоз",
-    "санкц", "эмитент", "погашен", "размещ", "аукцион", "репо",
-    "ключев", "долг", "бюджет", "ВВП", "нефт", "газ", "металл",
-]
+
 
 
 @async_retry(max_retries=3, base_delay=2.0)
@@ -174,15 +166,7 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
     return unique
 
 
-def _is_finance_relevant(title: str, text: str) -> bool:
-    """Check if news is relevant to finance/investments."""
-    combined = (title + " " + text).lower()
-    return any(kw.lower() in combined for kw in FINANCE_KEYWORDS)
-
-
 def _clean_html(text: str) -> str:
-    """Remove HTML tags."""
-    import re
     return re.sub(r"<[^>]+>", "", text)
 
 

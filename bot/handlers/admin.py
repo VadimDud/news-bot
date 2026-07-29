@@ -2,6 +2,7 @@ import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 
+from .. import database as db
 from ..i18n import t
 from ..keyboards import admin_menu
 from .. import config
@@ -36,7 +37,6 @@ async def admin_handler(callback: CallbackQuery, user_lang: str):
     action = callback.data.split(":")[1]
 
     if action == "stats":
-        from .. import database as db
         stats = await db.get_full_stats()
         await callback.message.edit_text(
             t(user_lang, "admin_stats",
@@ -54,7 +54,6 @@ async def admin_handler(callback: CallbackQuery, user_lang: str):
         await callback.answer()
 
     elif action == "registrations":
-        from .. import database as db
         users = await db.get_all_users()
         if not users:
             table = "_(нет пользователей)_"

@@ -221,7 +221,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         title = item["title"]
         content_hash = compute_hash(title)
 
-        if await db.is_news_seen(content_hash):
+        if await db.is_news_seen(content_hash, user_id):
             continue
 
         is_relevant, matched_ticker, matched_asset = stage1_filter(

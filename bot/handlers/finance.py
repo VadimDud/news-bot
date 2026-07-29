@@ -78,6 +78,7 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
 
     elif action == "scan":
         await callback.answer()
+        user_id = callback.from_user.id
 
         async def _do_finance_scan():
             await callback.message.edit_text(t(user_lang, "scan_progress_rss"), parse_mode="HTML")
@@ -103,7 +104,7 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
                 title = item["title"]
                 content_hash = compute_hash(title)
 
-                if await db.is_news_seen(content_hash):
+                if await db.is_news_seen(content_hash, user_id):
                     continue
 
                 is_relevant, matched_ticker, matched_asset = stage1_filter(
@@ -139,7 +140,6 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
                 await callback.message.edit_text(t(user_lang, "finance_all_seen"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
                 return
 
-            user_id = callback.from_user.id
             await _delete_old_news_msg(user_id, callback.message.chat.id, callback.bot)
 
             messages = format_news_batch(batch_items, user_lang)

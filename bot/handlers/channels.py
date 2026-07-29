@@ -12,6 +12,7 @@ from ..finance import fetch_news
 from ..i18n import t
 from ..keyboards import subscriber_menu
 from .. import database as db
+from .. import config
 from ..news_processor import global_scan, format_channel_news
 from ..sources import get_source_tags_display
 from ..topic_analyzer import analyze_topic
@@ -550,47 +551,62 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
     await callback.answer()
     await callback.message.edit_text(t(user_lang, "channel_scan_start", name=ch["name"]))
 
-    source_tags = ch.get("source_tags", [])
-    news = await fetch_news(source_tags if source_tags else None)
-    if not news:
+    async def _do_scan():
+        source_tags = ch.get("source_tags", [])
+        await callback.message.edit_text(t(user_lang, "scan_progress_rss"))
+        news = await fetch_news(source_tags if source_tags else None)
+        if not news:
+            await callback.message.edit_text(
+                t(user_lang, "channel_no_news"),
+                reply_markup=_channel_detail_kb(user_lang, channel_id),
+            )
+            return
+
         await callback.message.edit_text(
-            t(user_lang, "channel_no_news"),
-            reply_markup=_channel_detail_kb(user_lang, channel_id),
+            t(user_lang, "scan_progress_analyze", count=len(news))
         )
-        return
+        results = await global_scan(news, [ch])
+        matched = results.get(channel_id, [])
 
-    results = await global_scan(news, [ch])
-    matched = results.get(channel_id, [])
+        new_items = []
+        for item in matched:
+            if not await db.is_channel_news_seen(channel_id, item["content_hash"]):
+                new_items.append(item)
 
-    new_items = []
-    for item in matched:
-        if not await db.is_channel_news_seen(channel_id, item["content_hash"]):
-            new_items.append(item)
+        if not new_items:
+            await callback.message.edit_text(
+                t(user_lang, "channel_no_news"),
+                reply_markup=_channel_detail_kb(user_lang, channel_id),
+            )
+            return
 
-    if not new_items:
+        for item in new_items:
+            await db.save_channel_news(channel_id, item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
+            await db.save_news(item["content_hash"], callback.from_user.id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
+            await db.log_news_delivery(callback.from_user.id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+
+        messages = format_channel_news(ch["name"], new_items, user_lang)
+
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data=f"ch:view:{channel_id}"))
+
+        for i, msg_text in enumerate(messages):
+            rm = kb.as_markup() if i == len(messages) - 1 else None
+            msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+            if i == 0:
+                await db.save_pinned_news(callback.from_user.id, callback.message.chat.id, msg.message_id, channel_id)
+            if i < len(messages) - 1:
+                await asyncio.sleep(1)
+
+    try:
+        await asyncio.wait_for(_do_scan(), timeout=config.SCAN_TIMEOUT)
+    except asyncio.TimeoutError:
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data=f"ch:view:{channel_id}"))
         await callback.message.edit_text(
-            t(user_lang, "channel_no_news"),
-            reply_markup=_channel_detail_kb(user_lang, channel_id),
+            t(user_lang, "scan_timeout"),
+            reply_markup=kb.as_markup(),
         )
-        return
-
-    for item in new_items:
-        await db.save_channel_news(channel_id, item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
-        await db.save_news(item["content_hash"], callback.from_user.id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
-        await db.log_news_delivery(callback.from_user.id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
-
-    messages = format_channel_news(ch["name"], new_items, user_lang)
-
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data=f"ch:view:{channel_id}"))
-
-    for i, msg_text in enumerate(messages):
-        rm = kb.as_markup() if i == len(messages) - 1 else None
-        msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
-        if i == 0:
-            await db.save_pinned_news(callback.from_user.id, callback.message.chat.id, msg.message_id, channel_id)
-        if i < len(messages) - 1:
-            await asyncio.sleep(1)
 
 
 # ── Scan all channels ──
@@ -606,33 +622,46 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
     await callback.answer()
     await callback.message.edit_text(t(user_lang, "channel_scan_all"))
 
-    # Collect all source_tags from all channels
-    all_tags = set()
-    for ch in channels:
-        for tag in ch.get("source_tags", []):
-            all_tags.add(tag)
+    async def _do_scan_all():
+        all_tags = set()
+        for ch in channels:
+            for tag in ch.get("source_tags", []):
+                all_tags.add(tag)
 
-    news = await fetch_news(list(all_tags) if all_tags else None)
-    if not news:
+        await callback.message.edit_text(t(user_lang, "scan_progress_rss"))
+        news = await fetch_news(list(all_tags) if all_tags else None)
+        if not news:
+            await callback.message.edit_text(
+                t(user_lang, "finance_no_news"),
+                reply_markup=_channels_menu_kb(user_lang, channels),
+            )
+            return
+
         await callback.message.edit_text(
-            t(user_lang, "finance_no_news"),
-            reply_markup=_channels_menu_kb(user_lang, channels),
+            t(user_lang, "scan_progress_analyze", count=len(news))
         )
-        return
+        all_channels = await db.get_all_user_channels()
+        results = await global_scan(news, all_channels)
 
-    all_channels = await db.get_all_user_channels()
-    results = await global_scan(news, all_channels)
+        total_new = 0
+        for ch in channels:
+            matched = results.get(ch["id"], [])
+            for item in matched:
+                if not await db.is_channel_news_seen(ch["id"], item["content_hash"]):
+                    await db.save_channel_news(ch["id"], item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
+                    await db.save_news(item["content_hash"], user_id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
+                    await db.log_news_delivery(user_id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
+                    total_new += 1
 
-    total_new = 0
-    for ch in channels:
-        matched = results.get(ch["id"], [])
-        for item in matched:
-            if not await db.is_channel_news_seen(ch["id"], item["content_hash"]):
-                await db.save_channel_news(ch["id"], item["content_hash"], item.get("matched_keyword", ""), item.get("ticker_hint", ""), item["impact"])
-                await db.save_news(item["content_hash"], user_id, item["source"], item["title"], item.get("link", ""), item.get("ticker_hint", ""), item["summary"], item["impact"])
-                await db.log_news_delivery(user_id, item.get("ticker_hint", ""), item["title"], item["source"], item["impact"])
-                total_new += 1
+        text = t(user_lang, "scan_progress_done", count=total_new)
+        kb = _channels_menu_kb(user_lang, channels)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-    text = t(user_lang, "channel_scan_all_done", count=total_new)
-    kb = _channels_menu_kb(user_lang, channels)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await asyncio.wait_for(_do_scan_all(), timeout=config.SCAN_TIMEOUT)
+    except asyncio.TimeoutError:
+        kb = _channels_menu_kb(user_lang, channels)
+        await callback.message.edit_text(
+            t(user_lang, "scan_timeout"),
+            reply_markup=kb,
+        )

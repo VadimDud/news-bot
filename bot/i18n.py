@@ -232,6 +232,10 @@ STRINGS = {
         "channel_scan_start": "🔄 Сканирую ленту <b>{name}</b>...",
         "channel_scan_done": "✅ Найдено {count} новых новостей.",
         "channel_no_news": "ℹ️ Свежих новостей в ленте нет.",
+        "scan_progress_rss": "📥 Загружаю новости из RSS...",
+        "scan_progress_analyze": "🧠 Анализирую новости ({count} шт.)...",
+        "scan_progress_done": "✅ Готово! Найдено {count} новых новостей.",
+        "scan_timeout": "⏰ Сканирование заняло слишком много времени. Попробуйте позже.",
         "channel_keywords_hint": (
             "💡 <b>Совет:</b> Используйте cụ体ные слова для точного поиска.\n"
             "Чем точнее ключевые слова, тем лучше результат."
@@ -545,6 +549,10 @@ STRINGS = {
         "channel_scan_start": "🔄 Scanning channel <b>{name}</b>...",
         "channel_scan_done": "✅ Found {count} new news items.",
         "channel_no_news": "ℹ️ No new news in this channel.",
+        "scan_progress_rss": "📥 Fetching news from RSS...",
+        "scan_progress_analyze": "🧠 Analyzing news ({count} items)...",
+        "scan_progress_done": "✅ Done! Found {count} new news items.",
+        "scan_timeout": "⏰ Scan took too long. Please try again later.",
         "channel_keywords_hint": (
             "💡 <b>Tip:</b> Use specific words for better search.\n"
             "The more precise the keywords, the better the results."

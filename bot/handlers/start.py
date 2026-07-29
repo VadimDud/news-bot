@@ -13,6 +13,7 @@ from ..keyboards import (
 )
 from .. import database as db
 from ..asset_analyzer import analyze_ticker
+from .. import config
 from ..config import ADMIN_ID
 from ..finance import fetch_finance_news
 from ..news_processor import (
@@ -192,17 +193,27 @@ async def back_main(callback: CallbackQuery, user_lang: str):
 async def _scan_and_show_news(target, user_id: int, user_lang: str):
     """Core news scan logic: filter by tracked_assets keywords, show batch in one message."""
 
-    # Load all tracked assets for keyword matching
     tracked_assets = await db.get_all_tracked_assets()
     if not tracked_assets:
         text = t(user_lang, "finance_empty") if user_lang == "ru" else "💰 <b>Financial Analysis</b>\n\nAdd a ticker first to track news."
         await _send_or_edit(target, user_id, text, reply_markup=subscriber_menu(user_lang))
         return
 
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(t(user_lang, "scan_progress_rss"), parse_mode="HTML")
+    else:
+        pass  # Message — caller already sent progress
+
     news = await fetch_finance_news()
     if not news:
         await _send_or_edit(target, user_id, t(user_lang, "finance_no_news"), reply_markup=subscriber_menu(user_lang))
         return
+
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(
+            t(user_lang, "scan_progress_analyze", count=min(len(news), 20)),
+            parse_mode="HTML",
+        )
 
     batch_items = []
 
@@ -219,10 +230,8 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         if not is_relevant:
             continue
 
-        # Compute sentiment from triggers (0 tokens)
         impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
-        # Hybrid fallback: only call AI if ambiguous or low confidence
         if confidence == "low" or impact == "NEUTRAL":
             ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
             if ai_impact:
@@ -244,7 +253,6 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             "link": item.get("link", ""),
         })
 
-    # Delete old news message
     chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
     bot_instance = target.message.bot if isinstance(target, CallbackQuery) else target.bot
     try:
@@ -256,15 +264,12 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         await _send_or_edit(target, user_id, t(user_lang, "finance_all_seen"), reply_markup=subscriber_menu(user_lang))
         return
 
-    # Format all news in one or more messages
     messages = format_news_batch(batch_items, user_lang)
 
-    # Add menu button to last message
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
     reply_markup = kb.as_markup()
 
-    # Send messages
     last_msg = None
     for i, msg_text in enumerate(messages):
         rm = reply_markup if i == len(messages) - 1 else None
@@ -285,9 +290,14 @@ async def sub_news(callback: CallbackQuery, user_lang: str):
         await callback.message.edit_text(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
         await callback.answer()
         return
-    await callback.answer("🔄 Сканирую новости...")
-    await callback.message.edit_text("🔄 Сканирую новости...")
-    await _scan_and_show_news(callback, user_id, user_lang)
+    await callback.answer()
+    await callback.message.edit_text("🔄 Сканирую новости...", parse_mode="HTML")
+    try:
+        await asyncio.wait_for(_scan_and_show_news(callback, user_id, user_lang), timeout=config.SCAN_TIMEOUT)
+    except asyncio.TimeoutError:
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+        await callback.message.edit_text(t(user_lang, "scan_timeout"), reply_markup=kb.as_markup())
 
 
 # ── Subscriber menu callbacks ──
@@ -526,7 +536,11 @@ async def text_button_handler(message: Message, user_lang: str):
         if not await db.has_access(user_id):
             await message.answer(t(user_lang, "access_denied"), reply_markup=guest_menu(user_lang))
             return
-        await _scan_and_show_news(message, user_id, user_lang)
+        await message.answer(t(user_lang, "scan_progress_rss"), parse_mode="HTML")
+        try:
+            await asyncio.wait_for(_scan_and_show_news(message, user_id, user_lang), timeout=config.SCAN_TIMEOUT)
+        except asyncio.TimeoutError:
+            await message.answer(t(user_lang, "scan_timeout"))
 
     elif action == "ch:list":
         if not await db.has_access(user_id):

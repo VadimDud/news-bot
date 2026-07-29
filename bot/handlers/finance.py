@@ -11,6 +11,7 @@ from ..asset_analyzer import analyze_ticker
 from ..i18n import t
 from ..keyboards import guest_menu, subscriber_menu
 from .. import database as db
+from .. import config
 from ..finance import fetch_finance_news
 from ..news_processor import (
     stage1_filter,
@@ -77,78 +78,91 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
 
     elif action == "scan":
         await callback.answer()
-        await callback.message.edit_text("🔄 Сканирую новости...", parse_mode="HTML")
 
-        # Load tracked assets for keyword filtering
-        tracked_assets = await db.get_all_tracked_assets()
-        if not tracked_assets:
-            await callback.message.edit_text(t(user_lang, "finance_empty"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
-            return
+        async def _do_finance_scan():
+            await callback.message.edit_text(t(user_lang, "scan_progress_rss"), parse_mode="HTML")
 
-        news = await fetch_finance_news()
-        if not news:
-            await callback.message.edit_text(t(user_lang, "finance_no_news"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
-            return
+            tracked_assets = await db.get_all_tracked_assets()
+            if not tracked_assets:
+                await callback.message.edit_text(t(user_lang, "finance_empty"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
+                return
 
-        batch_items = []
+            news = await fetch_finance_news()
+            if not news:
+                await callback.message.edit_text(t(user_lang, "finance_no_news"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
+                return
 
-        for item in news[:20]:
-            title = item["title"]
-            content_hash = compute_hash(title)
-
-            if await db.is_news_seen(content_hash):
-                continue
-
-            is_relevant, matched_ticker, matched_asset = stage1_filter(
-                title, item["summary"], tracked_assets
-            )
-            if not is_relevant:
-                continue
-
-            impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
-
-            if confidence == "low" or impact == "NEUTRAL":
-                ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
-                if ai_impact:
-                    impact = ai_impact
-
-            summary = item["summary"][:200] if item["summary"] else title[:200]
-
-            await db.save_news(
-                content_hash, item["source"], title, item.get("link", ""),
-                matched_ticker, summary, impact,
+            await callback.message.edit_text(
+                t(user_lang, "scan_progress_analyze", count=min(len(news), 20)),
+                parse_mode="HTML",
             )
 
-            batch_items.append({
-                "title": title,
-                "source": item["source"],
-                "ticker": matched_ticker,
-                "summary": summary,
-                "impact": impact,
-                "link": item.get("link", ""),
-            })
+            batch_items = []
 
-        if not batch_items:
-            await callback.message.edit_text(t(user_lang, "finance_all_seen"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
-            return
+            for item in news[:20]:
+                title = item["title"]
+                content_hash = compute_hash(title)
 
-        # Delete old news message
-        user_id = callback.from_user.id
-        await _delete_old_news_msg(user_id, callback.message.chat.id, callback.bot)
+                if await db.is_news_seen(content_hash):
+                    continue
 
-        # Format all news in one or more messages
-        messages = format_news_batch(batch_items, user_lang)
-        kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+                is_relevant, matched_ticker, matched_asset = stage1_filter(
+                    title, item["summary"], tracked_assets
+                )
+                if not is_relevant:
+                    continue
 
-        last_msg = None
-        for i, msg_text in enumerate(messages):
-            rm = kb.as_markup() if i == len(messages) - 1 else None
-            last_msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
-            if i < len(messages) - 1:
-                await asyncio.sleep(1)
-        if last_msg:
-            _store_news_msg(user_id, last_msg.message_id)
+                impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
+
+                if confidence == "low" or impact == "NEUTRAL":
+                    ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
+                    if ai_impact:
+                        impact = ai_impact
+
+                summary = item["summary"][:200] if item["summary"] else title[:200]
+
+                await db.save_news(
+                    content_hash, item["source"], title, item.get("link", ""),
+                    matched_ticker, summary, impact,
+                )
+
+                batch_items.append({
+                    "title": title,
+                    "source": item["source"],
+                    "ticker": matched_ticker,
+                    "summary": summary,
+                    "impact": impact,
+                    "link": item.get("link", ""),
+                })
+
+            if not batch_items:
+                await callback.message.edit_text(t(user_lang, "finance_all_seen"), reply_markup=finance_menu(user_lang), parse_mode="HTML")
+                return
+
+            user_id = callback.from_user.id
+            await _delete_old_news_msg(user_id, callback.message.chat.id, callback.bot)
+
+            messages = format_news_batch(batch_items, user_lang)
+            kb = InlineKeyboardBuilder()
+            kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
+
+            last_msg = None
+            for i, msg_text in enumerate(messages):
+                rm = kb.as_markup() if i == len(messages) - 1 else None
+                last_msg = await callback.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+                if i < len(messages) - 1:
+                    await asyncio.sleep(1)
+            if last_msg:
+                _store_news_msg(user_id, last_msg.message_id)
+
+        try:
+            await asyncio.wait_for(_do_finance_scan(), timeout=config.SCAN_TIMEOUT)
+        except asyncio.TimeoutError:
+            await callback.message.edit_text(
+                t(user_lang, "scan_timeout"),
+                reply_markup=finance_menu(user_lang),
+                parse_mode="HTML",
+            )
 
 
 # ── Receive ticker/company name to add (text input) ──

@@ -32,5 +32,11 @@ DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
 DASHSCOPE_MODEL: str = os.getenv("DASHSCOPE_MODEL", "qwen-turbo")
 
+# Default AI agent for analysis (primary provider in the priority chain)
+DEFAULT_AGENT: str = os.getenv("DEFAULT_AGENT", "deepseek")
+
+# Max time in seconds for a user-triggered scan before timing out
+SCAN_TIMEOUT: int = int(os.getenv("SCAN_TIMEOUT", "120"))
+
 # Auto-scan news interval (in seconds, default 1800 = 30 minutes)
 AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "1800"))

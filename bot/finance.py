@@ -1,5 +1,6 @@
 """Financial news analysis module."""
 
+import asyncio
 import logging
 import re
 import httpx
@@ -23,50 +24,48 @@ FINANCE_FEEDS = [
 
 
 
-@async_retry(max_retries=3, base_delay=2.0)
+@async_retry(max_retries=2, base_delay=2.0)
 async def fetch_finance_news() -> list[dict]:
     """Fetch latest news from Russian sources (no pre-filter — stage1_filter handles relevance)."""
-    all_news = []
 
-    for feed_info in FINANCE_FEEDS:
+    async def _fetch_one(feed_info: dict) -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(feed_info["url"], follow_redirects=True)
                 if resp.status_code != 200:
-                    continue
-
+                    return []
                 if feed_info["type"] == "rss":
                     feed = feedparser.parse(resp.text)
-                    for entry in feed.entries[:30]:
-                        title = entry.get("title", "")
-                        summary = entry.get("summary", "")
-                        link = entry.get("link", "")
-                        all_news.append({
-                            "title": title,
-                            "summary": _clean_html(summary)[:300],
-                            "link": link,
+                    return [
+                        {
+                            "title": e.get("title", ""),
+                            "summary": _clean_html(e.get("summary", ""))[:300],
+                            "link": e.get("link", ""),
                             "source": feed_info["name"],
-                            "published": entry.get("published", ""),
-                        })
+                            "published": e.get("published", ""),
+                        }
+                        for e in feed.entries[:30]
+                    ]
                 elif feed_info["type"] == "json":
                     data = resp.json()
                     items = data.get("items", data.get("news", []))
-                    for item in items[:30]:
-                        title = item.get("title", "")
-                        desc = item.get("desc", item.get("description", ""))
-                        link = item.get("url", item.get("link", ""))
-                        all_news.append({
-                            "title": title,
-                            "summary": _clean_html(desc)[:300],
-                            "link": link,
+                    return [
+                        {
+                            "title": it.get("title", ""),
+                            "summary": _clean_html(it.get("desc", it.get("description", "")))[:300],
+                            "link": it.get("url", it.get("link", "")),
                             "source": feed_info["name"],
-                            "published": item.get("publishDate", ""),
-                        })
+                            "published": it.get("publishDate", ""),
+                        }
+                        for it in items[:30]
+                    ]
         except Exception as e:
             logger.warning(f"Failed to fetch {feed_info['name']}: {e}")
-            continue
+        return []
 
-    # Deduplicate by title
+    results = await asyncio.gather(*[_fetch_one(f) for f in FINANCE_FEEDS])
+    all_news = [item for batch in results for item in batch]
+
     seen = set()
     unique = []
     for item in all_news:
@@ -83,7 +82,7 @@ _fetch_cache: dict[frozenset, tuple[float, list[dict]]] = {}
 _FETCH_CACHE_TTL = 300  # 5 minutes
 
 
-@async_retry(max_retries=3, base_delay=2.0)
+@async_retry(max_retries=2, base_delay=2.0)
 async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
     """Fetch news from sources matching the given tags.
 
@@ -98,7 +97,6 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
     cache_key = frozenset(source_tags or [])
     now = time.time()
 
-    # Check cache
     if cache_key in _fetch_cache:
         cached_time, cached_news = _fetch_cache[cache_key]
         if now - cached_time < _FETCH_CACHE_TTL:
@@ -109,48 +107,46 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
     if not sources:
         sources = get_sources_by_tags([])
 
-    all_news = []
-    for feed_info in sources:
+    async def _fetch_one(feed_info: dict) -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(feed_info["url"], follow_redirects=True)
                 if resp.status_code != 200:
-                    continue
-
+                    return []
                 if feed_info["type"] == "rss":
                     feed = feedparser.parse(resp.text)
-                    for entry in feed.entries[:30]:
-                        title = entry.get("title", "")
-                        summary = entry.get("summary", "")
-                        link = entry.get("link", "")
-                        all_news.append({
-                            "title": title,
-                            "summary": _clean_html(summary)[:300],
-                            "link": link,
+                    return [
+                        {
+                            "title": e.get("title", ""),
+                            "summary": _clean_html(e.get("summary", ""))[:300],
+                            "link": e.get("link", ""),
                             "source": feed_info["name"],
                             "source_tag": feed_info.get("tag", ""),
-                            "published": entry.get("published", ""),
-                        })
+                            "published": e.get("published", ""),
+                        }
+                        for e in feed.entries[:30]
+                    ]
                 elif feed_info["type"] == "json":
                     data = resp.json()
                     items = data.get("items", data.get("news", []))
-                    for item in items[:30]:
-                        title = item.get("title", "")
-                        desc = item.get("desc", item.get("description", ""))
-                        link = item.get("url", item.get("link", ""))
-                        all_news.append({
-                            "title": title,
-                            "summary": _clean_html(desc)[:300],
-                            "link": link,
+                    return [
+                        {
+                            "title": it.get("title", ""),
+                            "summary": _clean_html(it.get("desc", it.get("description", "")))[:300],
+                            "link": it.get("url", it.get("link", "")),
                             "source": feed_info["name"],
                             "source_tag": feed_info.get("tag", ""),
-                            "published": item.get("publishDate", ""),
-                        })
+                            "published": it.get("publishDate", ""),
+                        }
+                        for it in items[:30]
+                    ]
         except Exception as e:
             logger.warning(f"Failed to fetch {feed_info['name']}: {e}")
-            continue
+        return []
 
-    # Deduplicate by title
+    results = await asyncio.gather(*[_fetch_one(f) for f in sources])
+    all_news = [item for batch in results for item in batch]
+
     seen = set()
     unique = []
     for item in all_news:
@@ -159,7 +155,6 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
             seen.add(key)
             unique.append(item)
 
-    # Update cache
     _fetch_cache[cache_key] = (now, unique)
     logger.info(f"fetch_news: fetched {len(unique)} unique items from {len(sources)} sources (tags: {list(cache_key) or 'all'})")
 

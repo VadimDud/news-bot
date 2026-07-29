@@ -157,7 +157,8 @@ def compute_sentiment(title: str, summary: str, asset: dict | None = None,
 async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
                         positive_triggers: list[str] | None = None,
                         negative_triggers: list[str] | None = None,
-                        trigger_confidence: str = "low") -> str | None:
+                        trigger_confidence: str = "low",
+                        ai_timeout: int = 10) -> str | None:
     combined = _normalize(title + " " + summary)
     pos_triggers = positive_triggers or (asset.get("positive_triggers", []) if asset else [])
     neg_triggers = negative_triggers or (asset.get("negative_triggers", []) if asset else [])
@@ -183,7 +184,7 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
         f"Ответь одним словом."
     )
     result = await analyze(system_prompt, user_message, parse_json=False,
-                           temperature=0.1, max_tokens=10)
+                           temperature=0.1, max_tokens=10, timeout=ai_timeout)
     if result:
         text = result.strip().upper()
         if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):

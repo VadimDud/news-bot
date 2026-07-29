@@ -4,6 +4,7 @@ Each provider implements the same interface. Call analyze() to try
 providers in priority order (DeepSeek -> Gemini -> DashScope).
 """
 
+from collections.abc import Callable
 import json
 import logging
 import re
@@ -28,13 +29,14 @@ def _parse_json(text: str) -> dict | None:
 
 @async_retry(max_retries=2, base_delay=1.0)
 async def _call_deepseek(system_prompt: str, user_message: str,
-                         temperature: float = 0.2, max_tokens: int = 4096) -> str | None:
+                         temperature: float = 0.2, max_tokens: int = 4096,
+                         timeout: int = 30) -> str | None:
     if not config.DEEPSEEK_API_KEY:
         return None
     url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json={
                 "model": config.DEEPSEEK_MODEL,
                 "messages": [
@@ -53,7 +55,8 @@ async def _call_deepseek(system_prompt: str, user_message: str,
 
 @async_retry(max_retries=2, base_delay=1.0)
 async def _call_gemini(system_prompt: str, user_message: str,
-                       temperature: float = 0.2, max_tokens: int = 4096) -> str | None:
+                       temperature: float = 0.2, max_tokens: int = 4096,
+                       timeout: int = 30) -> str | None:
     if not config.GEMINI_API_KEY:
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
@@ -61,7 +64,7 @@ async def _call_gemini(system_prompt: str, user_message: str,
     prompt = f"{system_prompt}\n\n{user_message}"
     try:
         proxy = config.HTTP_PROXY or None
-        async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             resp = await client.post(url, json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
@@ -76,13 +79,14 @@ async def _call_gemini(system_prompt: str, user_message: str,
 
 @async_retry(max_retries=2, base_delay=1.0)
 async def _call_dashscope(system_prompt: str, user_message: str,
-                          temperature: float = 0.2, max_tokens: int = 4096) -> str | None:
+                          temperature: float = 0.2, max_tokens: int = 4096,
+                          timeout: int = 30) -> str | None:
     if not config.DASHSCOPE_API_KEY:
         return None
     base_url = config.DASHSCOPE_BASE_URL.rstrip("/")
     try:
         proxy = config.HTTP_PROXY or None
-        async with httpx.AsyncClient(timeout=30, proxy=proxy) as client:
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
             resp = await client.post(
                 f"{base_url}/services/aigc/text-generation/generation",
                 headers={
@@ -107,17 +111,28 @@ async def _call_dashscope(system_prompt: str, user_message: str,
     return None
 
 
-_PROVIDERS = [
-    ("deepseek", _call_deepseek),
-    ("gemini", _call_gemini),
-    ("dashscope", _call_dashscope),
-]
+_AVAILABLE_PROVIDERS: dict[str, Callable] = {
+    "deepseek": _call_deepseek,
+    "gemini": _call_gemini,
+    "dashscope": _call_dashscope,
+}
+
+
+def _build_providers() -> list[tuple[str, Callable]]:
+    default = config.DEFAULT_AGENT
+    ordered = [default] + [p for p in _AVAILABLE_PROVIDERS if p != default]
+    return [(name, _AVAILABLE_PROVIDERS[name]) for name in ordered
+            if name in _AVAILABLE_PROVIDERS]
+
+
+_PROVIDERS = _build_providers()
 
 
 async def analyze(system_prompt: str, user_message: str, *,
                   temperature: float = 0.2, max_tokens: int = 4096,
-                  parse_json: bool = True) -> dict | str | None:
-    """Try each AI provider in priority order.
+                  parse_json: bool = True,
+                  timeout: int = 30) -> dict | str | None:
+    """Try each AI provider, starting with DEFAULT_AGENT.
 
     Args:
         system_prompt: System-level instructions.
@@ -126,12 +141,13 @@ async def analyze(system_prompt: str, user_message: str, *,
         max_tokens: Max output tokens.
         parse_json: If True, parse response as JSON and return dict.
                     If False, return raw text or None.
+        timeout: HTTP timeout per provider call in seconds.
 
     Returns:
         Parsed dict, raw string, or None if all providers failed.
     """
     for name, provider in _PROVIDERS:
-        text = await provider(system_prompt, user_message, temperature, max_tokens)
+        text = await provider(system_prompt, user_message, temperature, max_tokens, timeout=timeout)
         if not text:
             continue
         if parse_json:

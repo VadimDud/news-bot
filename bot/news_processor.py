@@ -79,7 +79,7 @@ def _simple_stem(word: str) -> str:
     word = word.lower()
     for ending in ("ого", "ему", "ать", "ить", "еть", "ятся", "ются", "тся",
                     "ий", "ый", "ой", "ая", "яя", "ое", "ее", "ов", "ев",
-                    "ам", "ям", "ах", "ях", "ов", "ев", "ах", "ях"):
+                    "ам", "ям", "ах", "ях"):
         if len(word) > len(ending) + 3 and word.endswith(ending):
             return word[:-len(ending)]
     return word

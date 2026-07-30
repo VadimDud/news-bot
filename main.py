@@ -150,13 +150,7 @@ async def auto_scan_job(bot: Bot):
         metrics["news_fetched"] = len(news)
         logger.info(f"Auto-scan: fetched {len(news)} news items")
 
-        channel_results = await global_scan(news, all_channels)
-        # global_scan now returns (results, buffer_updates)
-        if isinstance(channel_results, tuple):
-            channel_results, buffer_updates = channel_results
-        else:
-            channel_results = channel_results
-            buffer_updates = []
+        channel_results, buffer_updates = await global_scan(news, all_channels)
 
         # Write to news_buffer
         tickers_refreshed = set()

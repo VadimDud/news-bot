@@ -129,7 +129,7 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
                 summary = item["summary"][:200] if item["summary"] else title[:200]
 
                 await db.save_news(
-                    content_hash, item["source"], title, item.get("link", ""),
+                    content_hash, user_id, item["source"], title, item.get("link", ""),
                     matched_ticker, summary, impact,
                 )
 

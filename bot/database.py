@@ -25,11 +25,6 @@ async def init_db():
             created       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    for col, coltype in (("access_until", "TEXT"), ("is_trial_used", "INTEGER NOT NULL DEFAULT 0"), ("created", "TIMESTAMP")):
-        try:
-            await _db.execute(f"ALTER TABLE users ADD COLUMN {col} {coltype}")
-        except Exception:
-            pass
     await _db.execute("""
         CREATE TABLE IF NOT EXISTS finance_subscriptions (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,

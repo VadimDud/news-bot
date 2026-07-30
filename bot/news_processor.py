@@ -6,19 +6,32 @@
    4. Distribution to matched channels
 """
 
+import datetime
 import hashlib
 import logging
+import math
 import re
 import struct
 
 from . import config
 from .ai_client import analyze
-from .database import get_tracked_asset
+from .database import (get_tracked_asset, get_max_ticker_subscriber_count,
+                       get_subscriber_count_for_ticker)
 
 logger = logging.getLogger(__name__)
 
 # Maximum number of AI calls per scan to prevent blocking
 MAX_AI_CALLS_PER_SCAN = 5
+
+# Importance score weights
+IMPORTANCE_WEIGHTS = {
+    "sentiment_magnitude": 0.25,
+    "ai_confidence": 0.20,
+    "source_authority": 0.10,
+    "recency": 0.15,
+    "match_count": 0.10,
+    "subscriber_popularity": 0.20,
+}
 
 
 # ── MinHash / dedup ──
@@ -195,6 +208,55 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
     return None
 
 
+def compute_importance_score(
+    title: str,
+    summary: str,
+    sentiment: str,
+    confidence: str,
+    pos_count: int = 0,
+    neg_count: int = 0,
+    match_count: int = 0,
+    subscriber_count: int = 0,
+    max_subscriber_count: int = 1,
+    created_at: datetime.datetime | None = None,
+) -> float:
+    now = datetime.datetime.now()
+
+    magnitude = abs(pos_count - neg_count) / max(pos_count + neg_count, 1)
+    if sentiment == "POSITIVE":
+        sentiment_magnitude = magnitude
+    elif sentiment == "NEGATIVE":
+        sentiment_magnitude = magnitude
+    else:
+        sentiment_magnitude = magnitude * 0.5
+
+    ai_confidence_factor = 1.0 if confidence == "high" else 0.5
+
+    source_authority = 0.7
+
+    if created_at:
+        hours_old = (now - created_at).total_seconds() / 3600
+        recency = math.exp(-hours_old / 24)
+    else:
+        recency = 1.0
+
+    match_factor = min(match_count / 20, 1.0)
+
+    sub_norm = math.log(subscriber_count + 1) / math.log(max_subscriber_count + 1)
+    subscriber_factor = min(sub_norm, 1.0)
+
+    score = (
+        IMPORTANCE_WEIGHTS["sentiment_magnitude"] * sentiment_magnitude +
+        IMPORTANCE_WEIGHTS["ai_confidence"] * ai_confidence_factor +
+        IMPORTANCE_WEIGHTS["source_authority"] * source_authority +
+        IMPORTANCE_WEIGHTS["recency"] * recency +
+        IMPORTANCE_WEIGHTS["match_count"] * match_factor +
+        IMPORTANCE_WEIGHTS["subscriber_popularity"] * subscriber_factor
+    )
+
+    return round(min(max(score, 0.0), 1.0), 4)
+
+
 # ── Global scan: process all news against all channels ──
 
 async def global_scan(
@@ -212,6 +274,8 @@ async def global_scan(
 
     results: dict[int, list[dict]] = {}
     ai_calls_count = 0
+    max_sub_count = await get_max_ticker_subscriber_count()
+    buffer_updates: list[dict] = []
 
     for item in news_items[:20]:
         title = item["title"]
@@ -236,6 +300,11 @@ async def global_scan(
                 pos_triggers = asset.get("positive_triggers", [])
                 neg_triggers = asset.get("negative_triggers", [])
 
+        # Compute trigger counts for importance
+        combined = _normalize(title + " " + summary)
+        pos_count = sum(1 for t in pos_triggers if _normalize(t) in combined) if pos_triggers else 0
+        neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined) if neg_triggers else 0
+
         sentiment, confidence = compute_sentiment(title, summary, asset, pos_triggers, neg_triggers)
         if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
             ai_sentiment = await stage2_hybrid(
@@ -246,6 +315,48 @@ async def global_scan(
             ai_calls_count += 1
 
         impact = sentiment
+        match_count = len(matches)
+
+        # Collect tickers from matched channels for subscriber lookup
+        matched_tickers = set()
+        for m in matches:
+            t = m.get("ticker")
+            if t:
+                matched_tickers.add(t.upper())
+
+        # Use the ticker with highest subscriber count for importance
+        max_sub_for_item = 0
+        primary_ticker = ""
+        for ticker in matched_tickers:
+            sc = await get_subscriber_count_for_ticker(ticker)
+            if sc > max_sub_for_item:
+                max_sub_for_item = sc
+                primary_ticker = ticker
+
+        importance_score = compute_importance_score(
+            title=title,
+            summary=summary,
+            sentiment=sentiment,
+            confidence=confidence,
+            pos_count=pos_count,
+            neg_count=neg_count,
+            match_count=match_count,
+            subscriber_count=max_sub_for_item,
+            max_subscriber_count=max_sub_count,
+        )
+
+        buffer_updates.append({
+            "content_hash": content_hash,
+            "source": item.get("source", ""),
+            "title": title,
+            "url": item.get("link", ""),
+            "summary": (summary or title)[:200],
+            "importance_score": importance_score,
+            "match_count": match_count,
+            "is_used": 1 if match_count > 0 else 0,
+            "ticker_hints": list(matched_tickers),
+            "subscriber_counts": {t: await get_subscriber_count_for_ticker(t) for t in matched_tickers},
+        })
 
         for match in matches:
             ch_id = match["channel_id"]
@@ -260,9 +371,10 @@ async def global_scan(
                 "matched_keyword": match["matched_keyword"],
                 "ticker_hint": match.get("ticker") or "",
                 "content_hash": content_hash,
+                "importance_score": importance_score,
             })
 
-    return results
+    return results, buffer_updates
 
 
 # ── Formatting ──
@@ -287,9 +399,6 @@ def split_news_text(text: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
-import datetime
-
-
 def _format_items(items: list[dict], lang: str, header_prefix: str,
                   ticker_key: str = "ticker",
                   extra_keys: tuple = ()) -> list[str]:
@@ -312,8 +421,16 @@ def _format_items(items: list[dict], lang: str, header_prefix: str,
                 extra += f"  🔑 {val}"
         ticker_val = item.get(ticker_key)
         ticker_info = f"  🏷 <code>{ticker_val}</code>" if ticker_val else ""
+        score = item.get("importance_score")
+        score_str = ""
+        if score is not None and score > 0:
+            if score >= 0.7:
+                score_str = " ★"
+            elif score >= 0.5:
+                score_str = " ☆"
+            score_str += f" <code>{score:.2f}</code>"
         block = (
-            f"<b>{i}. {item['title']}</b>\n"
+            f"<b>{i}. {item['title']}</b>{score_str}\n"
             f"📡 {item['source']}{ticker_info}{extra}\n"
             f"📌 {item['summary']}\n"
             f"{impact_emoji} {item['impact']}"

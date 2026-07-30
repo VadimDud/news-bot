@@ -25,6 +25,9 @@ from bot.database import (
     save_scan_metrics, log_news_delivery,
     save_news_batch, save_channel_news_batch, log_news_delivery_batch,
     get_all_tracked_assets,
+    upsert_news_buffer, upsert_user_news_priority,
+    upsert_news_ticker_popularity, dynamic_cleanup_news_buffer,
+    refresh_ticker_popularity,
 )
 from bot.finance import fetch_news
 from bot.i18n import t
@@ -57,7 +60,7 @@ async def cleanup_job(bot: Bot):
             await remove_deletion(entry["id"])
             await asyncio.sleep(0.05)
 
-        removed_news = await cleanup_old_news(max_age_hours=24)
+        removed_news = await         dynamic_cleanup_news_buffer()
         if removed_news:
             logger.info(f"Cleaned {removed_news} old news entries")
 
@@ -148,6 +151,36 @@ async def auto_scan_job(bot: Bot):
         logger.info(f"Auto-scan: fetched {len(news)} news items")
 
         channel_results = await global_scan(news, all_channels)
+        # global_scan now returns (results, buffer_updates)
+        if isinstance(channel_results, tuple):
+            channel_results, buffer_updates = channel_results
+        else:
+            channel_results = channel_results
+            buffer_updates = []
+
+        # Write to news_buffer
+        tickers_refreshed = set()
+        for buf in buffer_updates:
+            await upsert_news_buffer(
+                content_hash=buf["content_hash"],
+                source=buf["source"],
+                title=buf["title"],
+                url=buf["url"],
+                summary=buf["summary"],
+                importance_score=buf["importance_score"],
+                match_count=buf["match_count"],
+                is_used=buf["is_used"],
+            )
+            for ticker, sc in buf.get("subscriber_counts", {}).items():
+                await upsert_news_ticker_popularity(
+                    content_hash=buf["content_hash"],
+                    ticker=ticker,
+                    subscriber_count=sc,
+                )
+                if ticker not in tickers_refreshed:
+                    await refresh_ticker_popularity(ticker)
+                    tickers_refreshed.add(ticker)
+
         if not channel_results:
             logger.info("Auto-scan: no matches found for any channel")
             return
@@ -182,7 +215,7 @@ async def auto_scan_job(bot: Bot):
 
             messages = format_channel_news(channel["name"], new_items, lang)
 
-            # Save news to channel_news log (batch)
+            # Save news to channel_news log + user_news_priority (batch)
             cn_items = []
             n_items = []
             dl_items = []
@@ -211,6 +244,15 @@ async def auto_scan_job(bot: Bot):
                     "source": item["source"],
                     "impact": item["impact"],
                 })
+                # Write to user_news_priority
+                await upsert_user_news_priority(
+                    user_id=uid,
+                    content_hash=item["content_hash"],
+                    ticker=item.get("ticker_hint", ""),
+                    importance_score=item.get("importance_score", 0.5),
+                )
+                # Refresh usage flag for buffer
+                await refresh_ticker_popularity(item.get("ticker_hint", "").upper())
             await save_channel_news_batch(cn_items)
             await save_news_batch(n_items)
             await log_news_delivery_batch(dl_items)

@@ -19,7 +19,8 @@ from ..config import ADMIN_ID
 from ..finance import fetch_finance_news
 from ..news_processor import (
     stage1_filter, compute_sentiment, stage2_hybrid,
-    format_news_batch, compute_hash, MAX_AI_CALLS_PER_SCAN,
+    format_news_batch, compute_hash, compute_importance_score,
+    _normalize, MAX_AI_CALLS_PER_SCAN,
 )
 
 router = Router()
@@ -205,7 +206,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
     if isinstance(target, CallbackQuery):
         await target.message.edit_text(t(user_lang, "scan_progress_rss"), parse_mode="HTML")
     else:
-        pass  # Message — caller already sent progress
+        pass
 
     news = await fetch_finance_news()
     if not news:
@@ -218,12 +219,24 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             parse_mode="HTML",
         )
 
+    # Get news summary from buffer
+    summary_info = await db.get_news_summary(user_id)
+    buffer_hashes = await db.get_all_news_buffer_hashes()
+
     batch_items = []
     ai_calls_count = 0
+    max_sub_count = 1
+    try:
+        max_sub_count = await db.get_max_ticker_subscriber_count()
+    except Exception:
+        pass
 
     for item in news[:20]:
         title = item["title"]
         content_hash = compute_hash(title)
+
+        if content_hash in buffer_hashes:
+            continue
 
         if await db.is_news_seen(content_hash, user_id):
             continue
@@ -236,6 +249,12 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
 
         impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
+        pos_triggers = matched_asset.get("positive_triggers", []) if matched_asset else []
+        neg_triggers = matched_asset.get("negative_triggers", []) if matched_asset else []
+        combined = _normalize(title + " " + item.get("summary", ""))
+        pos_count = sum(1 for t in pos_triggers if _normalize(t) in combined) if pos_triggers else 0
+        neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined) if neg_triggers else 0
+
         if (confidence == "low" or impact == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
             ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
             if ai_impact:
@@ -244,10 +263,55 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
 
         summary = item["summary"][:200] if item["summary"] else title[:200]
 
+        sub_count = 0
+        if matched_ticker:
+            try:
+                sub_count = await db.get_subscriber_count_for_ticker(matched_ticker)
+            except Exception:
+                pass
+
+        importance_score = compute_importance_score(
+            title=title,
+            summary=summary,
+            sentiment=impact,
+            confidence=confidence,
+            pos_count=pos_count,
+            neg_count=neg_count,
+            match_count=1,
+            subscriber_count=sub_count,
+            max_subscriber_count=max_sub_count,
+        )
+
         await db.save_news(
             content_hash, item["source"], title, item.get("link", ""),
             matched_ticker, summary, impact,
         )
+
+        await db.upsert_news_buffer(
+            content_hash=content_hash,
+            source=item.get("source", ""),
+            title=title,
+            url=item.get("link", ""),
+            summary=summary,
+            importance_score=importance_score,
+            match_count=1,
+            is_used=1,
+        )
+
+        await db.upsert_user_news_priority(
+            user_id=user_id,
+            content_hash=content_hash,
+            ticker=matched_ticker,
+            importance_score=importance_score,
+        )
+
+        if matched_ticker:
+            sc = await db.get_subscriber_count_for_ticker(matched_ticker)
+            await db.upsert_news_ticker_popularity(
+                content_hash=content_hash,
+                ticker=matched_ticker,
+                subscriber_count=sc,
+            )
 
         batch_items.append({
             "title": title,
@@ -256,6 +320,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             "summary": summary,
             "impact": impact,
             "link": item.get("link", ""),
+            "importance_score": importance_score,
         })
 
     chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
@@ -265,23 +330,58 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
     except Exception:
         pass
 
-    if not batch_items:
+    # Refresh summary after new additions
+    summary_info = await db.get_news_summary(user_id)
+
+    if not batch_items and summary_info.get("total", 0) == 0:
         await _send_or_edit(target, user_id, t(user_lang, "finance_all_seen"), reply_markup=subscriber_menu(user_lang))
         return
 
-    messages = format_news_batch(batch_items, user_lang)
+    if batch_items:
+        messages = format_news_batch(batch_items, user_lang)
+    else:
+        messages = []
+
+    if not messages and summary_info.get("total", 0) > 0:
+        cached = await db.get_news_for_user(user_id, limit=10, min_score=0.0)
+        if cached:
+            messages = format_news_batch([
+                {
+                    "title": c["title"],
+                    "source": c["source"],
+                    "ticker": c.get("ticker", ""),
+                    "summary": c["summary"][:200],
+                    "impact": "POSITIVE" if c.get("importance_score", 0.5) >= 0.5 else "NEUTRAL",
+                    "link": c.get("url", ""),
+                    "importance_score": c.get("importance_score", 0.5),
+                }
+                for c in cached
+            ], user_lang)
+
+    summary_line = ""
 
     kb = InlineKeyboardBuilder()
+    news_count = summary_info.get("total", 0)
+    unread_count = summary_info.get("unread", 0)
+    if news_count > 0:
+        summary_line = (
+            f"📊 <b>Всего новостей:</b> {news_count}"
+            f"{f'  ({unread_count} новых)' if unread_count > 0 else ''}\n\n"
+        )
+        kb.row(
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="sub:news"),
+        )
     kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data="back:main"))
     reply_markup = kb.as_markup()
 
     last_msg = None
     for i, msg_text in enumerate(messages):
         rm = reply_markup if i == len(messages) - 1 else None
+        final_text = summary_line + msg_text if i == 0 else msg_text
         if isinstance(target, CallbackQuery):
-            last_msg = await target.message.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+            last_msg = await target.message.answer(final_text, reply_markup=rm, disable_web_page_preview=True)
         else:
-            last_msg = await target.answer(msg_text, reply_markup=rm, disable_web_page_preview=True)
+            last_msg = await target.answer(final_text, reply_markup=rm, disable_web_page_preview=True)
         if i < len(messages) - 1:
             await asyncio.sleep(0.3)
     if last_msg:

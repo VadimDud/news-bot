@@ -159,6 +159,76 @@ async def init_db():
         "CREATE INDEX IF NOT EXISTS idx_pending_deletions_delete_at ON pending_deletions(delete_at)"
     )
 
+    # ── News buffer: global pool of all fetched news with importance score ──
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS news_buffer (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_hash    TEXT NOT NULL UNIQUE,
+            source          TEXT,
+            title           TEXT NOT NULL,
+            url             TEXT,
+            summary         TEXT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            importance_score REAL NOT NULL DEFAULT 0.5,
+            match_count     INTEGER NOT NULL DEFAULT 0,
+            is_used         INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_news_buffer_hash ON news_buffer(content_hash)"
+    )
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_news_buffer_importance ON news_buffer(importance_score DESC, created_at DESC)"
+    )
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_news_buffer_match ON news_buffer(match_count DESC, created_at DESC)"
+    )
+
+    # ── User news priority: per-user view of buffer with user-specific score ──
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS user_news_priority (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
+            content_hash    TEXT NOT NULL,
+            ticker          TEXT,
+            importance_score REAL NOT NULL DEFAULT 0.5,
+            sent_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_read         INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(user_id),
+            FOREIGN KEY (content_hash) REFERENCES news_buffer(content_hash),
+            UNIQUE(user_id, content_hash)
+        )
+    """)
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_unp_user ON user_news_priority(user_id, importance_score DESC, sent_at DESC)"
+    )
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_unp_user_unread ON user_news_priority(user_id, is_read, importance_score DESC)"
+    )
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_unp_hash ON user_news_priority(content_hash)"
+    )
+
+    # ── News ticker popularity: how many subscribers per ticker per news ──
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS news_ticker_popularity (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_hash    TEXT NOT NULL,
+            ticker          TEXT NOT NULL,
+            subscriber_count INTEGER NOT NULL DEFAULT 0,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (content_hash) REFERENCES news_buffer(content_hash),
+            UNIQUE(content_hash, ticker)
+        )
+    """)
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ntp_ticker_sub ON news_ticker_popularity(ticker, subscriber_count DESC)"
+    )
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ntp_hash_ticker ON news_ticker_popularity(content_hash, ticker)"
+    )
+
     cols = {row[1] for row in await (await _db.execute("PRAGMA table_info(users)")).fetchall()}
     if "access_until" not in cols:
         await _db.execute("ALTER TABLE users ADD COLUMN access_until TEXT")
@@ -329,6 +399,10 @@ async def add_finance_subscription(user_id: int, ticker: str, name: str = ""):
         VALUES (?, ?, ?)
     """, (user_id, ticker.upper(), name))
     await db.commit()
+    try:
+        await refresh_ticker_popularity(ticker.upper())
+    except Exception:
+        pass
 
 
 async def remove_finance_subscription(user_id: int, ticker: str):
@@ -338,6 +412,10 @@ async def remove_finance_subscription(user_id: int, ticker: str):
         (user_id, ticker.upper()),
     )
     await db.commit()
+    try:
+        await refresh_ticker_popularity(ticker.upper())
+    except Exception:
+        pass
 
 
 async def get_finance_subscriptions(user_id: int) -> list[dict]:
@@ -678,6 +756,230 @@ async def save_news(content_hash: str, user_id: int, source: str, title: str, ur
         (content_hash, user_id, source, title, url, ticker, summary, impact),
     )
     await db.commit()
+
+
+# ── News buffer (new system) ──
+
+async def upsert_news_buffer(content_hash: str, source: str, title: str, url: str,
+                              summary: str, importance_score: float, match_count: int = 0,
+                              is_used: int = 0) -> bool:
+    db = await _get_db()
+    existing = await (await db.execute(
+        "SELECT importance_score, id FROM news_buffer WHERE content_hash = ?", (content_hash,)
+    )).fetchone()
+    if existing:
+        if importance_score > existing["importance_score"]:
+            await db.execute("""
+                UPDATE news_buffer SET
+                    source = ?, title = ?, url = ?, summary = ?,
+                    importance_score = ?, match_count = match_count + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE content_hash = ?
+            """, (source, title, url, summary, importance_score, match_count, content_hash))
+            await db.commit()
+            return True
+        else:
+            await db.execute("""
+                UPDATE news_buffer SET
+                    match_count = match_count + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE content_hash = ?
+            """, (match_count, content_hash))
+            await db.commit()
+            return False
+    await db.execute("""
+        INSERT INTO news_buffer (content_hash, source, title, url, summary, importance_score,
+                                  match_count, is_used)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (content_hash, source, title, url, summary, importance_score, match_count, is_used))
+    await db.commit()
+    return True
+
+
+async def upsert_user_news_priority(user_id: int, content_hash: str, ticker: str | None,
+                                     importance_score: float):
+    db = await _get_db()
+    existing = await (await db.execute(
+        "SELECT importance_score FROM user_news_priority WHERE user_id = ? AND content_hash = ?",
+        (user_id, content_hash),
+    )).fetchone()
+    if existing:
+        if importance_score > existing["importance_score"]:
+            await db.execute("""
+                UPDATE user_news_priority
+                SET importance_score = ?, sent_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND content_hash = ?
+            """, (importance_score, user_id, content_hash))
+    else:
+        await db.execute("""
+            INSERT INTO user_news_priority (user_id, content_hash, ticker, importance_score)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, content_hash, ticker, importance_score))
+    await db.commit()
+
+
+async def upsert_news_ticker_popularity(content_hash: str, ticker: str, subscriber_count: int):
+    db = await _get_db()
+    await db.execute("""
+        INSERT INTO news_ticker_popularity (content_hash, ticker, subscriber_count)
+        VALUES (?, ?, ?)
+        ON CONFLICT(content_hash, ticker) DO UPDATE SET
+            subscriber_count = excluded.subscriber_count
+    """, (content_hash, ticker, subscriber_count))
+    await db.commit()
+
+
+async def refresh_news_buffer_usage(content_hash: str):
+    db = await _get_db()
+    await db.execute(
+        "UPDATE news_buffer SET is_used = 1 WHERE content_hash = ?",
+        (content_hash,),
+    )
+    await db.commit()
+
+
+async def get_news_for_user(user_id: int, limit: int = 20,
+                            only_unread: bool = False,
+                            min_score: float = 0.0) -> list[dict]:
+    db = await _get_db()
+    query = """
+        SELECT nb.*, unp.importance_score as user_score,
+               unp.is_read, unp.sent_at, unp.ticker
+        FROM news_buffer nb
+        INNER JOIN user_news_priority unp ON nb.content_hash = unp.content_hash
+        WHERE unp.user_id = ?
+    """
+    params: list = [user_id]
+    if only_unread:
+        query += " AND unp.is_read = 0"
+    if min_score > 0.0:
+        query += " AND unp.importance_score >= ?"
+        params.append(min_score)
+    query += " ORDER BY unp.importance_score DESC, nb.created_at DESC LIMIT ?"
+    params.append(limit)
+    async with db.execute(query, params) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
+async def get_top_news_by_popularity(ticker: str | None = None, limit: int = 10) -> list[dict]:
+    db = await _get_db()
+    if ticker:
+        query = """
+            SELECT nb.*, ntp.subscriber_count, ntp.ticker
+            FROM news_buffer nb
+            INNER JOIN news_ticker_popularity ntp ON nb.content_hash = ntp.content_hash
+            WHERE ntp.ticker = ?
+            ORDER BY nb.importance_score DESC, ntp.subscriber_count DESC
+            LIMIT ?
+        """
+        async with db.execute(query, (ticker, limit)) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+    else:
+        query = """
+            SELECT nb.*, COALESCE(SUM(ntp.subscriber_count), 0) as total_subscribers
+            FROM news_buffer nb
+            LEFT JOIN news_ticker_popularity ntp ON nb.content_hash = ntp.content_hash
+            WHERE nb.is_used = 0
+            GROUP BY nb.id
+            ORDER BY nb.importance_score DESC, total_subscribers DESC
+            LIMIT ?
+        """
+        async with db.execute(query, (limit,)) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
+
+async def get_news_summary(user_id: int) -> dict:
+    db = await _get_db()
+    async with db.execute("""
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) as unread,
+            COALESCE(MAX(importance_score), 0.0) as max_score
+        FROM user_news_priority WHERE user_id = ?
+    """, (user_id,)) as cur:
+        row = await cur.fetchone()
+        result = dict(row) if row else {"total": 0, "unread": 0, "max_score": 0.0}
+    async with db.execute("""
+        SELECT COUNT(*) as available
+        FROM news_buffer
+        WHERE is_used = 1
+    """) as cur:
+        row = await cur.fetchone()
+        result["available"] = row[0] if row else 0
+    return result
+
+
+async def refresh_ticker_popularity(ticker: str):
+    db = await _get_db()
+    sub_count = await (await db.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM finance_subscriptions WHERE ticker = ?",
+        (ticker.upper(),),
+    )).fetchone()
+    total = sub_count[0] if sub_count else 0
+    uc_count = await (await db.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM user_channels WHERE ticker = ?",
+        (ticker.upper(),),
+    )).fetchone()
+    total += uc_count[0] if uc_count else 0
+    await db.execute("""
+        UPDATE news_ticker_popularity
+        SET subscriber_count = ?
+        WHERE ticker = ?
+    """, (total, ticker.upper()))
+    await db.commit()
+    return total
+
+
+async def get_max_ticker_subscriber_count() -> int:
+    db = await _get_db()
+    async with db.execute("""
+        SELECT MAX(cnt) FROM (
+            SELECT COUNT(DISTINCT user_id) as cnt FROM finance_subscriptions GROUP BY ticker
+            UNION ALL
+            SELECT COUNT(DISTINCT user_id) as cnt FROM user_channels WHERE ticker IS NOT NULL GROUP BY ticker
+        )
+    """) as cur:
+        row = await cur.fetchone()
+        return row[0] if row and row[0] else 1
+
+
+async def dynamic_cleanup_news_buffer() -> int:
+    db = await _get_db()
+    cursor = await db.execute("""
+        DELETE FROM news_buffer
+        WHERE (importance_score >= 0.7 AND created_at < datetime('now', '-7 days'))
+           OR (importance_score >= 0.3 AND importance_score < 0.7 AND created_at < datetime('now', '-3 days'))
+           OR (importance_score < 0.3 AND created_at < datetime('now', '-24 hours'))
+    """)
+    deleted_buffer = cursor.rowcount
+    cursor2 = await db.execute("""
+        DELETE FROM user_news_priority
+        WHERE content_hash NOT IN (SELECT content_hash FROM news_buffer)
+    """)
+    cursor3 = await db.execute("""
+        DELETE FROM news_ticker_popularity
+        WHERE content_hash NOT IN (SELECT content_hash FROM news_buffer)
+    """)
+    await db.commit()
+    return deleted_buffer
+
+
+async def get_all_news_buffer_hashes() -> set[str]:
+    db = await _get_db()
+    async with db.execute("SELECT content_hash FROM news_buffer") as cur:
+        return {row[0] for row in await cur.fetchall()}
+
+
+async def get_subscriber_count_for_ticker(ticker: str) -> int:
+    db = await _get_db()
+    sub = await (await db.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM finance_subscriptions WHERE ticker = ?",
+        (ticker.upper(),),
+    )).fetchone()
+    uc = await (await db.execute(
+        "SELECT COUNT(DISTINCT user_id) FROM user_channels WHERE ticker = ?",
+        (ticker.upper(),),
+    )).fetchone()
+    return (sub[0] if sub else 0) + (uc[0] if uc else 0)
 
 
 async def cleanup_old_news(max_age_hours: int = 24) -> int:

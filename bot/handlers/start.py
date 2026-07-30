@@ -283,7 +283,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
         )
 
         await db.save_news(
-            content_hash, item["source"], title, item.get("link", ""),
+            content_hash, user_id, item["source"], title, item.get("link", ""),
             matched_ticker, summary, impact,
         )
 

@@ -386,6 +386,8 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             await asyncio.sleep(0.3)
     if last_msg:
         _store_news_msg(user_id, last_msg.message_id)
+    elif not messages:
+        await _send_or_edit(target, user_id, t(user_lang, "scan_no_new_match"), reply_markup=subscriber_menu(user_lang))
 
 
 @router.callback_query(F.data == "sub:news")

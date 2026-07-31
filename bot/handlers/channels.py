@@ -17,17 +17,21 @@ from .. import config
 from ..news_processor import global_scan, format_channel_news
 from ..sources import get_source_tags_display
 from ..topic_analyzer import analyze_topic
+from ..topics import get_topics_display
 from .start import _store_msg, _get_text_buttons
 
 router = Router()
 
 logger = logging.getLogger(__name__)
 
-# Channel creation state machine: {user_id: {"step": ..., "name": ..., "keywords": ..., "ai_keywords": ..., "ticker": ..., "source_tags": [...]}}
+# Channel creation state machine: {user_id: {"step": ..., "name": ..., "keywords": ..., "ai_keywords": ..., "ticker": ..., "source_tags": [...], "topics": [...]}}
 _channel_state: dict[int, dict] = {}
 
 # Channel edit state: {user_id: channel_id}
 _channel_edit_state: dict[int, int] = {}
+
+# Channel topics edit state: {user_id: channel_id}
+_channel_topics_edit_state: dict[int, int] = {}
 
 
 class _ChannelStateFilter(BaseFilter):
@@ -38,6 +42,11 @@ class _ChannelStateFilter(BaseFilter):
 class _ChannelEditFilter(BaseFilter):
     async def __call__(self, message: Message) -> bool:
         return message.from_user.id in _channel_edit_state
+
+
+class _ChannelTopicsEditFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        return message.from_user.id in _channel_topics_edit_state
 
 
 def _channel_list_text(channels: list[dict], lang: str) -> str:
@@ -76,9 +85,36 @@ def _channel_detail_kb(lang: str, channel_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=f"✏️ {t(lang, 'btn_edit_keywords', default='Ключевые слова')}", callback_data=f"ch:edit_kw:{channel_id}"),
         InlineKeyboardButton(text=f"🤖 {t(lang, 'btn_ai_expand', default='AI расширить')}", callback_data=f"ch:ai_expand:{channel_id}"),
     )
+    kb.row(
+        InlineKeyboardButton(text=f"📚 {t(lang, 'btn_edit_topics', default='Тематики')}", callback_data=f"ch:edit_topics:{channel_id}"),
+    )
     kb.row(InlineKeyboardButton(text=f"❌ {t(lang, 'btn_delete', default='Удалить')}", callback_data=f"ch:del:{channel_id}"))
     kb.row(InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="ch:list"))
     return kb.as_markup()
+
+
+def _topics_list_text(lang: str) -> str:
+    lines = []
+    for info in get_topics_display(lang):
+        lines.append(f"• <b>{info['name']}</b> — <code>{info['id']}</code>")
+    return "\n".join(lines)
+
+
+def _topics_ask_text(lang: str, name: str) -> str:
+    return (
+        f"📚 <b>{name}</b>\n\n"
+        f"{t(lang, 'channel_ask_topics_hint')}\n\n"
+        f"{_topics_list_text(lang)}\n\n"
+        f"{t(lang, 'channel_ask_topics_skip')}"
+    )
+
+
+def _topics_display_names(topics: list[str], lang: str) -> str:
+    if not topics:
+        return "—"
+    display = get_topics_display(lang)
+    names = [info["name"] for info in display if info["id"] in topics]
+    return ", ".join(names) if names else ", ".join(topics)
 
 
 # ── /channels command ──
@@ -223,11 +259,26 @@ async def channel_state_handler(message: Message, user_lang: str):
             if not source_tags:
                 return
 
+        state["source_tags"] = source_tags
+        state["step"] = "topics"
+        await message.answer(_topics_ask_text(user_lang, state["name"]), parse_mode="HTML")
+
+    elif step == "topics":
+        raw = message.text.strip().lower()
+        if raw in ("—", "-", "нет", "no", "skip", "пропустить", "все"):
+            topics = []
+        else:
+            valid_ids = {info["id"] for info in get_topics_display(user_lang)}
+            topics = [tid.strip() for tid in raw.split(",") if tid.strip() in valid_ids]
+            if not topics:
+                return
+
         name = state["name"]
         keywords = state["keywords"]
         ticker = state.get("ticker")
+        source_tags = state.get("source_tags", [])
 
-        channel_id = await db.create_channel(user_id, name, keywords, ticker, source_tags)
+        channel_id = await db.create_channel(user_id, name, keywords, ticker, source_tags, topics)
         if channel_id is None:
             await message.answer(t(user_lang, "channel_already_exists"))
             _channel_state.pop(user_id, None)
@@ -238,6 +289,7 @@ async def channel_state_handler(message: Message, user_lang: str):
         text = (
             t(user_lang, "channel_created", name=name, keywords=", ".join(keywords), ticker_line=ticker_line)
             + f"\n\n📡 Источники: {src_text}"
+            + f"\n📚 Тематики: {_topics_display_names(topics, user_lang)}"
         )
 
         _channel_state.pop(user_id, None)
@@ -256,26 +308,12 @@ async def channel_select_all_sources(callback: CallbackQuery, user_lang: str):
         await callback.answer("State expired", show_alert=True)
         return
 
-    source_tags = []  # empty = all sources
-    name = state["name"]
-    keywords = state["keywords"]
-    ticker = state.get("ticker")
-
-    channel_id = await db.create_channel(user_id, name, keywords, ticker, source_tags)
-    if channel_id is None:
-        await callback.answer(t(user_lang, "channel_already_exists"), show_alert=True)
-        _channel_state.pop(user_id, None)
-        return
-
-    _channel_state.pop(user_id, None)
-
-    ticker_line = t(user_lang, "channel_created_with_ticker", ticker=ticker) if ticker else t(user_lang, "channel_created_no_ticker")
-    text = (
-        t(user_lang, "channel_created", name=name, keywords=", ".join(keywords), ticker_line=ticker_line)
-        + "\n\n📡 Источники: все"
+    state["source_tags"] = []  # empty = all sources
+    state["step"] = "topics"
+    await callback.message.edit_text(
+        _topics_ask_text(user_lang, state["name"]),
+        parse_mode="HTML",
     )
-    kb = _channel_detail_kb(user_lang, channel_id)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -340,6 +378,14 @@ async def channel_view(callback: CallbackQuery, user_lang: str):
     else:
         src_line = "\n📡 Источники: все"
 
+    topics = ch.get("topics", [])
+    if topics:
+        topics_display = get_topics_display(user_lang)
+        topic_names = [t["name"] for t in topics_display if t["id"] in topics]
+        topics_line = f"\n📚 Тематики: {', '.join(topic_names) if topic_names else ', '.join(topics)}"
+    else:
+        topics_line = "\n📚 Тематики: не выбраны (определяется автоматически)"
+
     # Count news delivered
     recent_news = await db.get_channel_news_log(channel_id, limit=100)
     news_count = len(recent_news)
@@ -348,7 +394,8 @@ async def channel_view(callback: CallbackQuery, user_lang: str):
         f"📡 <b>{ch['name']}</b>\n\n"
         f"🔑 Ключевые слова: {kw}"
         f"{ticker_line}"
-        f"{src_line}\n\n"
+        f"{src_line}"
+        f"{topics_line}\n\n"
         f"📊 Доставлено новостей: {news_count}"
     )
     kb = _channel_detail_kb(user_lang, channel_id)
@@ -537,6 +584,54 @@ async def channel_edit_keywords_save(message: Message, user_lang: str):
     kb = _channel_detail_kb(user_lang, channel_id)
     await message.answer(
         f"📡 <b>{ch['name']}</b>\n\n🔑 Новые ключевые слова: {', '.join(keywords)}",
+        reply_markup=kb, parse_mode="HTML",
+    )
+
+
+# ── Edit topics ──
+
+@router.callback_query(F.data.startswith("ch:edit_topics:"))
+async def channel_edit_topics_start(callback: CallbackQuery, user_lang: str):
+    channel_id = int(callback.data.split(":")[2])
+    ch = await db.get_channel(channel_id)
+    if not ch or ch["user_id"] != callback.from_user.id:
+        await callback.answer("Not found", show_alert=True)
+        return
+
+    _channel_topics_edit_state[callback.from_user.id] = channel_id
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=t(user_lang, "btn_back"), callback_data=f"ch:view:{channel_id}"))
+    await callback.message.edit_text(
+        t(user_lang, "channel_edit_topics", name=ch["name"], topics_list=_topics_list_text(user_lang)),
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(F.text, ~F.text.startswith("/"), _ChannelTopicsEditFilter())
+async def channel_edit_topics_save(message: Message, user_lang: str):
+    user_id = message.from_user.id
+    channel_id = _channel_topics_edit_state.pop(user_id)
+    ch = await db.get_channel(channel_id)
+    if not ch or ch["user_id"] != user_id:
+        return
+
+    raw = message.text.strip().lower()
+    if raw in ("—", "-", "нет", "no", "skip", "пропустить", "все"):
+        topics = []
+    else:
+        valid_ids = {info["id"] for info in get_topics_display(user_lang)}
+        topics = [tid.strip() for tid in raw.split(",") if tid.strip() in valid_ids]
+        if not topics:
+            return
+
+    await db.update_channel_topics(channel_id, topics)
+    await message.answer(t(user_lang, "channel_topics_updated", name=ch["name"]))
+
+    kb = _channel_detail_kb(user_lang, channel_id)
+    await message.answer(
+        f"📡 <b>{ch['name']}</b>\n\n📚 Тематики: {_topics_display_names(topics, user_lang)}",
         reply_markup=kb, parse_mode="HTML",
     )
 

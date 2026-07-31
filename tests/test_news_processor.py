@@ -63,6 +63,82 @@ class TestMatchNewsToChannels:
         assert len(matches) == 1
 
 
+class TestTopicFilter:
+    """Topic-based filtering: ambiguous keywords (e.g. "золото") must not
+    match news that is clearly about another topic (e.g. sport)."""
+
+    def test_sports_gold_rejected_for_finance_channel(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": "GOLD",
+             "topics": ["finance"], "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels(
+            "Сборная России завоевала золото на чемпионате мира по футболу",
+            "", channels)
+        assert len(matches) == 0
+
+    def test_finance_gold_accepted(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": "GOLD",
+             "topics": ["finance"], "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels(
+            "Цена на золото достигла рекорда",
+            "Инвесторы покупают золото, растёт доходность", channels)
+        assert len(matches) == 1
+
+    def test_weak_signal_passes(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": "GOLD",
+             "topics": ["finance"], "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels("Золото подорожало", "", channels)
+        assert len(matches) == 1
+
+    def test_no_topics_means_no_filtering(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": None,
+             "topics": [], "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels(
+            "Сборная России завоевала золото на чемпионате мира по футболу",
+            "", channels)
+        assert len(matches) == 1
+
+    def test_topics_inferred_from_ticker(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": "GOLD",
+             "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels(
+            "Сборная России завоевала золото на чемпионате мира по футболу",
+            "", channels)
+        assert len(matches) == 0
+
+    def test_sanctions_rejected_for_finance_accepted_for_politics(self):
+        news = "США ввели новые санкции и эмбарго против российских банков"
+        fin = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": "SBER",
+             "topics": ["finance"], "keywords": ["банк"]},
+        ]
+        pol = [
+            {"id": 2, "user_id": 200, "language": "ru", "ticker": None,
+             "topics": ["politics"], "keywords": ["санкции"]},
+        ]
+        assert len(match_news_to_channels(news, "", fin)) == 0
+        assert len(match_news_to_channels(news, "", pol)) == 1
+
+    def test_sport_channel_accepts_sports_news(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": None,
+             "topics": ["sport"], "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels(
+            "Сборная России завоевала золото на чемпионате мира по футболу",
+            "", channels)
+        assert len(matches) == 1
+
+
 class TestStage1Filter:
     def test_relevant(self):
         assets = [{"ticker": "SBER", "keywords": ["Сбербанк", "SBER"]}]

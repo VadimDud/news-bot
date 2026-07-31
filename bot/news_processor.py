@@ -17,6 +17,7 @@ from . import config
 from .ai_client import analyze
 from .database import (get_tracked_asset, get_max_ticker_subscriber_count,
                        get_subscriber_count_for_ticker)
+from .topics import count_topics, effective_topics, topic_filter_pass
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ def match_news_to_channels(
     """
     combined = _normalize(title + " " + summary)
     combined_stems = {_simple_stem(combined)}
+    topic_counts = count_topics(combined)
     matches = []
 
     for ch in all_channels:
@@ -107,6 +109,8 @@ def match_news_to_channels(
             if len(kw_lower) < 2:
                 continue
             if kw_lower in combined or _simple_stem(kw_lower) in combined_stems:
+                if not topic_filter_pass(topic_counts, effective_topics(ch)):
+                    continue
                 matches.append({
                     "channel_id": ch["id"],
                     "user_id": ch["user_id"],

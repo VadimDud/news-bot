@@ -124,6 +124,7 @@ async def init_db():
             keywords_json TEXT NOT NULL DEFAULT '[]',
             ticker       TEXT,
             source_tags  TEXT NOT NULL DEFAULT '[]',
+            topics       TEXT NOT NULL DEFAULT '[]',
             created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id),
             UNIQUE(user_id, name)
@@ -241,6 +242,8 @@ async def init_db():
     uc_cols = {row[1] for row in await (await _db.execute("PRAGMA table_info(user_channels)")).fetchall()}
     if "source_tags" not in uc_cols:
         await _db.execute("ALTER TABLE user_channels ADD COLUMN source_tags TEXT NOT NULL DEFAULT '[]'")
+    if "topics" not in uc_cols:
+        await _db.execute("ALTER TABLE user_channels ADD COLUMN topics TEXT NOT NULL DEFAULT '[]'")
 
     async with _db.execute(
         "SELECT COUNT(*) FROM user_channels"
@@ -447,15 +450,17 @@ async def get_user_tickers(user_id: int) -> list[str]:
 
 async def create_channel(user_id: int, name: str, keywords: list[str],
                          ticker: str | None = None,
-                         source_tags: list[str] | None = None) -> int | None:
+                         source_tags: list[str] | None = None,
+                         topics: list[str] | None = None) -> int | None:
     db = await _get_db()
     try:
         cursor = await db.execute("""
-            INSERT INTO user_channels (user_id, name, keywords_json, ticker, source_tags)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO user_channels (user_id, name, keywords_json, ticker, source_tags, topics)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (user_id, name, json.dumps(keywords, ensure_ascii=False),
               ticker.upper() if ticker else None,
-              json.dumps(source_tags or [], ensure_ascii=False)))
+              json.dumps(source_tags or [], ensure_ascii=False),
+              json.dumps(topics or [], ensure_ascii=False)))
         await db.commit()
         return cursor.lastrowid
     except aiosqlite.IntegrityError:
@@ -473,6 +478,7 @@ async def get_user_channels(user_id: int) -> list[dict]:
             d = dict(row)
             d["keywords"] = json.loads(d["keywords_json"])
             d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+            d["topics"] = json.loads(d.get("topics", "[]"))
             results.append(d)
         return results
 
@@ -488,6 +494,7 @@ async def get_channel(channel_id: int) -> dict | None:
         d = dict(row)
         d["keywords"] = json.loads(d["keywords_json"])
         d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+        d["topics"] = json.loads(d.get("topics", "[]"))
         return d
 
 
@@ -502,6 +509,8 @@ async def get_channel_by_name(user_id: int, name: str) -> dict | None:
             return None
         d = dict(row)
         d["keywords"] = json.loads(d["keywords_json"])
+        d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+        d["topics"] = json.loads(d.get("topics", "[]"))
         return d
 
 
@@ -541,6 +550,15 @@ async def update_channel_source_tags(channel_id: int, source_tags: list[str]):
     await db.commit()
 
 
+async def update_channel_topics(channel_id: int, topics: list[str]):
+    db = await _get_db()
+    await db.execute(
+        "UPDATE user_channels SET topics = ? WHERE id = ?",
+        (json.dumps(topics, ensure_ascii=False), channel_id),
+    )
+    await db.commit()
+
+
 async def delete_channel(channel_id: int):
     db = await _get_db()
     await db.execute("DELETE FROM user_channels WHERE id = ?", (channel_id,))
@@ -567,6 +585,7 @@ async def get_all_user_channels() -> list[dict]:
             d = dict(row)
             d["keywords"] = json.loads(d["keywords_json"])
             d["source_tags"] = json.loads(d.get("source_tags", "[]"))
+            d["topics"] = json.loads(d.get("topics", "[]"))
             results.append(d)
         return results
 

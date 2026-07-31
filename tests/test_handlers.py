@@ -321,9 +321,9 @@ class TestChannelStateHandler:
         msg = _make_message(text="все", user_id=100)
         await channel_state_handler(message=msg, user_lang="ru")
         msg.answer.assert_called_once()
-        text = msg.answer.call_args[0][0]
-        assert "Лента создана" in text
-        assert _channel_state.get(100) is None
+        assert _channel_state[100]["step"] == "topics"
+        assert _channel_state[100]["source_tags"] == []
+        _channel_state.clear()
 
     async def test_source_tags_step_specific(self):
         from bot.handlers.channels import channel_state_handler, _channel_state
@@ -331,7 +331,9 @@ class TestChannelStateHandler:
         msg = _make_message(text="finance, macro", user_id=100)
         await channel_state_handler(message=msg, user_lang="ru")
         msg.answer.assert_called_once()
-        assert _channel_state.get(100) is None
+        assert _channel_state[100]["step"] == "topics"
+        assert _channel_state[100]["source_tags"] == ["finance", "macro"]
+        _channel_state.clear()
 
     async def test_source_tags_step_invalid_tags(self):
         from bot.handlers.channels import channel_state_handler, _channel_state
@@ -339,6 +341,45 @@ class TestChannelStateHandler:
         msg = _make_message(text="invalid123, xyz", user_id=100)
         await channel_state_handler(message=msg, user_lang="ru")
         msg.answer.assert_not_called()
+        _channel_state.clear()
+
+    async def test_topics_step_creates_channel(self):
+        from bot.handlers.channels import channel_state_handler, _channel_state
+        await set_user(100, "u", "U", "ru")
+        await grant_trial(100, days=30)
+        _channel_state[100] = {"step": "topics", "name": "Ch", "keywords": ["золото"], "ticker": None, "source_tags": []}
+        msg = _make_message(text="finance, sport", user_id=100)
+        await channel_state_handler(message=msg, user_lang="ru")
+        msg.answer.assert_called_once()
+        text = msg.answer.call_args[0][0]
+        assert "Лента создана" in text
+        assert _channel_state.get(100) is None
+        from bot.database import get_channel_by_name
+        ch = await get_channel_by_name(100, "Ch")
+        assert ch is not None
+        assert ch["topics"] == ["finance", "sport"]
+        _channel_state.clear()
+
+    async def test_topics_step_skip(self):
+        from bot.handlers.channels import channel_state_handler, _channel_state
+        await set_user(100, "u", "U", "ru")
+        await grant_trial(100, days=30)
+        _channel_state[100] = {"step": "topics", "name": "Ch", "keywords": ["kw"], "ticker": None, "source_tags": ["finance"]}
+        msg = _make_message(text="—", user_id=100)
+        await channel_state_handler(message=msg, user_lang="ru")
+        from bot.database import get_channel_by_name
+        ch = await get_channel_by_name(100, "Ch")
+        assert ch is not None
+        assert ch["topics"] == []
+        _channel_state.clear()
+
+    async def test_topics_step_invalid(self):
+        from bot.handlers.channels import channel_state_handler, _channel_state
+        _channel_state[100] = {"step": "topics", "name": "Ch", "keywords": ["kw"], "ticker": None, "source_tags": []}
+        msg = _make_message(text="nonsense123", user_id=100)
+        await channel_state_handler(message=msg, user_lang="ru")
+        msg.answer.assert_not_called()
+        assert _channel_state[100]["step"] == "topics"
         _channel_state.clear()
 
 
@@ -569,8 +610,48 @@ class TestChannelSelectAllSources:
         cb.answer.assert_called_once()
         cb.message.edit_text.assert_called_once()
         text = cb.message.edit_text.call_args[0][0]
-        assert "Лента создана" in text
-        assert _channel_state.get(100) is None
+        assert "тематик" in text
+        assert _channel_state[100]["step"] == "topics"
+        assert _channel_state[100]["source_tags"] == []
+        _channel_state.clear()
+
+
+class TestChannelEditTopics:
+    async def test_edit_topics_start(self):
+        from bot.handlers.channels import channel_edit_topics_start, _channel_topics_edit_state
+        await set_user(100, "u", "U", "ru")
+        ch_id = await create_channel(100, "Ch", ["kw"])
+        cb = _make_callback(data=f"ch:edit_topics:{ch_id}", user_id=100)
+        _channel_topics_edit_state.clear()
+        await channel_edit_topics_start(callback=cb, user_lang="ru")
+        cb.answer.assert_called_once()
+        assert 100 in _channel_topics_edit_state
+        _channel_topics_edit_state.clear()
+
+    async def test_edit_topics_save(self):
+        from bot.handlers.channels import channel_edit_topics_save, _channel_topics_edit_state
+        await set_user(100, "u", "U", "ru")
+        ch_id = await create_channel(100, "Ch", ["kw"])
+        _channel_topics_edit_state[100] = ch_id
+        msg = _make_message(text="finance, politics", user_id=100)
+        await channel_edit_topics_save(message=msg, user_lang="ru")
+        assert msg.answer.call_count >= 1
+        from bot.database import get_channel
+        ch = await get_channel(ch_id)
+        assert ch["topics"] == ["finance", "politics"]
+        assert 100 not in _channel_topics_edit_state
+
+    async def test_edit_topics_save_skip(self):
+        from bot.handlers.channels import channel_edit_topics_save, _channel_topics_edit_state
+        await set_user(100, "u", "U", "ru")
+        ch_id = await create_channel(100, "Ch", ["kw"], topics=["finance"])
+        _channel_topics_edit_state[100] = ch_id
+        msg = _make_message(text="—", user_id=100)
+        await channel_edit_topics_save(message=msg, user_lang="ru")
+        from bot.database import get_channel
+        ch = await get_channel(ch_id)
+        assert ch["topics"] == []
+        _channel_topics_edit_state.clear()
 
 
 # ── Language handler ──

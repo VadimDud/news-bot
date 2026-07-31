@@ -260,6 +260,19 @@ STRINGS = {
         "channel_ai_use_expanded": "✅ Использовать расширенный набор",
         "channel_ai_use_original": "📝 Оставить мои ключевые слова",
         "channel_ai_no_expansion": "ℹ️ AI не смог предложить расширение. Используем ваши ключевые слова.",
+        "btn_edit_topics": "📚 Тематики",
+        "channel_ask_topics_hint": (
+            "Выберите <b>тематики</b> для фильтрации новостей.\n"
+            "Новости, явно относящиеся к другим тематикам, будут отсекаться.\n"
+            "Введите ID через запятую:"
+        ),
+        "channel_ask_topics_skip": "«—» — пропустить (тематики определятся автоматически).",
+        "channel_edit_topics": (
+            "📚 Редактирование тематик ленты <b>{name}</b>\n\n"
+            "{topics_list}\n\n"
+            "Введите ID через запятую или «—» чтобы сбросить:"
+        ),
+        "channel_topics_updated": "✅ Тематики обновлены для ленты «{name}».",
 
         # ── Admin ──
         "admin_welcome": (
@@ -578,6 +591,19 @@ STRINGS = {
         "channel_ai_use_expanded": "✅ Use expanded set",
         "channel_ai_use_original": "📝 Keep my keywords",
         "channel_ai_no_expansion": "ℹ️ AI couldn't suggest expansion. Using your keywords.",
+        "btn_edit_topics": "📚 Topics",
+        "channel_ask_topics_hint": (
+            "Choose the <b>topics</b> for news filtering.\n"
+            "News clearly belonging to other topics will be rejected.\n"
+            "Enter IDs separated by commas:"
+        ),
+        "channel_ask_topics_skip": "«—» — skip (topics will be inferred automatically).",
+        "channel_edit_topics": (
+            "📚 Editing topics for channel <b>{name}</b>\n\n"
+            "{topics_list}\n\n"
+            "Enter IDs separated by commas, or «—» to clear:"
+        ),
+        "channel_topics_updated": "✅ Topics updated for channel «{name}».",
 
         # ── Admin ──
         "admin_welcome": (

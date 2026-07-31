@@ -481,6 +481,47 @@ class TestChannelScan:
         mock_fetch.assert_called_once()
 
 
+class TestChannelScanWithNews:
+    """Tests that channel scan handlers properly handle global_scan results."""
+
+    async def test_single_channel_scan_unpacks_tuple(self):
+        """channel_scan must unpack global_scan tuple (results, buffer_updates)."""
+        from bot.handlers.channels import channel_scan
+        await set_user(100, "u", "U", "ru")
+        await grant_trial(100, days=30)
+        ch_id = await create_channel(100, "Ch", ["новость"])
+        cb = _make_callback(data=f"ch:scan:{ch_id}", user_id=100)
+
+        news_item = {"title": "Новость дня", "source": "Test", "link": "", "summary": ""}
+        mock_news = [news_item]
+
+        with patch("bot.handlers.channels.fetch_news", new_callable=AsyncMock, return_value=mock_news):
+            await channel_scan(callback=cb, user_lang="ru")
+
+        cb.answer.assert_called_once()
+
+    async def test_scan_all_unpacks_tuple_and_sends_messages(self):
+        """channel_scan_all must unpack global_scan tuple AND send formatted messages."""
+        from bot.handlers.channels import channel_scan_all
+        await set_user(100, "u", "U", "ru")
+        await grant_trial(100, days=30)
+        ch_id = await create_channel(100, "Ch", ["новость"])
+        cb = _make_callback(data="ch:scan_all", user_id=100)
+
+        news_item = {"title": "Срочная новость", "source": "Test", "link": "", "summary": ""}
+        mock_news = [news_item]
+
+        with patch("bot.handlers.channels.fetch_news", new_callable=AsyncMock, return_value=mock_news):
+            await channel_scan_all(callback=cb, user_lang="ru")
+
+        cb.answer.assert_called_once()
+        cb.message.answer.assert_called()
+        answer_texts = [call.args[0] for call in cb.message.answer.call_args_list if call.args]
+        assert any("Срочная новость" in str(t) for t in answer_texts), (
+            f"Expected news text in sent messages, got: {answer_texts}"
+        )
+
+
 class TestChannelUseAiKeywords:
     async def test_use_ai_keywords(self):
         from bot.handlers.channels import channel_use_ai_keywords, _channel_state

@@ -564,8 +564,8 @@ async def channel_scan(callback: CallbackQuery, user_lang: str):
             )
             return
 
-        results = await global_scan(news, [ch], skip_ai=True)
-        matched = results.get(channel_id, [])
+        channel_results, buffer_updates = await global_scan(news, [ch], skip_ai=True)
+        matched = channel_results.get(channel_id, [])
 
         new_items = []
         for item in matched:
@@ -678,15 +678,18 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
             t(user_lang, "scan_progress_analyze", count=len(news))
         )
         all_channels = await db.get_all_user_channels()
-        results = await global_scan(news, all_channels)
+        channel_results, buffer_updates = await global_scan(news, all_channels)
 
         cn_items = []
         n_items = []
         dl_items = []
+        all_new_items = []
         for ch in channels:
-            matched = results.get(ch["id"], [])
+            matched = channel_results.get(ch["id"], [])
+            new_items = []
             for item in matched:
                 if not await db.is_channel_news_seen(ch["id"], item["content_hash"]):
+                    new_items.append(item)
                     cn_items.append({
                         "channel_id": ch["id"],
                         "content_hash": item["content_hash"],
@@ -711,15 +714,26 @@ async def channel_scan_all(callback: CallbackQuery, user_lang: str):
                         "source": item["source"],
                         "impact": item["impact"],
                     })
+            if new_items:
+                all_new_items.append((ch, new_items))
         total_new = len(cn_items)
         if cn_items:
             await db.save_channel_news_batch(cn_items)
             await db.save_news_batch(n_items)
             await db.log_news_delivery_batch(dl_items)
 
+        for ch, new_items in all_new_items:
+            messages = format_channel_news(ch["name"], new_items, user_lang)
+            for i, msg_text in enumerate(messages):
+                msg = await callback.message.answer(msg_text, disable_web_page_preview=True)
+                if i == 0:
+                    await db.save_pinned_news(user_id, callback.message.chat.id, msg.message_id, ch["id"])
+                if i < len(messages) - 1:
+                    await asyncio.sleep(0.3)
+
         text = t(user_lang, "scan_progress_done", count=total_new)
         kb = _channels_menu_kb(user_lang, channels)
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
     try:
         await asyncio.wait_for(_do_scan_all(), timeout=config.SCAN_TIMEOUT)

@@ -202,14 +202,8 @@ async def auto_scan_job(bot: Bot):
             if not new_items:
                 continue
 
-            if not await _rate_limiter.can_send(uid):
-                wait = await _rate_limiter.get_wait_time(uid)
-                logger.info(f"Auto-scan: rate limited for {uid}, wait {wait:.0f}s")
-                continue
-
-            messages = format_channel_news(channel["name"], new_items, lang)
-
-            # Save news to channel_news log + user_news_priority (batch)
+            # Save news to channel_news + user_news_priority BEFORE rate limit check
+            # so we don't reprocess the same news endlessly
             cn_items = []
             n_items = []
             dl_items = []
@@ -238,18 +232,23 @@ async def auto_scan_job(bot: Bot):
                     "source": item["source"],
                     "impact": item["impact"],
                 })
-                # Write to user_news_priority
                 await upsert_user_news_priority(
                     user_id=uid,
                     content_hash=item["content_hash"],
                     ticker=item.get("ticker_hint", ""),
                     importance_score=item.get("importance_score", 0.5),
                 )
-                # Refresh usage flag for buffer
                 await refresh_ticker_popularity(item.get("ticker_hint", "").upper())
             await save_channel_news_batch(cn_items)
             await save_news_batch(n_items)
             await log_news_delivery_batch(dl_items)
+
+            if not await _rate_limiter.can_send(uid):
+                wait = await _rate_limiter.get_wait_time(uid)
+                logger.info(f"Auto-scan: rate limited for {uid}, wait {wait:.0f}s, saved {len(new_items)} items")
+                continue
+
+            messages = format_channel_news(channel["name"], new_items, lang)
 
             # Send/edit pinned message per channel
             pinned = await get_pinned_news_by_channel(channel_id)

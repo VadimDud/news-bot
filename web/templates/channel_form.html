@@ -1,0 +1,26 @@
+${notice}
+<div class="card">
+  <h2>${form_title}</h2>
+  <form method="post" action="${form_action}">
+    <input type="hidden" name="user_id" value="${user_id}">
+    <label for="name">Название ленты</label>
+    <input type="text" id="name" name="name" value="${name}" required maxlength="50" placeholder="Например, Макроэкономика">
+    <label for="keywords">Ключевые слова (через запятую)</label>
+    <textarea id="keywords" name="keywords" required placeholder="инфляция, ключевая ставка, ЦБ">${keywords}</textarea>
+    <div class="hint">Бот будет искать новости, содержащие хотя бы одно из этих слов</div>
+    <label for="ticker">Тикер (необязательно)</label>
+    <input type="text" id="ticker" name="ticker" value="${ticker}" placeholder="Например, SBER">
+    <label>Категории источников</label>
+    <div class="hint">Ничего не выбрано — будут использоваться все источники</div>
+    <div class="checkbox-grid">
+      ${source_options}
+    </div>
+    <label>Тематики (необязательно)</label>
+    <div class="hint">Фильтр новостей по тематике</div>
+    <div class="checkbox-grid">
+      ${topic_options}
+    </div>
+    <button type="submit">💾 Сохранить</button>
+    <a class="btn secondary" href="/channels?user_id=${user_id}">Назад</a>
+  </form>
+</div>

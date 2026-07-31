@@ -40,3 +40,7 @@ SCAN_TIMEOUT: int = int(os.getenv("SCAN_TIMEOUT", "120"))
 
 # Auto-scan news interval (in seconds, default 1800 = 30 minutes)
 AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "1800"))
+
+# Web interface (web_app.py)
+WEB_HOST: str = os.getenv("WEB_HOST", "127.0.0.1")
+WEB_PORT: int = int(os.getenv("WEB_PORT", "8080"))

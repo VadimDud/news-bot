@@ -18,6 +18,8 @@ Telegram-бот для создания тематических лент нов
 
 ```
 main.py                    — точка входа, APScheduler, фоновые задачи
+web_app.py                 — веб-интерфейс для управления лентами (aiohttp)
+web/templates/             — HTML-шаблоны веб-интерфейса
 bot/
   config.py                — конфигурация из .env
   database.py              — SQLite (aiosqlite), все запросы
@@ -87,6 +89,18 @@ cp .env.example .env
 python main.py
 ```
 
+## Веб-интерфейс
+
+Веб-страницы для ввода настроек лент (название, ключевые слова, тикер, категории источников, тематики) вместо переписки в Telegram:
+
+```bash
+python web_app.py
+```
+
+Открывайте `http://127.0.0.1:8080` и введите ваш Telegram ID. Хост и порт настраиваются через `WEB_HOST` / `WEB_PORT` в `.env` (по умолчанию `127.0.0.1:8080`).
+
+> Примечание: авторизация через Telegram пока не подключена — ID вводится вручную. Для публичного доступа установите `WEB_HOST=0.0.0.0` и заверните за Cloudflare Tunnel / Nginx + HTTPS.
+
 ## Docker
 
 ```bash
@@ -115,6 +129,7 @@ pytest tests/ -q
 
 - Python 3.12+
 - aiogram 3.30 — Telegram Bot API
+- aiohttp — веб-интерфейс
 - aiosqlite — асинхронный SQLite
 - APScheduler — планировщик задач
 - DeepSeek/Gemini/DashScope — AI-анализ

@@ -1,0 +1,14 @@
+<div class="card">
+  <div class="channel">
+    <h2>📡 ${name}</h2>
+    <div class="actions">
+      <a class="btn secondary" href="/channels/${id}/edit?user_id=${user_id}">✏️ Изменить</a>
+      <form method="post" action="/channels/${id}/delete">
+        <input type="hidden" name="user_id" value="${user_id}">
+        <button class="danger" type="submit" onclick="return confirm('Удалить ленту?')">🗑 Удалить</button>
+      </form>
+    </div>
+  </div>
+  <div class="meta">Ключевые слова: ${keywords}</div>
+  ${meta}
+</div>

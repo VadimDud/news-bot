@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title}</title>
+<title>{% block title %}Tech News Bot{% endblock %}</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script defer src="https://unpkg.com/alpinejs@3.14.9"></script>
 <style>
 :root {
   --bg: #0f1420;
@@ -17,6 +19,7 @@
   --ok: #3ecf8e;
 }
 * { box-sizing: border-box; }
+[x-cloak] { display: none !important; }
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -32,8 +35,8 @@ header {
   gap: 12px;
 }
 header .logo { font-weight: 700; font-size: 18px; }
-header a { color: var(--muted); text-decoration: none; margin-left: auto; font-size: 14px; }
-header a:hover { color: var(--text); }
+header form { margin-left: auto; }
+header .btn { margin-top: 0; }
 main { max-width: 720px; margin: 32px auto; padding: 0 16px; }
 .card {
   background: var(--panel);
@@ -96,6 +99,16 @@ button.secondary, .btn.secondary {
 }
 button.secondary:hover, .btn.secondary:hover { background: var(--border); }
 button.danger, .btn.danger { background: var(--danger); }
+button.link {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+button.link:hover { color: var(--text); background: none; }
 .actions { display: flex; gap: 8px; margin-top: 12px; }
 .actions form { margin: 0; }
 .actions .btn, .actions button { margin-top: 0; }
@@ -124,15 +137,21 @@ code {
   padding: 1px 6px;
   font-size: 13px;
 }
+#telegram-login { margin: 8px 0 16px; }
+#telegram-login iframe { border-radius: 10px; }
 </style>
 </head>
 <body>
 <header>
   <span class="logo">📡 Tech News Bot</span>
-  <a href="/">Сменить пользователя</a>
+  {% if user_id is defined and user_id %}
+  <form method="post" action="/logout">
+    <button class="link" type="submit">Выйти ({{ user_id }})</button>
+  </form>
+  {% endif %}
 </header>
 <main>
-${content}
+{% block content %}{% endblock %}
 </main>
 </body>
 </html>

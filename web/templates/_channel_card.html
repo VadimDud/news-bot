@@ -1,0 +1,29 @@
+<div class="card" id="channel-{{ ch.id }}">
+  <div class="channel">
+    <h2>📡 {{ ch.name }}</h2>
+    <div class="actions">
+      <a class="btn secondary" href="/channels/{{ ch.id }}/edit">✏️ Изменить</a>
+      <form method="post" action="/channels/{{ ch.id }}/delete"
+            hx-post="/channels/{{ ch.id }}/delete"
+            hx-confirm="Удалить ленту?"
+            hx-target="#channel-{{ ch.id }}"
+            hx-swap="outerHTML">
+        <button class="danger" type="submit">🗑 Удалить</button>
+      </form>
+    </div>
+  </div>
+  <div class="meta">Ключевые слова: {{ ch.keywords | join(", ") }}</div>
+  {% if ch.ticker %}
+    <div class="meta">Тикер: <code>{{ ch.ticker }}</code></div>
+  {% endif %}
+  {% if ch.source_tags %}
+    <div class="meta">Источники: {{ ch.source_tags | source_names(", ") }}</div>
+  {% else %}
+    <div class="meta">Источники: все</div>
+  {% endif %}
+  {% if ch.topics %}
+    <div class="meta">Тематики: {{ ch.topics | topic_names(", ") }}</div>
+  {% else %}
+    <div class="meta">Тематики: не выбраны (автоопределение)</div>
+  {% endif %}
+</div>

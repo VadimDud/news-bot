@@ -1,26 +1,41 @@
-${notice}
-<div class="card">
-  <h2>${form_title}</h2>
-  <form method="post" action="${form_action}">
-    <input type="hidden" name="user_id" value="${user_id}">
+{% extends "base.html" %}
+{% block content %}
+{% if notice %}<div class="notice error">{{ notice }}</div>{% endif %}
+<div class="card" x-data="{ kwCount: {{ form.keywords | length }} }">
+  <h2>{{ form_title }}</h2>
+  <form method="post" action="{{ form_action }}">
     <label for="name">Название ленты</label>
-    <input type="text" id="name" name="name" value="${name}" required maxlength="50" placeholder="Например, Макроэкономика">
+    <input type="text" id="name" name="name" value="{{ form.name }}" required maxlength="50" placeholder="Например, Макроэкономика">
     <label for="keywords">Ключевые слова (через запятую)</label>
-    <textarea id="keywords" name="keywords" required placeholder="инфляция, ключевая ставка, ЦБ">${keywords}</textarea>
-    <div class="hint">Бот будет искать новости, содержащие хотя бы одно из этих слов</div>
+    <textarea id="keywords" name="keywords" required placeholder="инфляция, ключевая ставка, ЦБ"
+              @input="kwCount = $el.value.split(',').map(s => s.trim()).filter(Boolean).length">{{ form.keywords | join(", ") }}</textarea>
+    <div class="hint" x-show="kwCount > 0"><span x-text="kwCount"></span> ключевых слов</div>
     <label for="ticker">Тикер (необязательно)</label>
-    <input type="text" id="ticker" name="ticker" value="${ticker}" placeholder="Например, SBER">
+    <input type="text" id="ticker" name="ticker" value="{{ form.ticker }}" placeholder="Например, SBER">
     <label>Категории источников</label>
     <div class="hint">Ничего не выбрано — будут использоваться все источники</div>
     <div class="checkbox-grid">
-      ${source_options}
+      {% for t in source_tags %}
+      <label>
+        <input type="checkbox" name="source_tags" value="{{ t.id }}"
+               {% if t.id in form.source_tags %}checked{% endif %}>
+        {{ t.name }}
+      </label>
+      {% endfor %}
     </div>
     <label>Тематики (необязательно)</label>
     <div class="hint">Фильтр новостей по тематике</div>
     <div class="checkbox-grid">
-      ${topic_options}
+      {% for t in topics %}
+      <label>
+        <input type="checkbox" name="topics" value="{{ t.id }}"
+               {% if t.id in form.topics %}checked{% endif %}>
+        {{ t.name }}
+      </label>
+      {% endfor %}
     </div>
     <button type="submit">💾 Сохранить</button>
-    <a class="btn secondary" href="/channels?user_id=${user_id}">Назад</a>
+    <a class="btn secondary" href="/channels">Назад</a>
   </form>
 </div>
+{% endblock %}

@@ -1,10 +1,56 @@
-<div class="card">
+{% extends "base.html" %}
+{% block content %}
+<div class="card" x-data="{ showManual: false }">
   <h2>Вход</h2>
-  <p class="meta">Введите ваш Telegram ID, чтобы создавать и настраивать ленты. Авторизация через Telegram будет подключена позже.</p>
-  <form method="get" action="/channels">
+  <p class="meta">Авторизуйтесь через Telegram, чтобы создавать и настраивать ленты.</p>
+
+  {% if bot_username %}
+  <div id="telegram-login">
+    <script async src="https://telegram.org/js/telegram-widget.js?22"
+            data-telegram-login="{{ bot_username }}"
+            data-size="large"
+            data-onauth="onTelegramAuth(user)"
+            data-request-access="write"></script>
+  </div>
+  {% else %}
+  <div class="notice warn">Telegram Login не настроен — укажите <code>BOT_USERNAME</code> в .env, либо войдите по ID.</div>
+  {% endif %}
+
+  <button class="btn secondary" type="button"
+          @click="showManual = !showManual"
+          x-text="showManual ? 'Скрыть ручной вход' : 'Войти по Telegram ID вручную'"></button>
+
+  <form method="post" action="/auth/manual" x-show="showManual" x-cloak>
     <label for="user_id">Telegram ID</label>
     <input type="number" id="user_id" name="user_id" required placeholder="Например, 123456789">
     <div class="hint">Узнать свой ID можно через @userinfobot</div>
     <button type="submit">Войти</button>
   </form>
+
+  <div class="notice error" id="auth-error" style="display:none"></div>
 </div>
+
+<script>
+function onTelegramAuth(user) {
+  const err = document.getElementById('auth-error');
+  err.style.display = 'none';
+  fetch('/auth/telegram', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+    body: JSON.stringify(user),
+  }).then(r => r.json().then(d => ({ok: r.ok, d: d})))
+    .then(({ok, d}) => {
+      if (ok) {
+        window.location.href = '/channels';
+      } else {
+        err.textContent = d.error || 'Ошибка входа';
+        err.style.display = 'block';
+      }
+    })
+    .catch(() => {
+      err.textContent = 'Ошибка сети. Попробуйте ещё раз.';
+      err.style.display = 'block';
+    });
+}
+</script>
+{% endblock %}

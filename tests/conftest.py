@@ -13,6 +13,9 @@ _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["DATABASE_PATH"] = _tmp_db.name
 _tmp_db.close()
 
+# Ensure a bot token exists so web session signing works in tests
+os.environ.setdefault("BOT_TOKEN", "test-token-123")
+
 from bot.database import init_db, close_db, _get_db
 
 

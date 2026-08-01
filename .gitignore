@@ -8,3 +8,5 @@ dbdata/
 .mimocode/
 .pytest_cache/
 bot.log
+web_app.log
+.code-review-graph/

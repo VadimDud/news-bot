@@ -44,3 +44,9 @@ AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "1800"))
 # Web interface (web_app.py)
 WEB_HOST: str = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT: int = int(os.getenv("WEB_PORT", "8080"))
+# Telegram Login Widget requires the bot username (without @), e.g. "my_news_bot"
+BOT_USERNAME: str = os.getenv("BOT_USERNAME", "")
+# Optional secret for web session cookies. If empty, derived from BOT_TOKEN.
+WEB_COOKIE_SECRET: str = os.getenv("WEB_COOKIE_SECRET", "")
+# Set "true" when the web UI is served over HTTPS (behind Nginx/Cloudflare Tunnel)
+WEB_COOKIE_SECURE: bool = os.getenv("WEB_COOKIE_SECURE", "").lower() in ("1", "true", "yes")

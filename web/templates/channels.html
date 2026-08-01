@@ -1,9 +1,18 @@
-<div class="notice ok">Вы вошли как пользователь <code>${user_id}</code>.</div>
+{% extends "base.html" %}
+{% block content %}
+<div class="notice ok">Вы вошли как пользователь <code>{{ user_id }}</code>.</div>
 <div class="card">
   <h2>Мои ленты</h2>
   <p class="meta">Сканирование появится после подключения бота.</p>
 </div>
-${channels_list}
+{% if channels %}
+  {% for ch in channels %}
+    {% include "_channel_card.html" %}
+  {% endfor %}
+{% else %}
+<div class="card"><div class="empty">У вас пока нет лент. Создайте первую!</div></div>
+{% endif %}
 <div class="card">
-  <a class="btn" href="/channels/new?user_id=${user_id}">➕ Создать ленту</a>
+  <a class="btn" href="/channels/new">➕ Создать ленту</a>
 </div>
+{% endblock %}

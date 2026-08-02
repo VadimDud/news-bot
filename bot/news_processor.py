@@ -8,6 +8,7 @@
 
 import datetime
 import hashlib
+import html
 import logging
 import math
 import re
@@ -474,6 +475,11 @@ async def global_scan(
 
 # ── Formatting ──
 
+def _safe_html(text: str) -> str:
+    """Unescape then re-escape arbitrary text so it can be embedded in HTML messages."""
+    return html.escape(html.unescape(str(text)), quote=False)
+
+
 def split_news_text(text: str, max_len: int = 4000) -> list[str]:
     if not text:
         return []
@@ -513,9 +519,9 @@ def _format_items(items: list[dict], lang: str, header_prefix: str,
         for key in extra_keys:
             val = item.get(key)
             if val:
-                extra += f"  🔑 {val}"
+                extra += f"  🔑 {_safe_html(val)}"
         ticker_val = item.get(ticker_key)
-        ticker_info = f"  🏷 <code>{ticker_val}</code>" if ticker_val else ""
+        ticker_info = f"  🏷 <code>{_safe_html(ticker_val)}</code>" if ticker_val else ""
         score = item.get("importance_score")
         score_str = ""
         if score is not None and score > 0:
@@ -525,14 +531,14 @@ def _format_items(items: list[dict], lang: str, header_prefix: str,
                 score_str = " ☆"
             score_str += f" <code>{score:.2f}</code>"
         block = (
-            f"<b>{i}. {item['title']}</b>{score_str}\n"
-            f"📡 {item['source']}{ticker_info}{extra}\n"
-            f"📌 {item['summary']}\n"
-            f"{impact_emoji} {item['impact']}"
+            f"<b>{i}. {_safe_html(item['title'])}</b>{score_str}\n"
+            f"📡 {_safe_html(item['source'])}{ticker_info}{extra}\n"
+            f"📌 {_safe_html(item['summary'])}\n"
+            f"{impact_emoji} {_safe_html(item['impact'])}"
         )
         if item.get("link"):
             link_text = "Подробнее" if lang == "ru" else "Read more"
-            block += f'\n🔗 <a href="{item["link"]}">{link_text}</a>'
+            block += f'\n🔗 <a href="{html.escape(str(item["link"]), quote=True)}">{link_text}</a>'
         parts.append(block)
 
     if lang == "ru":
@@ -570,12 +576,12 @@ def format_news_alert(title: str, source: str, analysis: dict, link: str) -> str
     impact_emoji = emoji.get(analysis["impact"], "🟡")
     msg = (
         f"🔔 <b>ФИНАНСОВАЯ НОВОСТЬ</b>\n"
-        f"📰 {title}\n"
-        f"📡 Источник: {source}\n"
-        f"🏷 Тикер: <code>{analysis['ticker']}</code>\n\n"
-        f"📌 <b>Суть:</b>\n{analysis['summary']}\n\n"
-        f"{impact_emoji} <b>Влияние:</b> {analysis['impact']}\n\n"
-        f"🔗 <a href=\"{link}\">Подробнее</a>\n\n"
+        f"📰 {_safe_html(title)}\n"
+        f"📡 Источник: {_safe_html(source)}\n"
+        f"🏷 Тикер: <code>{_safe_html(analysis['ticker'])}</code>\n\n"
+        f"📌 <b>Суть:</b>\n{_safe_html(analysis['summary'])}\n\n"
+        f"{impact_emoji} <b>Влияние:</b> {_safe_html(analysis['impact'])}\n\n"
+        f"🔗 <a href=\"{html.escape(str(link), quote=True)}\">Подробнее</a>\n\n"
         f"⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
     )
     return msg

@@ -1,6 +1,7 @@
 """Financial news analysis module."""
 
 import asyncio
+import html
 import logging
 import re
 import httpx
@@ -220,15 +221,20 @@ def _fallback_analysis(title: str, tickers: list[str]) -> str:
         return "🟡 Нейтрально. Событие требует дополнительного анализа."
 
 
+def _safe_html(text: str) -> str:
+    """Unescape then re-escape arbitrary text so it can be embedded in HTML messages."""
+    return html.escape(html.unescape(str(text)), quote=False)
+
+
 def format_finance_alert(title: str, summary: str, source: str, analysis: str, link: str) -> str:
     """Format financial news alert for Telegram."""
     msg = (
         f"🔔 <b>ФИНАНСОВАЯ НОВОСТЬ</b>\n"
-        f"📰 {title}\n"
-        f"📡 Источник: {source}\n\n"
-        f"📌 <b>Суть:</b>\n{summary}\n\n"
-        f"⚡ <b>Оценка:</b>\n{analysis}\n\n"
-        f"🔗 <a href=\"{link}\">Подробнее</a>\n\n"
+        f"📰 {_safe_html(title)}\n"
+        f"📡 Источник: {_safe_html(source)}\n\n"
+        f"📌 <b>Суть:</b>\n{_safe_html(summary)}\n\n"
+        f"⚡ <b>Оценка:</b>\n{_safe_html(analysis)}\n\n"
+        f"🔗 <a href=\"{html.escape(str(link), quote=True)}\">Подробнее</a>\n\n"
         f"⚠️ <i>Не является индивидуальной инвестиционной рекомендацией.</i>"
     )
     return msg

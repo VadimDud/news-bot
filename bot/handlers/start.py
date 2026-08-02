@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 
 from aiogram import Router, F
@@ -592,14 +593,14 @@ async def feedback_capture(message: Message, user_lang: str):
 
     user = message.from_user
     username = user.full_name or user.username or "—"
-    user_link = f'<a href="tg://user?id={user_id}">{username}</a>'
+    user_link = f'<a href="tg://user?id={user_id}">{html.escape(username)}</a>'
 
     admin_text = (
         "💬 <b>Новая обратная связь</b>\n\n"
         f"👤 Пользователь: {user_link}\n"
         f"🆔 ID: <code>{user_id}</code>\n"
         f"🌐 Язык: {fb_lang}\n\n"
-        f"📝 <b>Сообщение:</b>\n{message.text}"
+        f"📝 <b>Сообщение:</b>\n{html.escape(message.text)}"
     )
 
     try:

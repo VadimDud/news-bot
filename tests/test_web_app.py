@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import time
@@ -7,6 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from bot import database as db
 from web_app import create_app
+import web_app
 
 TEST_TOKEN = "test-token-123"
 
@@ -299,3 +301,150 @@ class TestChannelList:
         assert "Макро" in text
         assert "инфляция, цб" in text
         assert "SBER" in text
+
+
+class TestChannelScan:
+    async def test_scan_button_on_page(self, client):
+        await _grant_user()
+        await _login(client)
+        await db.create_channel(123, "Макро", ["инфляция"], "sber", ["macro"], ["finance"])
+        resp = await client.get("/channels")
+        text = await resp.text()
+        assert "Сканировать и отправить" in text
+
+    async def test_scan_foreign_channel_not_allowed(self, client):
+        await _grant_user()
+        await _grant_user(456, days=30)
+        await _login(client)
+        await db.create_channel(456, "Чужая", ["нефть"])
+        channel_id = (await db.get_user_channels(456))[0]["id"]
+        resp = await client.post(f"/channels/{channel_id}/scan", allow_redirects=False)
+        assert resp.status == 200
+        assert "Лента не найдена" in await resp.text()
+
+    async def test_scan_requires_login(self, client):
+        resp = await client.post("/channels/1/scan", allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"] == "/"
+
+    async def test_scan_htmx_returns_status_chip(self, client, monkeypatch):
+        await _grant_user()
+        await _login(client)
+        await db.create_channel(123, "Макро", ["инфляция"], "sber", ["macro"], ["finance"])
+        channel_id = (await db.get_user_channels(123))[0]["id"]
+
+        async def fake_scan(ch):
+            pass
+
+        monkeypatch.setattr(web_app, "_run_channel_scan", fake_scan)
+        resp = await client.post(
+            f"/channels/{channel_id}/scan",
+            headers={"HX-Request": "true"},
+            allow_redirects=False,
+        )
+        assert resp.status == 200
+        assert "Сканирование запущено" in await resp.text()
+
+    async def test_run_channel_scan_saves_and_sends(self, client, monkeypatch):
+        await _grant_user()
+        await _login(client)
+        await db.create_channel(123, "Макро", ["инфляция"], "sber", ["macro"], ["finance"])
+        ch = (await db.get_user_channels(123))[0]
+
+        news = [{
+            "title": "Инфляция в РФ ускорилась",
+            "summary": "ЦБ повысил ключевую ставку.",
+            "source": "Тест",
+            "link": "http://example.com/inflation",
+        }]
+        matched = [{
+            "title": "Инфляция в РФ ускорилась",
+            "summary": "ЦБ повысил ключевую ставку.",
+            "source": "Тест",
+            "link": "http://example.com/inflation",
+            "impact": "NEUTRAL",
+            "matched_keyword": "инфляция",
+            "ticker_hint": "SBER",
+            "content_hash": "hash-inflation-1",
+            "importance_score": 0.5,
+        }]
+
+        async def fake_fetch(tags=None):
+            return news
+
+        async def fake_global_scan(news_items, channels, skip_ai=False):
+            return {ch["id"]: matched}, []
+
+        async def fake_deliver(channel, items, lang):
+            delivered.append((channel["id"], len(items), lang))
+
+        delivered = []
+        monkeypatch.setattr(web_app, "fetch_news", fake_fetch)
+        monkeypatch.setattr(web_app, "global_scan", fake_global_scan)
+        monkeypatch.setattr(web_app, "_deliver_channel_news", fake_deliver)
+
+        await web_app._run_channel_scan(ch)
+
+        assert delivered == [(ch["id"], 1, "ru")]
+        cn = await db.get_channel_news_log(ch["id"])
+        assert len(cn) == 1
+        assert cn[0]["news_content_hash"] == "hash-inflation-1"
+        assert await db.is_channel_news_seen(ch["id"], "hash-inflation-1")
+
+    async def test_run_channel_scan_no_new_news_skips_send(self, client, monkeypatch):
+        await _grant_user()
+        await _login(client)
+        await db.create_channel(123, "Макро", ["инфляция"], "sber", ["macro"], ["finance"])
+        ch = (await db.get_user_channels(123))[0]
+
+        async def fake_fetch(tags=None):
+            return [{"title": "Старая новость", "summary": "", "source": "Тест", "link": ""}]
+
+        async def fake_global_scan(news_items, channels, skip_ai=False):
+            return {}, []
+
+        delivered = []
+
+        async def fake_deliver(channel, items, lang):
+            delivered.append(channel["id"])
+
+        monkeypatch.setattr(web_app, "fetch_news", fake_fetch)
+        monkeypatch.setattr(web_app, "global_scan", fake_global_scan)
+        monkeypatch.setattr(web_app, "_deliver_channel_news", fake_deliver)
+
+        await web_app._run_channel_scan(ch)
+
+        assert delivered == []
+        assert await db.get_channel_news_log(ch["id"]) == []
+
+    async def test_run_channel_scan_skips_already_seen(self, client, monkeypatch):
+        await _grant_user()
+        await _login(client)
+        await db.create_channel(123, "Макро", ["инфляция"], "sber", ["macro"], ["finance"])
+        ch = (await db.get_user_channels(123))[0]
+        await db.save_channel_news(ch["id"], "hash-inflation-1", "инфляция", "SBER")
+
+        async def fake_fetch(tags=None):
+            return [{"title": "Инфляция", "summary": "", "source": "Тест", "link": ""}]
+
+        async def fake_global_scan(news_items, channels, skip_ai=False):
+            matched = [{
+                "title": "Инфляция", "summary": "", "source": "Тест", "link": "",
+                "impact": "NEUTRAL", "matched_keyword": "инфляция",
+                "ticker_hint": "SBER", "content_hash": "hash-inflation-1",
+                "importance_score": 0.5,
+            }]
+            return {ch["id"]: matched}, []
+
+        delivered = []
+
+        async def fake_deliver(channel, items, lang):
+            delivered.append(channel["id"])
+
+        monkeypatch.setattr(web_app, "fetch_news", fake_fetch)
+        monkeypatch.setattr(web_app, "global_scan", fake_global_scan)
+        monkeypatch.setattr(web_app, "_deliver_channel_news", fake_deliver)
+
+        await web_app._run_channel_scan(ch)
+
+        assert delivered == []

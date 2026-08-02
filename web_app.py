@@ -27,9 +27,16 @@ from pathlib import Path
 import aiohttp_jinja2
 import jinja2
 from aiohttp import web
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
+from aiogram.client.telegram import TelegramAPIServer
 
 from bot import config
 from bot import database as db
+from bot.finance import fetch_news
+from bot.news_processor import global_scan, format_channel_news
 from bot.sources import get_source_tags_display
 from bot.topics import get_topics_display
 
@@ -174,6 +181,101 @@ def _error_page(request: web.Request, error: str) -> web.Response:
     return aiohttp_jinja2.render_template(
         "error.html", request, {"error": error}
     )
+
+
+# ── Telegram bot client (for manual scan) ─────────────────────────────────────
+
+_bot: Bot | None = None
+
+
+def _get_bot() -> Bot:
+    global _bot
+    if _bot is None:
+        _bot = Bot(
+            token=config.BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        if config.HTTP_PROXY:
+            _bot.session = AiohttpSession(proxy=config.HTTP_PROXY)
+        elif config.TELEGRAM_API_SERVER:
+            _bot.session.api = TelegramAPIServer.from_base(config.TELEGRAM_API_SERVER)
+    return _bot
+
+
+async def _deliver_channel_news(ch: dict, new_items: list[dict], lang: str) -> None:
+    """Send matched news for a channel to its owner via the bot."""
+    bot = _get_bot()
+    messages = format_channel_news(ch["name"], new_items, lang)
+    for i, msg_text in enumerate(messages):
+        msg = await bot.send_message(
+            ch["user_id"], msg_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        if i == 0:
+            await db.save_pinned_news(ch["user_id"], ch["user_id"], msg.message_id, ch["id"])
+        if i < len(messages) - 1:
+            await asyncio.sleep(0.3)
+
+
+async def _run_channel_scan(ch: dict) -> None:
+    """Background manual scan for a single channel: fetch, match, save, send."""
+    try:
+        news = await fetch_news(ch.get("source_tags") or None)
+        if not news:
+            logger.info(f"Web scan for channel {ch['name']}: no news fetched")
+            return
+
+        channel_results, _buffer_updates = await global_scan(news, [ch], skip_ai=True)
+        matched = channel_results.get(ch["id"], [])
+
+        new_items = []
+        for item in matched:
+            if not await db.is_channel_news_seen(ch["id"], item["content_hash"]):
+                new_items.append(item)
+
+        if not new_items:
+            logger.info(f"Web scan for channel {ch['name']}: no new news")
+            return
+
+        cn_items = []
+        n_items = []
+        dl_items = []
+        for item in new_items:
+            cn_items.append({
+                "channel_id": ch["id"],
+                "content_hash": item["content_hash"],
+                "matched_keyword": item.get("matched_keyword", ""),
+                "ticker_hint": item.get("ticker_hint", ""),
+                "impact": item["impact"],
+            })
+            n_items.append({
+                "content_hash": item["content_hash"],
+                "user_id": ch["user_id"],
+                "source": item["source"],
+                "title": item["title"],
+                "link": item.get("link", ""),
+                "ticker_hint": item.get("ticker_hint", ""),
+                "summary": item["summary"],
+                "impact": item["impact"],
+            })
+            dl_items.append({
+                "user_id": ch["user_id"],
+                "ticker_hint": item.get("ticker_hint", ""),
+                "title": item["title"],
+                "source": item["source"],
+                "impact": item["impact"],
+            })
+        await db.save_channel_news_batch(cn_items)
+        await db.save_news_batch(n_items)
+        await db.log_news_delivery_batch(dl_items)
+
+        user = await db.get_user(ch["user_id"])
+        lang = (user or {}).get("language", "ru")
+        await _deliver_channel_news(ch, new_items, lang)
+        logger.info(f"Web scan for channel {ch['name']}: sent {len(new_items)} news")
+    except Exception as e:
+        logger.warning(f"Web scan for channel {ch.get('name', ch.get('id'))} failed: {e}")
 
 
 # ── Form parsing / validation ─────────────────────────────────────────────────
@@ -381,6 +483,22 @@ async def channel_delete(request: web.Request) -> web.Response:
     raise web.HTTPFound("/channels")
 
 
+async def channel_scan(request: web.Request) -> web.Response:
+    user_id = request[_USER_KEY]
+    channel_id = int(request.match_info["channel_id"])
+    ch = await db.get_channel(channel_id)
+    if not ch or ch["user_id"] != user_id:
+        return _error_page(request, "Лента не найдена.")
+
+    asyncio.create_task(_run_channel_scan(ch))
+    if request.headers.get("HX-Request"):
+        return web.Response(
+            text='<span class="chip">🔍 Сканирование запущено — новости придут в Telegram</span>',
+            content_type="text/html",
+        )
+    raise web.HTTPFound("/channels")
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware])
     aiohttp_jinja2.setup(
@@ -399,6 +517,7 @@ def create_app() -> web.Application:
     app.router.add_get("/channels/{channel_id}/edit", channel_edit)
     app.router.add_post("/channels/{channel_id}", channel_update)
     app.router.add_post("/channels/{channel_id}/delete", channel_delete)
+    app.router.add_post("/channels/{channel_id}/scan", channel_scan)
     return app
 
 

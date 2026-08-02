@@ -26,4 +26,13 @@
   {% else %}
     <div class="meta">Тематики: не выбраны (автоопределение)</div>
   {% endif %}
+  <div id="scan-status-{{ ch.id }}"></div>
+  <div class="actions">
+    <form method="post" action="/channels/{{ ch.id }}/scan"
+          hx-post="/channels/{{ ch.id }}/scan"
+          hx-target="#scan-status-{{ ch.id }}"
+          hx-swap="innerHTML">
+      <button class="btn" type="submit">🔍 Сканировать и отправить</button>
+    </form>
+  </div>
 </div>

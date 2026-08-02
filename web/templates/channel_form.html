@@ -13,18 +13,22 @@
     <label for="ticker">Тикер (необязательно)</label>
     <input type="text" id="ticker" name="ticker" value="{{ form.ticker }}" placeholder="Например, SBER">
     <label>Категории источников</label>
-    <div class="hint">Ничего не выбрано — будут использоваться все источники</div>
+    <div class="hint">Откуда брать новости для ленты. Если ничего не выбрано — берутся все источники.</div>
     <div class="checkbox-grid">
       {% for t in source_tags %}
       <label>
         <input type="checkbox" name="source_tags" value="{{ t.id }}"
                {% if t.id in form.source_tags %}checked{% endif %}>
         {{ t.name }}
+        <span class="hint">{{ t.description }}</span>
       </label>
       {% endfor %}
     </div>
     <label>Тематики (необязательно)</label>
-    <div class="hint">Фильтр новостей по тематике</div>
+    <div class="hint">
+      Фильтр по тематике: новости, явно относящиеся к другим тематикам, будут отсекаться.
+      Если ничего не выбрано — тематика определяется автоматически.
+    </div>
     <div class="checkbox-grid">
       {% for t in topics %}
       <label>

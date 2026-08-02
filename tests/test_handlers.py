@@ -720,6 +720,41 @@ class TestAdminCallback:
         cb.answer.assert_called_once()
 
 
+# ── AI handlers ──
+
+
+class TestAiHandler:
+    async def test_ai_not_admin(self):
+        from bot.handlers.ai import cmd_ai
+        msg = _make_message(text="/ai привет", user_id=999)
+        await cmd_ai(message=msg, user_lang="ru")
+        msg.answer.assert_called_once()
+        assert "Нет доступа" in msg.answer.call_args[0][0]
+
+    async def test_ai_empty_prompt(self):
+        from bot.handlers.ai import cmd_ai
+        msg = _make_message(text="/ai", user_id=config.ADMIN_ID)
+        await cmd_ai(message=msg, user_lang="ru")
+        msg.answer.assert_called_once()
+        assert "AI-ассистент" in msg.answer.call_args[0][0]
+
+    async def test_ai_reply(self):
+        from bot.handlers.ai import cmd_ai, _ai_session
+        with patch("bot.handlers.ai._run_opencode", new_callable=AsyncMock,
+                   return_value=("Ответ ассистента", "ses_123")):
+            msg = _make_message(text="/ai тест", user_id=config.ADMIN_ID)
+            await cmd_ai(message=msg, user_lang="ru")
+        texts = [c[0][0] for c in msg.answer.call_args_list if c[0]]
+        assert any("Ответ ассистента" in t for t in texts)
+
+    async def test_ai_reset(self):
+        from bot.handlers.ai import cmd_ai_reset
+        msg = _make_message(text="/ai_reset", user_id=config.ADMIN_ID)
+        await cmd_ai_reset(message=msg, user_lang="ru")
+        msg.answer.assert_called_once()
+        assert "сброшен" in msg.answer.call_args[0][0]
+
+
 # ── Finance handlers ──
 
 

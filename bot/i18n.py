@@ -300,6 +300,17 @@ STRINGS = {
             "📢 Рассылка отправлена {count} пользователям."
         ),
         "admin_not_admin": "⛔ Нет доступа к админ-панели.",
+        "ai_usage": (
+            "🤖 <b>AI-ассистент</b>\n\n"
+            "Использование: <code>/ai текст</code>\n"
+            "Сброс контекста: <code>/ai_reset</code>"
+        ),
+        "ai_working": "🤔 Думаю...",
+        "ai_busy": "⏳ Ещё думаю над предыдущим вопросом, подождите.",
+        "ai_no_binary": "❌ opencode не установлен в этом окружении.",
+        "ai_timeout": "⏱️ Превышено время ожидания ответа.",
+        "ai_error": "❌ Ошибка при получении ответа.",
+        "ai_reset_done": "✅ Контекст диалога сброшен.",
         "btn_registrations": "📋 Регистрации",
         "admin_registrations": (
             "📋 <b>Регистрации</b>\n\n"
@@ -629,6 +640,17 @@ STRINGS = {
         ),
         "admin_broadcast_confirm": "📢 Sent to {count} users.",
         "admin_not_admin": "⛔ No admin access.",
+        "ai_usage": (
+            "🤖 <b>AI assistant</b>\n\n"
+            "Usage: <code>/ai text</code>\n"
+            "Reset context: <code>/ai_reset</code>"
+        ),
+        "ai_working": "🤔 Thinking...",
+        "ai_busy": "⏳ Still thinking about the previous question, please wait.",
+        "ai_no_binary": "❌ opencode is not installed in this environment.",
+        "ai_timeout": "⏱️ Timed out waiting for a response.",
+        "ai_error": "❌ Error getting a response.",
+        "ai_reset_done": "✅ Dialog context reset.",
         "btn_registrations": "📋 Registrations",
         "admin_registrations": (
             "📋 <b>Registrations</b>\n\n"

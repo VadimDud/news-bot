@@ -32,7 +32,7 @@ from bot.database import (
 from bot.finance import fetch_news
 from bot.i18n import t
 from bot.middlewares import LanguageMiddleware
-from bot.handlers import start, language, finance, admin, channels
+from bot.handlers import start, language, finance, admin, channels, ai
 from bot.news_processor import (
     global_scan, format_channel_news, compute_hash,
 )
@@ -339,6 +339,7 @@ async def main():
         admin.router,
         finance.router,
         channels.router,
+        ai.router,
     )
 
     logger.info("Bot is now polling. Press Ctrl+C to stop.")

@@ -337,9 +337,9 @@ async def main():
         start.router,
         language.router,
         admin.router,
+        ai.router,
         finance.router,
         channels.router,
-        ai.router,
     )
 
     logger.info("Bot is now polling. Press Ctrl+C to stop.")

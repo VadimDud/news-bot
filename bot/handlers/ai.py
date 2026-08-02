@@ -73,13 +73,13 @@ async def _send_chunks(message: Message, text: str):
         await message.answer(html.escape(text[i:i + _MAX_MSG]))
 
 
-@router.message(F.text.startswith("/ai "))
+@router.message(F.text.regexp(r"^/ai\b"))
 async def cmd_ai(message: Message, user_lang: str):
     if not _is_admin(message.from_user.id):
         await message.answer(t(user_lang, "admin_not_admin"))
         return
 
-    prompt = message.text[4:].strip()
+    prompt = re.sub(r"^/ai(@[A-Za-z0-9_]+)?\s*", "", message.text, count=1).strip()
     if not prompt:
         await message.answer(t(user_lang, "ai_usage"))
         return
@@ -118,7 +118,7 @@ async def cmd_ai(message: Message, user_lang: str):
         await _send_chunks(message, reply)
 
 
-@router.message(F.text == "/ai_reset")
+@router.message(F.text.regexp(r"^/ai_reset(@[A-Za-z0-9_]+)?$"))
 async def cmd_ai_reset(message: Message, user_lang: str):
     if not _is_admin(message.from_user.id):
         await message.answer(t(user_lang, "admin_not_admin"))

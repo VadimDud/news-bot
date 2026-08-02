@@ -1,10 +1,12 @@
 import pytest
+from unittest.mock import AsyncMock, patch
 from bot.news_processor import (
     match_news_to_channels, stage1_filter, compute_sentiment,
     compute_hash, compute_minhash, is_similar,
     format_channel_news, format_news_batch, format_news_alert,
     split_news_text, _normalize, _simple_stem,
 )
+from bot import database as db
 
 
 class TestNormalizeAndStem:
@@ -61,6 +63,27 @@ class TestMatchNewsToChannels:
         ]
         matches = match_news_to_channels("Ключевого ставка ЦБ", "", channels)
         assert len(matches) == 1
+
+    def test_mid_word_company_name_not_matched(self):
+        # "золото" must not match mid-word in "Южуралзолото"
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": None,
+             "topics": [], "keywords": ["золото"]},
+        ]
+        matches = match_news_to_channels(
+            "Акции ЮГК выросли на 6%",
+            "Акции ПАО «Южуралзолото» (ЮГК) на торгах Мосбиржи подскочили на 6%",
+            channels)
+        assert len(matches) == 0
+
+    def test_inflections_match_same_root(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": None,
+             "topics": [], "keywords": ["золото"]},
+        ]
+        assert len(match_news_to_channels("Золотые резервы растут", "", channels)) == 1
+        assert len(match_news_to_channels("Цена золотом исчисляется", "", channels)) == 1
+        assert len(match_news_to_channels("Золотая монета", "", channels)) == 1
 
 
 class TestTopicFilter:
@@ -293,3 +316,53 @@ class TestSplitNewsText:
         text = "\n".join([f"{i}. Item {i} " + "x" * 100 for i in range(50)])
         result = split_news_text(text, max_len=4000)
         assert len(result) >= 2
+
+
+class TestGlobalScanRelevanceVerification:
+    """AI verification must drop ambiguous matches the LLM deems irrelevant."""
+
+    async def _setup_channel(self):
+        await db.set_user(100, "test", "Test User", "ru")
+        await db.grant_access(100, 30)
+        await db.create_channel(100, "Золото", ["золото"], ticker="ЗОЛОТО")
+        return await db.get_all_user_channels()
+
+    async def test_irrelevant_gold_dropped(self):
+        from bot import news_processor as np
+        channels = await self._setup_channel()
+        news = [{
+            "title": "Экс-владельцы «Золотого глобуса» заявили о рейдерском захвате премии",
+            "summary": "Премия «Золотой глобус» оказалась в центре скандала",
+            "source": "Коммерсантъ",
+            "link": "http://example.com",
+        }]
+        with patch.object(np, "analyze", new=AsyncMock(return_value="нет")):
+            results, buffer_updates = await np.global_scan(news, channels)
+        assert all(len(v) == 0 for v in results.values())
+        assert buffer_updates == []
+
+    async def test_relevant_gold_kept(self):
+        from bot import news_processor as np
+        channels = await self._setup_channel()
+        news = [{
+            "title": "Золото опустилось ниже $4 тыс. за унцию",
+            "summary": "Стоимость августовского фьючерса на золото составила $3,993 тыс.",
+            "source": "Коммерсантъ",
+            "link": "http://example.com",
+        }]
+        with patch.object(np, "analyze", new=AsyncMock(return_value="да")):
+            results, buffer_updates = await np.global_scan(news, channels)
+        assert any(len(v) > 0 for v in results.values())
+
+    async def test_unavailable_ai_keeps_match(self):
+        from bot import news_processor as np
+        channels = await self._setup_channel()
+        news = [{
+            "title": "Золото опустилось ниже $4 тыс. за унцию",
+            "summary": "Стоимость фьючерса на золото снизилась",
+            "source": "Коммерсантъ",
+            "link": "http://example.com",
+        }]
+        with patch.object(np, "analyze", new=AsyncMock(return_value=None)):
+            results, _ = await np.global_scan(news, channels)
+        assert any(len(v) > 0 for v in results.values())

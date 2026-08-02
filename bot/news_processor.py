@@ -24,6 +24,19 @@ logger = logging.getLogger(__name__)
 # Maximum number of AI calls per scan to prevent blocking
 MAX_AI_CALLS_PER_SCAN = 5
 
+# Keywords that are ambiguous outside their domain and should be verified by
+# the LLM before delivery (e.g. "золото" → gold medal, «Золотой глобус»,
+# «Южуралзолото»). Normalized (lowercase) forms.
+AMBIGUOUS_KEYWORDS = frozenset({
+    "золото", "золотой", "золотая", "золотом", "золотые", "gold",
+    "серебро", "silver", "платина", "платины", "platinum",
+    "инфляция", "инфляции", "inflation",
+    "нефть", "нефти", "oil",
+    "газ", "gas",
+    "биткоин", "bitcoin",
+    "санкци", "санкций", "sanction", "sanctions",
+})
+
 # Importance score weights
 IMPORTANCE_WEIGHTS = {
     "sentiment_magnitude": 0.25,
@@ -76,14 +89,46 @@ def _normalize(text: str) -> str:
     return text.lower().strip()
 
 
+# Russian morphological endings, longest first so longer endings win over
+# their single-letter suffixes (e.g. "ого" over "о").
+_STEM_ENDINGS = (
+    "ятся", "ются", "ыми", "ими", "ого", "его", "ому", "ему",
+    "ать", "ить", "еть", "тся",
+    "ая", "яя", "ое", "ее", "ые", "ие", "ую", "юю",
+    "ий", "ый", "ой", "ей",
+    "ах", "ях", "ам", "ям", "ом", "ем", "ов", "ев",
+    "а", "я", "о", "е", "у", "ю", "ы", "и", "ь",
+)
+
+
 def _simple_stem(word: str) -> str:
     word = word.lower()
-    for ending in ("ого", "ему", "ать", "ить", "еть", "ятся", "ются", "тся",
-                    "ий", "ый", "ой", "ая", "яя", "ое", "ее", "ов", "ев",
-                    "ам", "ям", "ах", "ях"):
+    for ending in _STEM_ENDINGS:
         if len(word) > len(ending) + 3 and word.endswith(ending):
             return word[:-len(ending)]
     return word
+
+
+_WORD_RE = re.compile(r"[а-яёa-z0-9-]+")
+
+
+def _kw_in_text(combined: str, kw: str) -> bool:
+    """Whole-word keyword matching.
+
+    Multi-word phrases match as substrings of the lowercased text; single
+    words must match the START of a whole word after light stemming. This
+    prevents false positives like "золото" matching mid-word in
+    "Южуралзолото" while still catching inflections ("золотом", "золотой").
+    """
+    kw = _normalize(kw)
+    if len(kw) < 2:
+        return False
+    if " " in kw:
+        return kw in combined
+    root = _simple_stem(kw)
+    if len(root) < 2:
+        return False
+    return any(w.startswith(root) for w in _WORD_RE.findall(combined))
 
 
 # ── Stage 1: keyword matching against user channels ──
@@ -98,27 +143,24 @@ def match_news_to_channels(
     Returns list of matches: [{channel_id, user_id, language, ticker, matched_keyword}]
     """
     combined = _normalize(title + " " + summary)
-    combined_stems = {_simple_stem(combined)}
     topic_counts = count_topics(combined)
     matches = []
 
     for ch in all_channels:
         keywords = ch.get("keywords", [])
         for kw in keywords:
-            kw_lower = _normalize(kw)
-            if len(kw_lower) < 2:
+            if not _kw_in_text(combined, kw):
                 continue
-            if kw_lower in combined or _simple_stem(kw_lower) in combined_stems:
-                if not topic_filter_pass(topic_counts, effective_topics(ch)):
-                    continue
-                matches.append({
-                    "channel_id": ch["id"],
-                    "user_id": ch["user_id"],
-                    "language": ch.get("language", "ru"),
-                    "ticker": ch.get("ticker"),
-                    "matched_keyword": kw,
-                })
-                break  # one match per channel is enough
+            if not topic_filter_pass(topic_counts, effective_topics(ch)):
+                continue
+            matches.append({
+                "channel_id": ch["id"],
+                "user_id": ch["user_id"],
+                "language": ch.get("language", "ru"),
+                "ticker": ch.get("ticker"),
+                "matched_keyword": kw,
+            })
+            break  # one match per channel is enough
 
     return matches
 
@@ -129,16 +171,12 @@ def stage1_filter(title: str, summary: str, tracked_assets: list[dict]) -> tuple
     Returns (is_relevant, matched_ticker_or_None, matched_asset_or_None).
     """
     combined = _normalize(title + " " + summary)
-    combined_stems = {_simple_stem(combined)}
 
     for asset in tracked_assets:
         keywords = asset.get("keywords", [])
         ticker = asset["ticker"]
         for kw in keywords:
-            kw_lower = _normalize(kw)
-            if len(kw_lower) < 2:
-                continue
-            if kw_lower in combined or _simple_stem(kw_lower) in combined_stems:
+            if _kw_in_text(combined, kw):
                 return True, ticker, asset
 
     return False, None, None
@@ -209,6 +247,34 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
         text = result.strip().upper()
         if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
             return text
+    return None
+
+
+async def _verify_relevance(title: str, summary: str, keyword: str,
+                            ai_timeout: int = 8) -> bool | None:
+    """Ask the LLM whether the news is really about `keyword`.
+
+    Returns True/False, or None when the AI is unavailable or gave an
+    unparseable answer (in which case the match is kept).
+    """
+    system_prompt = (
+        "Ты — новостной редактор. Определи, действительно ли новость посвящена "
+        "указанной теме. Отвечай ТОЛЬКО одним словом: да или нет."
+    )
+    user_message = (
+        f"Тема: {keyword}\n\n"
+        f"Заголовок: {title}\n"
+        f"Краткое содержание: {summary[:300]}\n\n"
+        f"Новость действительно об этой теме? Ответь одним словом: да или нет."
+    )
+    result = await analyze(system_prompt, user_message, parse_json=False,
+                           temperature=0.0, max_tokens=5, timeout=ai_timeout)
+    if result:
+        text = result.strip().lower()
+        if text.startswith("да"):
+            return True
+        if text.startswith("нет"):
+            return False
     return None
 
 
@@ -289,6 +355,31 @@ async def global_scan(
         matches = match_news_to_channels(title, summary, all_channels)
         if not matches:
             continue
+
+        # ── AI relevance verification: drop ambiguous / summary-only matches ──
+        if not skip_ai:
+            title_norm = _normalize(title)
+            verdicts: dict[str, bool | None] = {}
+            for m in matches:
+                kw = m["matched_keyword"]
+                if kw in verdicts or ai_calls_count >= MAX_AI_CALLS_PER_SCAN:
+                    continue
+                needs_check = (
+                    _normalize(kw) in AMBIGUOUS_KEYWORDS
+                    or not _kw_in_text(title_norm, kw)
+                )
+                if not needs_check:
+                    continue
+                verdict = await _verify_relevance(title, summary, kw)
+                ai_calls_count += 1
+                verdicts[kw] = verdict
+            if any(v is False for v in verdicts.values()):
+                matches = [
+                    m for m in matches
+                    if verdicts.get(m["matched_keyword"]) is not False
+                ]
+            if not matches:
+                continue
 
         # Compute sentiment once per news item (use first match's triggers as hint)
         first_channel = next(

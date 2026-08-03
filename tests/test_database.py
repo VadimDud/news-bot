@@ -29,6 +29,8 @@ from bot.database import (
     get_finance_tickers_count, get_user_channels_count,
     get_channels_count, get_news_sent_count, get_full_stats,
     get_all_users,
+    get_ai_cache, set_ai_cache, cleanup_old_ai_cache,
+    upsert_news_buffer, dynamic_cleanup_news_buffer,
 )
 
 from bot import config
@@ -670,3 +672,50 @@ class TestStatistics:
         await set_user(2, "u2", "U2", "en")
         users = await get_all_users()
         assert len(users) == 2
+
+
+# ── AI cache ──
+
+
+class TestAICache:
+    async def test_set_and_get(self):
+        await set_ai_cache("rel:abc:золото", "no")
+        assert await get_ai_cache("rel:abc:золото") == "no"
+
+    async def test_missing_returns_none(self):
+        assert await get_ai_cache("does-not-exist") is None
+
+    async def test_overwrite(self):
+        await set_ai_cache("k", "yes")
+        await set_ai_cache("k", "no")
+        assert await get_ai_cache("k") == "no"
+
+    async def test_cleanup_keeps_fresh(self):
+        await set_ai_cache("k1", "yes")
+        removed = await cleanup_old_ai_cache(max_age_days=7)
+        assert removed == 0
+        assert await get_ai_cache("k1") == "yes"
+
+
+# ── Orphan cleanup ──
+
+
+class TestOrphanCleanup:
+    async def test_delete_channel_purges_dependents(self):
+        await set_user(100, "u1", "U", "ru")
+        ch_id = await create_channel(100, "Ch1", ["kw"], ticker="SBER")
+        await save_channel_news(ch_id, "h1", "kw")
+        await save_pinned_news(100, 1, 2, channel_id=ch_id)
+        await delete_channel(ch_id)
+        assert await get_channel(ch_id) is None
+        assert await get_channel_news_log(ch_id) == []
+        assert await get_pinned_news_by_channel(ch_id) is None
+
+    async def test_dynamic_cleanup_purges_orphan_news(self):
+        await set_user(100, "u1", "U", "ru")
+        await upsert_news_buffer("h1", "s", "T1", "u", "sum", 0.5)
+        await save_news("h1", 100, "s", "T1", "", "", "sum", "NEUTRAL")
+        await save_news("h2", 100, "s", "T2", "", "", "sum", "NEUTRAL")
+        await dynamic_cleanup_news_buffer()
+        assert await is_news_seen_2("h1", 100)
+        assert not await is_news_seen_2("h2", 100)

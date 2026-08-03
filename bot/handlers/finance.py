@@ -20,6 +20,7 @@ from ..news_processor import (
     stage2_hybrid,
     format_news_batch,
     compute_hash,
+    _sentiment_cache_key,
     MAX_AI_CALLS_PER_SCAN,
 )
 from .start import _store_msg, _store_news_msg, _delete_old_news_msg, _get_msg_id, _feedback_state, _get_text_buttons
@@ -120,11 +121,21 @@ async def finance_handler(callback: CallbackQuery, user_lang: str):
 
                 impact, confidence = compute_sentiment(title, item["summary"], matched_asset)
 
-                if (confidence == "low" or impact == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
-                    ai_impact = await stage2_hybrid(title, item["summary"], matched_asset, confidence)
-                    if ai_impact:
-                        impact = ai_impact
-                    ai_calls_count += 1
+                if (confidence == "low" or impact == "NEUTRAL"):
+                    sent_cache_key = _sentiment_cache_key(
+                        content_hash, matched_asset.get("ticker") if matched_asset else None
+                    )
+                    cached_sent = await db.get_ai_cache(sent_cache_key)
+                    if cached_sent is not None and cached_sent in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
+                        impact = cached_sent
+                    elif ai_calls_count < MAX_AI_CALLS_PER_SCAN:
+                        ai_impact = await stage2_hybrid(
+                            title, item["summary"], matched_asset, confidence,
+                            content_hash=content_hash,
+                        )
+                        if ai_impact:
+                            impact = ai_impact
+                        ai_calls_count += 1
 
                 summary = item["summary"][:200] if item["summary"] else title[:200]
 

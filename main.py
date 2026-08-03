@@ -24,7 +24,7 @@ from bot.database import (
     cleanup_old_delivery_logs, cleanup_old_channel_news,
     save_scan_metrics, log_news_delivery,
     save_news_batch, save_channel_news_batch, log_news_delivery_batch,
-    cleanup_old_scan_metrics,
+    cleanup_old_scan_metrics, cleanup_old_ai_cache,
     get_all_tracked_assets,
     upsert_news_buffer, upsert_user_news_priority_batch,
     upsert_news_ticker_popularity, dynamic_cleanup_news_buffer,
@@ -76,6 +76,10 @@ async def cleanup_job(bot: Bot):
         removed_metrics = await cleanup_old_scan_metrics(max_age_days=30)
         if removed_metrics:
             logger.info(f"Cleaned {removed_metrics} old scan_metrics entries")
+
+        removed_ai_cache = await cleanup_old_ai_cache(max_age_days=7)
+        if removed_ai_cache:
+            logger.info(f"Cleaned {removed_ai_cache} old AI cache entries")
     except Exception as e:
         logger.warning(f"Cleanup error: {e}")
 

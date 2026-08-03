@@ -198,7 +198,7 @@ async def init_db():
             sent_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             is_read         INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES users(user_id),
-            FOREIGN KEY (content_hash) REFERENCES news_buffer(content_hash),
+            FOREIGN KEY (content_hash) REFERENCES news_buffer(content_hash) ON DELETE CASCADE,
             UNIQUE(user_id, content_hash)
         )
     """)
@@ -220,7 +220,7 @@ async def init_db():
             ticker          TEXT NOT NULL,
             subscriber_count INTEGER NOT NULL DEFAULT 0,
             created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (content_hash) REFERENCES news_buffer(content_hash),
+            FOREIGN KEY (content_hash) REFERENCES news_buffer(content_hash) ON DELETE CASCADE,
             UNIQUE(content_hash, ticker)
         )
     """)
@@ -230,6 +230,15 @@ async def init_db():
     await _db.execute(
         "CREATE INDEX IF NOT EXISTS idx_ntp_hash_ticker ON news_ticker_popularity(content_hash, ticker)"
     )
+
+    # ── AI result cache (relevance/sentiment verification) ──
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS ai_cache (
+            cache_key   TEXT PRIMARY KEY,
+            result      TEXT NOT NULL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
     cols = {row[1] for row in await (await _db.execute("PRAGMA table_info(users)")).fetchall()}
     if "access_until" not in cols:
@@ -568,12 +577,25 @@ async def update_channel_topics(channel_id: int, topics: list[str]):
 async def delete_channel(channel_id: int):
     db = await _get_db()
     await db.execute("DELETE FROM user_channels WHERE id = ?", (channel_id,))
+    await db.execute("DELETE FROM channel_news WHERE channel_id = ?", (channel_id,))
+    await db.execute("DELETE FROM pinned_news WHERE channel_id = ?", (channel_id,))
     await db.commit()
 
 
 async def delete_user_channels(user_id: int):
     db = await _get_db()
+    channel_ids = [row["id"] for row in await (await db.execute(
+        "SELECT id FROM user_channels WHERE user_id = ?", (user_id,)
+    )).fetchall()]
     await db.execute("DELETE FROM user_channels WHERE user_id = ?", (user_id,))
+    if channel_ids:
+        placeholders = ",".join("?" for _ in channel_ids)
+        await db.execute(
+            f"DELETE FROM channel_news WHERE channel_id IN ({placeholders})", channel_ids
+        )
+        await db.execute(
+            f"DELETE FROM pinned_news WHERE channel_id IN ({placeholders})", channel_ids
+        )
     await db.commit()
 
 
@@ -986,6 +1008,10 @@ async def dynamic_cleanup_news_buffer() -> int:
         DELETE FROM news_ticker_popularity
         WHERE content_hash NOT IN (SELECT content_hash FROM news_buffer)
     """)
+    cursor4 = await db.execute("""
+        DELETE FROM news
+        WHERE content_hash NOT IN (SELECT content_hash FROM news_buffer)
+    """)
     await db.commit()
     return deleted_buffer
 
@@ -1185,6 +1211,37 @@ async def cleanup_old_scan_metrics(max_age_days: int = 30) -> int:
     db = await _get_db()
     cursor = await db.execute(
         "DELETE FROM scan_metrics WHERE scan_time < datetime('now', ?)",
+        (f"-{max_age_days} days",),
+    )
+    await db.commit()
+    return cursor.rowcount
+
+
+# ── AI result cache ──
+
+async def get_ai_cache(cache_key: str) -> str | None:
+    db = await _get_db()
+    async with db.execute(
+        "SELECT result FROM ai_cache WHERE cache_key = ?", (cache_key,)
+    ) as cur:
+        row = await cur.fetchone()
+        return row["result"] if row else None
+
+
+async def set_ai_cache(cache_key: str, result: str):
+    db = await _get_db()
+    await db.execute("""
+        INSERT INTO ai_cache (cache_key, result) VALUES (?, ?)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            result = excluded.result, created_at = CURRENT_TIMESTAMP
+    """, (cache_key, result))
+    await db.commit()
+
+
+async def cleanup_old_ai_cache(max_age_days: int = 7) -> int:
+    db = await _get_db()
+    cursor = await db.execute(
+        "DELETE FROM ai_cache WHERE created_at < datetime('now', ?)",
         (f"-{max_age_days} days",),
     )
     await db.commit()

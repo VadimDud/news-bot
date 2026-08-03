@@ -38,6 +38,9 @@ DEFAULT_AGENT: str = os.getenv("DEFAULT_AGENT", "deepseek")
 # Max time in seconds for a user-triggered scan before timing out
 SCAN_TIMEOUT: int = int(os.getenv("SCAN_TIMEOUT", "120"))
 
+# Max number of AI calls per scan (relevance/sentiment verification)
+MAX_AI_CALLS_PER_SCAN: int = int(os.getenv("MAX_AI_CALLS_PER_SCAN", "8"))
+
 # Auto-scan news interval (in seconds, default 1800 = 30 minutes)
 AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "1800"))
 

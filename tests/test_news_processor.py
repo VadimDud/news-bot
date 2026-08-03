@@ -366,3 +366,40 @@ class TestGlobalScanRelevanceVerification:
         with patch.object(np, "analyze", new=AsyncMock(return_value=None)):
             results, _ = await np.global_scan(news, channels)
         assert any(len(v) > 0 for v in results.values())
+
+
+class TestAICacheInGlobalScan:
+    """AI results must be cached by content_hash so repeat scans avoid LLM calls."""
+
+    async def _make_channel(self):
+        await db.set_user(100, "test", "Test User", "ru")
+        await db.grant_access(100, 30)
+        await db.create_channel(100, "Золото", ["золото"], ticker="ЗОЛОТО")
+        return await db.get_all_user_channels()
+
+    async def test_second_scan_uses_cache(self):
+        from bot import news_processor as np
+        channels = await self._make_channel()
+        news = [{
+            "title": "Золото опустилось ниже $4 тыс. за унцию",
+            "summary": "Стоимость фьючерса на золото снизилась",
+            "source": "Коммерсантъ",
+            "link": "http://example.com",
+        }]
+
+        async def fake_analyze(system_prompt, user_message, **kwargs):
+            if "финансовый аналитик" in system_prompt:
+                return "NEUTRAL"
+            return "да"
+
+        with patch.object(np, "analyze", new=AsyncMock(side_effect=fake_analyze)) as mock_analyze:
+            results, _ = await np.global_scan(news, channels)
+            first_calls = mock_analyze.await_count
+        assert first_calls >= 1
+        assert any(len(v) > 0 for v in results.values())
+
+        with patch.object(np, "analyze", new=AsyncMock(side_effect=fake_analyze)) as mock_analyze:
+            results, _ = await np.global_scan(news, channels)
+            second_calls = mock_analyze.await_count
+        assert second_calls == 0
+        assert any(len(v) > 0 for v in results.values())

@@ -17,13 +17,13 @@ import struct
 from . import config
 from .ai_client import analyze
 from .database import (get_all_tracked_assets, get_all_ticker_subscriber_counts,
-                       get_max_ticker_subscriber_count)
+                       get_max_ticker_subscriber_count, get_ai_cache, set_ai_cache)
 from .topics import count_topics, effective_topics, topic_filter_pass
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of AI calls per scan to prevent blocking
-MAX_AI_CALLS_PER_SCAN = 5
+# Maximum number of AI calls per scan to prevent blocking (configurable via env)
+MAX_AI_CALLS_PER_SCAN = config.MAX_AI_CALLS_PER_SCAN
 
 # Keywords that are ambiguous outside their domain and should be verified by
 # the LLM before delivery (e.g. "золото" → gold medal, «Золотой глобус»,
@@ -100,6 +100,14 @@ def _parse_published(value) -> datetime.datetime | None:
         return datetime.datetime.fromisoformat(str(value))
     except ValueError:
         return None
+
+
+def _relevance_cache_key(content_hash: str, keyword: str) -> str:
+    return f"rel:{content_hash}:{_normalize(keyword)}"
+
+
+def _sentiment_cache_key(content_hash: str, ticker: str | None) -> str:
+    return f"sent:{content_hash}:{ticker or 'none'}"
 
 
 # Russian morphological endings, longest first so longer endings win over
@@ -233,10 +241,20 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
                         positive_triggers: list[str] | None = None,
                         negative_triggers: list[str] | None = None,
                         trigger_confidence: str = "low",
-                        ai_timeout: int = 10) -> str | None:
+                        ai_timeout: int = 10,
+                        content_hash: str | None = None) -> str | None:
     combined = _normalize(title + " " + summary)
     pos_triggers = positive_triggers or (asset.get("positive_triggers", []) if asset else [])
     neg_triggers = negative_triggers or (asset.get("negative_triggers", []) if asset else [])
+
+    cache_key = (
+        _sentiment_cache_key(content_hash, asset.get("ticker") if asset else None)
+        if content_hash else None
+    )
+    if cache_key:
+        cached = await get_ai_cache(cache_key)
+        if cached in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
+            return cached
 
     pos_count = sum(1 for t in pos_triggers if _normalize(t) in combined)
     neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined)
@@ -263,17 +281,28 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
     if result:
         text = result.strip().upper()
         if text in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
+            if cache_key:
+                await set_ai_cache(cache_key, text)
             return text
     return None
 
 
 async def _verify_relevance(title: str, summary: str, keyword: str,
-                            ai_timeout: int = 8) -> bool | None:
+                            ai_timeout: int = 8,
+                            content_hash: str | None = None) -> bool | None:
     """Ask the LLM whether the news is really about `keyword`.
 
     Returns True/False, or None when the AI is unavailable or gave an
     unparseable answer (in which case the match is kept).
     """
+    cache_key = _relevance_cache_key(content_hash, keyword) if content_hash else None
+    if cache_key:
+        cached = await get_ai_cache(cache_key)
+        if cached == "yes":
+            return True
+        if cached == "no":
+            return False
+
     system_prompt = (
         "Ты — новостной редактор. Определи, действительно ли новость посвящена "
         "указанной теме. Отвечай ТОЛЬКО одним словом: да или нет."
@@ -289,8 +318,12 @@ async def _verify_relevance(title: str, summary: str, keyword: str,
     if result:
         text = result.strip().lower()
         if text.startswith("да"):
+            if cache_key:
+                await set_ai_cache(cache_key, "yes")
             return True
         if text.startswith("нет"):
+            if cache_key:
+                await set_ai_cache(cache_key, "no")
             return False
     return None
 
@@ -382,7 +415,7 @@ async def global_scan(
             verdicts: dict[str, bool | None] = {}
             for m in matches:
                 kw = m["matched_keyword"]
-                if kw in verdicts or ai_calls_count >= MAX_AI_CALLS_PER_SCAN:
+                if kw in verdicts:
                     continue
                 needs_check = (
                     _normalize(kw) in AMBIGUOUS_KEYWORDS
@@ -390,7 +423,15 @@ async def global_scan(
                 )
                 if not needs_check:
                     continue
-                verdict = await _verify_relevance(title, summary, kw)
+                cache_key = _relevance_cache_key(content_hash, kw)
+                cached = await get_ai_cache(cache_key)
+                if cached is not None:
+                    verdicts[kw] = (cached == "yes")
+                    continue
+                if ai_calls_count >= MAX_AI_CALLS_PER_SCAN:
+                    continue
+                verdict = await _verify_relevance(title, summary, kw,
+                                                  content_hash=content_hash)
                 ai_calls_count += 1
                 verdicts[kw] = verdict
             if any(v is False for v in verdicts.values()):
@@ -421,13 +462,21 @@ async def global_scan(
         neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined) if neg_triggers else 0
 
         sentiment, confidence = compute_sentiment(title, summary, asset, pos_triggers, neg_triggers)
-        if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL") and ai_calls_count < MAX_AI_CALLS_PER_SCAN:
-            ai_sentiment = await stage2_hybrid(
-                title, summary, asset, pos_triggers, neg_triggers, confidence
+        if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL"):
+            sent_cache_key = _sentiment_cache_key(
+                content_hash, asset.get("ticker") if asset else None
             )
-            if ai_sentiment:
-                sentiment = ai_sentiment
-            ai_calls_count += 1
+            cached_sent = await get_ai_cache(sent_cache_key)
+            if cached_sent is not None and cached_sent in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
+                sentiment = cached_sent
+            elif ai_calls_count < MAX_AI_CALLS_PER_SCAN:
+                ai_sentiment = await stage2_hybrid(
+                    title, summary, asset, pos_triggers, neg_triggers, confidence,
+                    content_hash=content_hash,
+                )
+                if ai_sentiment:
+                    sentiment = ai_sentiment
+                ai_calls_count += 1
 
         impact = sentiment
         match_count = len(matches)

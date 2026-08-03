@@ -24,8 +24,9 @@ from bot.database import (
     cleanup_old_delivery_logs, cleanup_old_channel_news,
     save_scan_metrics, log_news_delivery,
     save_news_batch, save_channel_news_batch, log_news_delivery_batch,
+    cleanup_old_scan_metrics,
     get_all_tracked_assets,
-    upsert_news_buffer, upsert_user_news_priority,
+    upsert_news_buffer, upsert_user_news_priority_batch,
     upsert_news_ticker_popularity, dynamic_cleanup_news_buffer,
     refresh_ticker_popularity,
 )
@@ -71,6 +72,10 @@ async def cleanup_job(bot: Bot):
         removed_channel_news = await cleanup_old_channel_news(max_age_hours=24)
         if removed_channel_news:
             logger.info(f"Cleaned {removed_channel_news} old channel_news entries")
+
+        removed_metrics = await cleanup_old_scan_metrics(max_age_days=30)
+        if removed_metrics:
+            logger.info(f"Cleaned {removed_metrics} old scan_metrics entries")
     except Exception as e:
         logger.warning(f"Cleanup error: {e}")
 
@@ -207,6 +212,7 @@ async def auto_scan_job(bot: Bot):
             cn_items = []
             n_items = []
             dl_items = []
+            unp_items = []
             for item in new_items:
                 cn_items.append({
                     "channel_id": channel_id,
@@ -232,16 +238,16 @@ async def auto_scan_job(bot: Bot):
                     "source": item["source"],
                     "impact": item["impact"],
                 })
-                await upsert_user_news_priority(
-                    user_id=uid,
-                    content_hash=item["content_hash"],
-                    ticker=item.get("ticker_hint", ""),
-                    importance_score=item.get("importance_score", 0.5),
-                )
-                await refresh_ticker_popularity(item.get("ticker_hint", "").upper())
+                unp_items.append({
+                    "user_id": uid,
+                    "content_hash": item["content_hash"],
+                    "ticker": item.get("ticker_hint", ""),
+                    "importance_score": item.get("importance_score", 0.5),
+                })
             await save_channel_news_batch(cn_items)
             await save_news_batch(n_items)
             await log_news_delivery_batch(dl_items)
+            await upsert_user_news_priority_batch(unp_items)
 
             if not await _rate_limiter.can_send(uid):
                 wait = await _rate_limiter.get_wait_time(uid)

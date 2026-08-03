@@ -149,7 +149,13 @@ async def init_db():
         "CREATE INDEX IF NOT EXISTS idx_channel_news_channel ON channel_news(channel_id)"
     )
     await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_channel_news_sent ON channel_news(sent_at)"
+    )
+    await _db.execute(
         "CREATE INDEX IF NOT EXISTS idx_news_delivery_user ON news_delivery_log(user_id)"
+    )
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_news_delivery_sent ON news_delivery_log(sent_at)"
     )
     await _db.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_deletions_delete_at ON pending_deletions(delete_at)"
@@ -812,22 +818,29 @@ async def upsert_news_buffer(content_hash: str, source: str, title: str, url: st
 async def upsert_user_news_priority(user_id: int, content_hash: str, ticker: str | None,
                                      importance_score: float):
     db = await _get_db()
-    existing = await (await db.execute(
-        "SELECT importance_score FROM user_news_priority WHERE user_id = ? AND content_hash = ?",
-        (user_id, content_hash),
-    )).fetchone()
-    if existing:
-        if importance_score > existing["importance_score"]:
-            await db.execute("""
-                UPDATE user_news_priority
-                SET importance_score = ?, sent_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND content_hash = ?
-            """, (importance_score, user_id, content_hash))
-    else:
+    await db.execute("""
+        INSERT INTO user_news_priority (user_id, content_hash, ticker, importance_score)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, content_hash) DO UPDATE SET
+            importance_score = MAX(importance_score, excluded.importance_score),
+            sent_at = CASE WHEN excluded.importance_score > importance_score
+                           THEN CURRENT_TIMESTAMP ELSE sent_at END
+    """, (user_id, content_hash, ticker, importance_score))
+    await db.commit()
+
+
+async def upsert_user_news_priority_batch(items: list[dict]):
+    db = await _get_db()
+    for item in items:
         await db.execute("""
             INSERT INTO user_news_priority (user_id, content_hash, ticker, importance_score)
             VALUES (?, ?, ?, ?)
-        """, (user_id, content_hash, ticker, importance_score))
+            ON CONFLICT(user_id, content_hash) DO UPDATE SET
+                importance_score = MAX(importance_score, excluded.importance_score),
+                sent_at = CASE WHEN excluded.importance_score > importance_score
+                               THEN CURRENT_TIMESTAMP ELSE sent_at END
+        """, (item["user_id"], item["content_hash"], item.get("ticker"),
+              item["importance_score"]))
     await db.commit()
 
 
@@ -996,6 +1009,23 @@ async def get_subscriber_count_for_ticker(ticker: str) -> int:
     return (sub[0] if sub else 0) + (uc[0] if uc else 0)
 
 
+async def get_all_ticker_subscriber_counts() -> dict[str, int]:
+    db = await _get_db()
+    counts: dict[str, int] = {}
+    async with db.execute(
+        "SELECT ticker, COUNT(DISTINCT user_id) as cnt FROM finance_subscriptions GROUP BY ticker"
+    ) as cur:
+        for row in await cur.fetchall():
+            counts[row["ticker"].upper()] = row["cnt"]
+    async with db.execute(
+        "SELECT ticker, COUNT(DISTINCT user_id) as cnt FROM user_channels WHERE ticker IS NOT NULL GROUP BY ticker"
+    ) as cur:
+        for row in await cur.fetchall():
+            t = row["ticker"].upper()
+            counts[t] = counts.get(t, 0) + row["cnt"]
+    return counts
+
+
 async def cleanup_old_news(max_age_hours: int = 24) -> int:
     db = await _get_db()
     cursor = await db.execute(
@@ -1149,6 +1179,16 @@ async def get_recent_metrics(limit: int = 10) -> list[dict]:
         "SELECT * FROM scan_metrics ORDER BY scan_time DESC LIMIT ?", (limit,)
     ) as cur:
         return [dict(row) for row in await cur.fetchall()]
+
+
+async def cleanup_old_scan_metrics(max_age_days: int = 30) -> int:
+    db = await _get_db()
+    cursor = await db.execute(
+        "DELETE FROM scan_metrics WHERE scan_time < datetime('now', ?)",
+        (f"-{max_age_days} days",),
+    )
+    await db.commit()
+    return cursor.rowcount
 
 
 async def log_news_delivery(user_id: int, ticker: str, title: str, source: str, impact: str):

@@ -16,8 +16,8 @@ import struct
 
 from . import config
 from .ai_client import analyze
-from .database import (get_tracked_asset, get_max_ticker_subscriber_count,
-                       get_subscriber_count_for_ticker)
+from .database import (get_all_tracked_assets, get_all_ticker_subscriber_counts,
+                       get_max_ticker_subscriber_count)
 from .topics import count_topics, effective_topics, topic_filter_pass
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,18 @@ def _normalize(text: str) -> str:
     return text.lower().strip()
 
 
+def _parse_published(value) -> datetime.datetime | None:
+    """Parse a published timestamp (ISO string) into a naive datetime, or None."""
+    if not value:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+    try:
+        return datetime.datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
 # Russian morphological endings, longest first so longer endings win over
 # their single-letter suffixes (e.g. "ого" over "о").
 _STEM_ENDINGS = (
@@ -113,7 +125,7 @@ def _simple_stem(word: str) -> str:
 _WORD_RE = re.compile(r"[а-яёa-z0-9-]+")
 
 
-def _kw_in_text(combined: str, kw: str) -> bool:
+def _kw_in_text(combined: str, kw: str, words: list[str] | None = None) -> bool:
     """Whole-word keyword matching.
 
     Multi-word phrases match as substrings of the lowercased text; single
@@ -129,7 +141,9 @@ def _kw_in_text(combined: str, kw: str) -> bool:
     root = _simple_stem(kw)
     if len(root) < 2:
         return False
-    return any(w.startswith(root) for w in _WORD_RE.findall(combined))
+    if words is None:
+        words = _WORD_RE.findall(combined)
+    return any(w.startswith(root) for w in words)
 
 
 # ── Stage 1: keyword matching against user channels ──
@@ -144,13 +158,14 @@ def match_news_to_channels(
     Returns list of matches: [{channel_id, user_id, language, ticker, matched_keyword}]
     """
     combined = _normalize(title + " " + summary)
+    words = _WORD_RE.findall(combined)
     topic_counts = count_topics(combined)
     matches = []
 
     for ch in all_channels:
         keywords = ch.get("keywords", [])
         for kw in keywords:
-            if not _kw_in_text(combined, kw):
+            if not _kw_in_text(combined, kw, words):
                 continue
             if not topic_filter_pass(topic_counts, effective_topics(ch)):
                 continue
@@ -172,12 +187,13 @@ def stage1_filter(title: str, summary: str, tracked_assets: list[dict]) -> tuple
     Returns (is_relevant, matched_ticker_or_None, matched_asset_or_None).
     """
     combined = _normalize(title + " " + summary)
+    words = _WORD_RE.findall(combined)
 
     for asset in tracked_assets:
         keywords = asset.get("keywords", [])
         ticker = asset["ticker"]
         for kw in keywords:
-            if _kw_in_text(combined, kw):
+            if _kw_in_text(combined, kw, words):
                 return True, ticker, asset
 
     return False, None, None
@@ -341,17 +357,20 @@ async def global_scan(
     Each matched item: {title, source, link, summary, impact, matched_keyword, ticker_hint}
     """
     if not all_channels:
-        return {}
+        return {}, []
 
     results: dict[int, list[dict]] = {}
     ai_calls_count = 0
     max_sub_count = await get_max_ticker_subscriber_count()
+    ticker_counts = await get_all_ticker_subscriber_counts()
+    tracked_by_ticker = {a["ticker"].upper(): a for a in await get_all_tracked_assets()}
     buffer_updates: list[dict] = []
 
     for item in news_items[:20]:
         title = item["title"]
         summary = item.get("summary", "")
         content_hash = compute_hash(title)
+        created_at = _parse_published(item.get("published_at") or item.get("published"))
 
         matches = match_news_to_channels(title, summary, all_channels)
         if not matches:
@@ -391,7 +410,7 @@ async def global_scan(
         neg_triggers = []
         asset = None
         if first_channel and first_channel.get("ticker"):
-            asset = await get_tracked_asset(first_channel["ticker"])
+            asset = tracked_by_ticker.get(first_channel["ticker"].upper())
             if asset:
                 pos_triggers = asset.get("positive_triggers", [])
                 neg_triggers = asset.get("negative_triggers", [])
@@ -424,7 +443,7 @@ async def global_scan(
         max_sub_for_item = 0
         primary_ticker = ""
         for ticker in matched_tickers:
-            sc = await get_subscriber_count_for_ticker(ticker)
+            sc = ticker_counts.get(ticker, 0)
             if sc > max_sub_for_item:
                 max_sub_for_item = sc
                 primary_ticker = ticker
@@ -439,6 +458,7 @@ async def global_scan(
             match_count=match_count,
             subscriber_count=max_sub_for_item,
             max_subscriber_count=max_sub_count,
+            created_at=created_at,
         )
 
         buffer_updates.append({
@@ -451,7 +471,7 @@ async def global_scan(
             "match_count": match_count,
             "is_used": 1 if match_count > 0 else 0,
             "ticker_hints": list(matched_tickers),
-            "subscriber_counts": {t: await get_subscriber_count_for_ticker(t) for t in matched_tickers},
+            "subscriber_counts": {t: ticker_counts.get(t, 0) for t in matched_tickers},
         })
 
         for match in matches:

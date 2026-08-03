@@ -21,7 +21,7 @@ from ..finance import fetch_finance_news
 from ..news_processor import (
     stage1_filter, compute_sentiment, stage2_hybrid,
     format_news_batch, compute_hash, compute_importance_score,
-    _normalize, MAX_AI_CALLS_PER_SCAN,
+    _normalize, _parse_published, MAX_AI_CALLS_PER_SCAN,
 )
 
 router = Router()
@@ -281,6 +281,7 @@ async def _scan_and_show_news(target, user_id: int, user_lang: str):
             match_count=1,
             subscriber_count=sub_count,
             max_subscriber_count=max_sub_count,
+            created_at=_parse_published(item.get("published_at") or item.get("published")),
         )
 
         await db.save_news(

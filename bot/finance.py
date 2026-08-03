@@ -4,6 +4,8 @@ import asyncio
 import html
 import logging
 import re
+import time
+from collections.abc import Mapping
 import httpx
 import feedparser
 from datetime import datetime
@@ -13,6 +15,11 @@ from .retry_utils import async_retry
 from .sources import get_sources_by_tags
 
 logger = logging.getLogger(__name__)
+
+# Conditional HTTP cache per feed URL: {url: (etag, last_modified, entries, ts)}
+# Reused across the 5-min tag cache and different tag combos to avoid
+# re-downloading unchanged feeds (If-None-Match / If-Modified-Since → 304).
+_http_cache: dict[str, tuple[str | None, str | None, list[dict], float]] = {}
 
 # Legacy RSS feeds (kept for backward compat)
 FINANCE_FEEDS = [
@@ -27,8 +34,12 @@ FINANCE_FEEDS = [
 
 @async_retry(max_retries=2, base_delay=2.0)
 async def fetch_finance_news() -> list[dict]:
-    """Fetch latest news from Russian sources (no pre-filter — stage1_filter handles relevance)."""
-    return await _fetch_sources(FINANCE_FEEDS)
+    """Fetch latest news from Russian sources (no pre-filter — stage1_filter handles relevance).
+
+    Wraps fetch_news(["finance"]) — the finance category catalog is the same set
+    of feeds as the legacy FINANCE_FEEDS constant.
+    """
+    return await fetch_news(source_tags=["finance"])
 
 
 async def _fetch_sources(feeds: list[dict]) -> list[dict]:
@@ -47,13 +58,27 @@ async def _fetch_sources(feeds: list[dict]) -> list[dict]:
 
 
 async def _fetch_one(client: httpx.AsyncClient, feed_info: dict) -> list[dict]:
+    url = feed_info["url"]
+    headers = {}
+    cached = _http_cache.get(url)
+    if cached:
+        etag, last_modified, _, _ts = cached
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
     try:
-        resp = await client.get(feed_info["url"], follow_redirects=True)
+        resp = await client.get(url, follow_redirects=True, headers=headers)
+        if resp.status_code == 304:
+            if cached:
+                logger.debug(f"Feed {feed_info['name']}: 304 Not Modified, using cached entries")
+                return cached[2]
+            return []
         if resp.status_code != 200:
             return []
         if feed_info["type"] == "rss":
             feed = await asyncio.to_thread(feedparser.parse, resp.text)
-            return [
+            entries = [
                 {
                     "title": e.get("title", ""),
                     "summary": _clean_html(e.get("summary", ""))[:300],
@@ -68,7 +93,7 @@ async def _fetch_one(client: httpx.AsyncClient, feed_info: dict) -> list[dict]:
         elif feed_info["type"] == "json":
             data = resp.json()
             items = data.get("items", data.get("news", []))
-            return [
+            entries = [
                 {
                     "title": it.get("title", ""),
                     "summary": _clean_html(it.get("desc", it.get("description", "")))[:300],
@@ -80,9 +105,25 @@ async def _fetch_one(client: httpx.AsyncClient, feed_info: dict) -> list[dict]:
                 }
                 for it in items[:30]
             ]
+        else:
+            entries = []
+        new_etag = None
+        new_lm = None
+        if isinstance(resp.headers, Mapping):
+            new_etag = _header_str(resp.headers.get("ETag"))
+            new_lm = _header_str(resp.headers.get("Last-Modified"))
+        _http_cache[url] = (new_etag, new_lm, entries, time.time())
+        return entries
     except Exception as e:
         logger.warning(f"Failed to fetch {feed_info['name']}: {e}")
+        if cached:
+            return cached[2]
     return []
+
+
+def _header_str(value) -> str | None:
+    """Return a non-empty header string, or None (also guards mock/None values)."""
+    return value if isinstance(value, str) and value else None
 
 
 def _entry_published_at(entry) -> str:
@@ -126,7 +167,6 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
     Returns:
         Deduplicated list of news dicts.
     """
-    import time
     cache_key = frozenset(source_tags or [])
     now = time.time()
 

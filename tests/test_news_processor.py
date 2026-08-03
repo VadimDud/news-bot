@@ -4,7 +4,7 @@ from bot.news_processor import (
     match_news_to_channels, stage1_filter, compute_sentiment,
     compute_hash, compute_minhash, is_similar,
     format_channel_news, format_news_batch, format_news_alert,
-    split_news_text, _normalize, _simple_stem,
+    split_news_text, _normalize, _simple_stem, refine_sentiment,
 )
 from bot import database as db
 
@@ -84,6 +84,73 @@ class TestMatchNewsToChannels:
         assert len(match_news_to_channels("Золотые резервы растут", "", channels)) == 1
         assert len(match_news_to_channels("Цена золотом исчисляется", "", channels)) == 1
         assert len(match_news_to_channels("Золотая монета", "", channels)) == 1
+
+    def test_phrase_keyword_matches(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": None,
+             "keywords": ["ключевая ставка"]},
+        ]
+        matches = match_news_to_channels("Ключевая ставка осталась на уровне 21%", "", channels)
+        assert len(matches) == 1
+        assert matches[0]["matched_keyword"] == "ключевая ставка"
+
+    def test_first_matching_keyword_reported(self):
+        channels = [
+            {"id": 1, "user_id": 100, "language": "ru", "ticker": None,
+             "keywords": ["погода", "сбербанк"]},
+        ]
+        matches = match_news_to_channels("Сбербанк улучшил сервис", "", channels)
+        assert len(matches) == 1
+        assert matches[0]["matched_keyword"] == "сбербанк"
+
+    def test_many_channels_one_match(self):
+        channels = [
+            {"id": i, "user_id": 1000 + i, "language": "ru", "ticker": None,
+             "keywords": [f"kw{i}"]}
+            for i in range(50)
+        ]
+        channels.append({"id": 99, "user_id": 1099, "language": "ru", "ticker": None,
+                         "keywords": ["сбербанк"]})
+        matches = match_news_to_channels("Сбербанк снизил ставку", "", channels)
+        assert len(matches) == 1
+        assert matches[0]["channel_id"] == 99
+
+
+class TestRefineSentiment:
+    async def test_high_confidence_skips_ai(self):
+        impact, used = await refine_sentiment(
+            "h1", "title", "summary", None, "POSITIVE", "high", 0)
+        assert impact == "POSITIVE"
+        assert used == 0
+
+    async def test_cache_hit_returns_cached(self):
+        await db.set_ai_cache("sent:h1:none", "NEGATIVE")
+        impact, used = await refine_sentiment(
+            "h1", "title", "summary", None, "POSITIVE", "low", 0)
+        assert impact == "NEGATIVE"
+        assert used == 0
+
+    async def test_budget_exhausted_no_ai(self):
+        impact, used = await refine_sentiment(
+            "h1", "title", "summary", None, "POSITIVE", "low", 999)
+        assert impact == "POSITIVE"
+        assert used == 0
+
+    async def test_ai_refines_sentiment(self):
+        with patch("bot.news_processor.stage2_hybrid",
+                   new_callable=AsyncMock, return_value="NEGATIVE"):
+            impact, used = await refine_sentiment(
+                "h1", "title", "summary", None, "POSITIVE", "low", 0)
+        assert impact == "NEGATIVE"
+        assert used == 1
+
+    async def test_ai_none_keeps_impact(self):
+        with patch("bot.news_processor.stage2_hybrid",
+                   new_callable=AsyncMock, return_value=None):
+            impact, used = await refine_sentiment(
+                "h1", "title", "summary", None, "POSITIVE", "low", 0)
+        assert impact == "POSITIVE"
+        assert used == 1
 
 
 class TestTopicFilter:

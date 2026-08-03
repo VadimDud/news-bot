@@ -164,18 +164,49 @@ def match_news_to_channels(
     """Check a single news item against all user channels.
 
     Returns list of matches: [{channel_id, user_id, language, ticker, matched_keyword}]
+
+    Builds an inverted index keyword root → channels once, so channels whose
+    keywords don't appear in the text are never iterated in the per-keyword match.
     """
     combined = _normalize(title + " " + summary)
     words = _WORD_RE.findall(combined)
     topic_counts = count_topics(combined)
-    matches = []
 
+    # ── Inverted index: keyword root → channels ──
+    # Multi-word keywords match as a substring of the combined text; single
+    # words match the START of a text word after light stemming.
+    phrase_index: dict[str, list[dict]] = {}
+    root_index: dict[str, list[dict]] = {}
     for ch in all_channels:
-        keywords = ch.get("keywords", [])
-        for kw in keywords:
+        if not topic_filter_pass(topic_counts, effective_topics(ch)):
+            continue
+        for kw in ch.get("keywords", []):
+            nk = _normalize(kw)
+            if " " in nk:
+                phrase_index.setdefault(nk, []).append(ch)
+            else:
+                root = _simple_stem(nk)
+                if len(root) >= 2:
+                    root_index.setdefault(root, []).append(ch)
+
+    matched_channels: set[int] = set()
+    for phrase, chs in phrase_index.items():
+        if phrase in combined:
+            matched_channels.update(id(c) for c in chs)
+    for w in words:
+        for root, chs in root_index.items():
+            if w.startswith(root):
+                matched_channels.update(id(c) for c in chs)
+
+    if not matched_channels:
+        return []
+
+    matches = []
+    for ch in all_channels:
+        if id(ch) not in matched_channels:
+            continue
+        for kw in ch.get("keywords", []):
             if not _kw_in_text(combined, kw, words):
-                continue
-            if not topic_filter_pass(topic_counts, effective_topics(ch)):
                 continue
             matches.append({
                 "channel_id": ch["id"],
@@ -285,6 +316,45 @@ async def stage2_hybrid(title: str, summary: str, asset: dict | None = None,
                 await set_ai_cache(cache_key, text)
             return text
     return None
+
+
+async def refine_sentiment(
+    content_hash: str,
+    title: str,
+    summary: str,
+    asset: dict | None,
+    impact: str,
+    confidence: str,
+    ai_calls_count: int,
+    positive_triggers: list[str] | None = None,
+    negative_triggers: list[str] | None = None,
+) -> tuple[str, int]:
+    """Refine rule-based sentiment via AI cache or LLM when confidence is low.
+
+    Shared by global_scan and the legacy manual scans. Applies the per-scan AI
+    budget: cache hits and low-confidence-but-high-signal results don't cost a
+    call. Returns (impact, ai_calls_used).
+    """
+    if confidence != "low" and impact != "NEUTRAL":
+        return impact, 0
+
+    sent_cache_key = _sentiment_cache_key(
+        content_hash, asset.get("ticker") if asset else None
+    )
+    cached = await get_ai_cache(sent_cache_key)
+    if cached is not None and cached in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
+        return cached, 0
+
+    if ai_calls_count >= MAX_AI_CALLS_PER_SCAN:
+        return impact, 0
+
+    ai_impact = await stage2_hybrid(
+        title, summary, asset, positive_triggers, negative_triggers, confidence,
+        content_hash=content_hash,
+    )
+    if ai_impact:
+        impact = ai_impact
+    return impact, 1
 
 
 async def _verify_relevance(title: str, summary: str, keyword: str,
@@ -462,21 +532,12 @@ async def global_scan(
         neg_count = sum(1 for t in neg_triggers if _normalize(t) in combined) if neg_triggers else 0
 
         sentiment, confidence = compute_sentiment(title, summary, asset, pos_triggers, neg_triggers)
-        if not skip_ai and (confidence == "low" or sentiment == "NEUTRAL"):
-            sent_cache_key = _sentiment_cache_key(
-                content_hash, asset.get("ticker") if asset else None
+        if not skip_ai:
+            sentiment, used = await refine_sentiment(
+                content_hash, title, summary, asset, sentiment, confidence,
+                ai_calls_count, pos_triggers, neg_triggers,
             )
-            cached_sent = await get_ai_cache(sent_cache_key)
-            if cached_sent is not None and cached_sent in ("POSITIVE", "NEGATIVE", "NEUTRAL"):
-                sentiment = cached_sent
-            elif ai_calls_count < MAX_AI_CALLS_PER_SCAN:
-                ai_sentiment = await stage2_hybrid(
-                    title, summary, asset, pos_triggers, neg_triggers, confidence,
-                    content_hash=content_hash,
-                )
-                if ai_sentiment:
-                    sentiment = ai_sentiment
-                ai_calls_count += 1
+            ai_calls_count += used
 
         impact = sentiment
         match_count = len(matches)

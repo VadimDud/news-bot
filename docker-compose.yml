@@ -9,6 +9,7 @@ services:
     volumes:
       - ./dbdata:/app/dbdata
       - /home/vadman1/.config/opencode:/home/botuser/.config/opencode:ro
+      - ./config/opencode/agent:/home/botuser/.config/opencode/agent:ro
       - ./dbdata/opencode_sessions:/home/botuser/.local/share/opencode
     logging:
       driver: json-file

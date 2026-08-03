@@ -29,7 +29,7 @@ def _is_admin(user_id: int) -> bool:
 
 async def _run_opencode(prompt: str, session_id: str | None) -> tuple[str, str | None]:
     """Run opencode non-interactively; return (reply_text, session_id)."""
-    cmd = ["opencode", "run", "--format", "json", "--title", "tg-admin"]
+    cmd = ["opencode", "run", "--format", "json", "--title", "tg-admin", "--agent", "chat"]
     if session_id:
         cmd += ["-s", session_id]
     cmd.append(prompt)

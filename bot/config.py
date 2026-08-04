@@ -64,6 +64,9 @@ NEWS_AGG_USE_OPR: bool = os.getenv("NEWS_AGG_USE_OPR", "true").lower() in ("1", 
 NEWS_AGG_SENTIMENT_THRESHOLD: float = float(os.getenv("NEWS_AGG_SENTIMENT_THRESHOLD", "0.5"))
 # Default language for category-driven aggregator queries
 NEWS_LANGUAGE: str = os.getenv("NEWS_LANGUAGE", "ru")
+# APITube filter language. APITube does not index Russian-language content and
+# rejects `language.code=ru` (ER0237), so aggregator queries run in English.
+APITUBE_LANGUAGE: str = os.getenv("APITUBE_LANGUAGE", "en")
 # IPTC Media Topics category codes (verify via /v1/suggest/categories)
 APITUBE_CATEGORY_FINANCE: str = os.getenv("APITUBE_CATEGORY_FINANCE", "medtop:04000000")
 APITUBE_CATEGORY_POLITICS: str = os.getenv("APITUBE_CATEGORY_POLITICS", "medtop:11000000")

@@ -133,13 +133,28 @@ class TestFetchAggregated:
         assert "language.code" in params
 
     @pytest.mark.asyncio
-    async def test_macro_tag_inference(self, monkeypatch, apitube_article):
+    async def test_finance_group_maps_to_global_finance(self, monkeypatch, apitube_article):
         monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
         monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
         with patch.object(agg_mod, "_apitube_request",
                           new=AsyncMock(return_value=[apitube_article])):
             news = await agg.fetch_aggregated(["finance", "macro"])
-        assert news[0]["source_tag"] == "macro"
+        # APITube has no Russian-language content: finance-group queries
+        # (including the finance/macro tags) produce global_finance items.
+        assert news[0]["source_tag"] == "global_finance"
+
+    @pytest.mark.asyncio
+    async def test_trusts_requested_category(self, monkeypatch):
+        monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
+        monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
+        # Article carries only its specific subcategory code (not the parent
+        # group code from the query) — it is still tagged by the request.
+        article = _article(
+            "https://api.apitube.io/v1/news/category/iptc_mediatopics/medtop:20001202")
+        with patch.object(agg_mod, "_apitube_request",
+                          new=AsyncMock(return_value=[article])):
+            news = await agg.fetch_aggregated(["global_finance"])
+        assert news[0]["source_tag"] == "global_finance"
 
     @pytest.mark.asyncio
     async def test_politics_tag_inference(self, monkeypatch):
@@ -164,14 +179,14 @@ class TestFetchAggregated:
         assert news[0]["source_tag"] == "global_finance"
 
     @pytest.mark.asyncio
-    async def test_all_tags_five_requests(self, monkeypatch, apitube_article):
+    async def test_all_tags_six_requests(self, monkeypatch, apitube_article):
         monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
         monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
         with patch.object(agg_mod, "_apitube_request",
                           new=AsyncMock(return_value=[apitube_article])) as mock_req:
             await agg.fetch_aggregated()
-        # 2 category batches (ru + en) + 3 keyword queries
-        assert mock_req.await_count == 5
+        # 3 category batches (one per IPTC code) + 3 keyword queries
+        assert mock_req.await_count == 6
 
     @pytest.mark.asyncio
     async def test_cache_reused(self, monkeypatch, apitube_article):

@@ -13,10 +13,16 @@ Primary provider: APITube (https://apitube.io). Without an API key the module
 is inert — the bot keeps running on RSS sources only.
 
 Category coverage:
-  * finance / macro / global_finance  -> IPTC "Economy, Business & Finance"
+  * global_finance / finance / macro -> IPTC "Economy, Business & Finance"
   * politics                          -> IPTC "Politics"
   * tech / science                    -> IPTC "Science & Technology"
   * commodities / crypto / realty     -> keyword queries (no dedicated code)
+
+APITube does not index Russian-language news (``language.code=ru`` is
+rejected with ER0237), so category queries run in English
+(``APITUBE_LANGUAGE``). Articles fetched under the finance code therefore map
+to ``global_finance``; the Russian-facing ``finance``/``macro`` channels stay
+RSS-only.
 
 IPTC category codes are configurable (``APITUBE_CATEGORY_*``) and must be
 validated with ``/v1/suggest/categories`` — an unknown code fails the whole
@@ -35,9 +41,6 @@ from . import config
 from .retry_utils import async_retry
 
 logger = logging.getLogger(__name__)
-
-# Number of IPTC category codes APITube accepts per request (OR logic).
-MAX_CATEGORIES_PER_REQUEST = 3
 
 # Selected response fields (dot notation for nested objects, per APITube docs).
 _FIELDS = (
@@ -58,32 +61,32 @@ CATEGORY_QUERIES: dict[str, dict] = {
     "finance": {
         "kind": "category",
         "categories": [config.APITUBE_CATEGORY_FINANCE],
-        "languages": [config.NEWS_LANGUAGE],
+        "languages": [config.APITUBE_LANGUAGE],
     },
     "macro": {
         "kind": "category",
         "categories": [config.APITUBE_CATEGORY_FINANCE],
-        "languages": [config.NEWS_LANGUAGE],
+        "languages": [config.APITUBE_LANGUAGE],
     },
     "global_finance": {
         "kind": "category",
         "categories": [config.APITUBE_CATEGORY_FINANCE],
-        "languages": ["en"],
+        "languages": [config.APITUBE_LANGUAGE],
     },
     "politics": {
         "kind": "category",
         "categories": [config.APITUBE_CATEGORY_POLITICS],
-        "languages": [config.NEWS_LANGUAGE, "en"],
+        "languages": [config.APITUBE_LANGUAGE],
     },
     "tech": {
         "kind": "category",
         "categories": [config.APITUBE_CATEGORY_SCIENCE_TECH],
-        "languages": [config.NEWS_LANGUAGE, "en"],
+        "languages": [config.APITUBE_LANGUAGE],
     },
     "science": {
         "kind": "category",
         "categories": [config.APITUBE_CATEGORY_SCIENCE_TECH],
-        "languages": [config.NEWS_LANGUAGE, "en"],
+        "languages": [config.APITUBE_LANGUAGE],
     },
     "commodities": {
         "kind": "keywords",
@@ -102,11 +105,6 @@ CATEGORY_QUERIES: dict[str, dict] = {
 }
 
 # Article tags -> disambiguation hints for articles fetched via category batches.
-_MACRO_HINTS = (
-    "ставк", "инфляци", "ввп", "цб", "центробанк", "госдолг",
-    "бюджет", "безработиц", "дефицит бюджета", "мвф",
-    "inflation", "gdp", "rate", "central bank", "debt", "budget",
-)
 _SCIENCE_HINTS = (
     "наук", "исследован", "учё", "учен", "астроном", "физик", "химик",
     "биолог", "ген", "космос", "открыти", "science", "scientist",
@@ -224,8 +222,8 @@ def _normalize_article(art: dict, tag: str) -> dict:
 
     if isinstance(source, dict):
         opr = (source.get("rankings") or {}).get("opr")
-        if isinstance(opr, int):
-            item["opr"] = opr
+        if isinstance(opr, (int, float)):
+            item["opr"] = int(opr)
 
     if art.get("is_breaking"):
         item["is_breaking"] = True
@@ -254,52 +252,23 @@ def _normalize_article(art: dict, tag: str) -> dict:
 # ── Category batching & tag inference ──
 
 def _category_batches(tags: list[str]) -> list[tuple[str, tuple[str, ...]]]:
-    """Return (language, iptc_codes) requests needed for the given tags.
+    """Return (language, iptc_code) requests needed for the given tags.
 
-    Codes are grouped per language so a request never exceeds the 3-code
-    limit and shared codes (finance/macro/global_finance) are fetched once.
+    APITube articles carry only their most specific `medtop:` subcategory
+    codes (e.g. medtop:20000287 for personal finance) — never the parent
+    group code used in the query — so grouping must follow the *requested*
+    category, one request per distinct (language, category code). Tags that
+    share a category code (finance/macro/global_finance) are fetched once.
     """
-    needed: dict[str, set[str]] = {}
+    needed: dict[tuple[str, str], None] = {}
     for tag in tags:
         q = CATEGORY_QUERIES.get(tag)
         if not q or q["kind"] != "category":
             continue
-        for lang in q.get("languages", ("ru",)):
-            needed.setdefault(lang, set()).update(q["categories"])
-    return [(lang, tuple(sorted(needed[lang]))) for lang in sorted(needed)]
-
-
-def _article_iptc_codes(art: dict) -> set[str]:
-    """Extract `medtop:XXXXXXXX` codes from an article's categories."""
-    codes = set()
-    for cat in art.get("categories") or []:
-        if not isinstance(cat, dict):
-            continue
-        links = cat.get("links") or {}
-        match = re.search(r"medtop:\d{8}", str(links.get("self", "")))
-        if match:
-            codes.add(match.group(0))
-    return codes
-
-
-def _top_group(codes: set[str]) -> str | None:
-    """Map a set of IPTC codes to its top-level group by numeric prefix."""
-    for code in codes:
-        num = code.split(":", 1)[1] if ":" in code else ""
-        if num.startswith("04"):
-            return "finance"
-        if num.startswith("11"):
-            return "politics"
-        if num.startswith("13"):
-            return "sci_tech"
-    return None
-
-
-def _macro_or_finance(art: dict) -> str:
-    text = f"{art.get('title', '')} {art.get('description', '')}".lower()
-    if any(hint in text for hint in _MACRO_HINTS):
-        return "macro"
-    return "finance"
+        for lang in q.get("languages", ("en",)):
+            for code in q["categories"]:
+                needed.setdefault((lang, code), None)
+    return [(lang, (code,)) for (lang, code) in sorted(needed)]
 
 
 def _science_or_tech(art: dict) -> str:
@@ -309,27 +278,21 @@ def _science_or_tech(art: dict) -> str:
     return "tech"
 
 
-def _infer_tag(art: dict, lang: str, codes: tuple[str, ...]) -> str | None:
-    """Assign a bot source tag to an article from a category batch."""
-    wanted = set(codes)
-    matched = _article_iptc_codes(art) & wanted
-    group = _top_group(matched) if matched else None
+def _infer_tag(art: dict, lang: str, codes: tuple[str, ...]) -> str:
+    """Assign a bot source tag to an article from a category batch.
 
-    if group == "politics":
+    The batch is fetched under a single requested category, so the article's
+    group follows the requested code; headline hints only disambiguate within
+    the group (tech vs science). Russian-language news is not indexed by
+    APITube, hence all finance-group results map to ``global_finance``.
+    """
+    if config.APITUBE_CATEGORY_FINANCE in codes:
+        return "global_finance"
+    if config.APITUBE_CATEGORY_POLITICS in codes:
         return "politics"
-    if group == "sci_tech":
+    if config.APITUBE_CATEGORY_SCIENCE_TECH in codes:
         return _science_or_tech(art)
-    if group == "finance":
-        if lang == "en":
-            return "global_finance"
-        return _macro_or_finance(art)
-
-    # No IPTC code on the article: fall back to the request's language.
-    if config.APITUBE_CATEGORY_FINANCE in wanted:
-        return "global_finance" if lang == "en" else "finance"
-    if config.APITUBE_CATEGORY_SCIENCE_TECH in wanted:
-        return "tech"
-    return None
+    return "global_finance"
 
 
 # ── Caching ──

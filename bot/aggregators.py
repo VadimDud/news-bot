@@ -54,6 +54,21 @@ _PREVIEW_MARKER_RE = re.compile(
     r"\.\.\.\[(?:Upgrade subscription plan|Test mode[^\]]*)\]"
 )
 
+# Junk-signal phrases for low-quality sources that dominate the APITube free
+# tier (casino/gambling spam, deal farms, clickbait). Bare words like "deal",
+# "free" or "bet" are intentionally NOT matched — they are common in legit
+# business headlines ("merger deal", "free trade"). Applied to aggregated
+# items only; RSS sources are trusted and unaffected.
+_JUNK_RE = re.compile(
+    r"casino|gambl|slot\b|slot game|slots|poker|betting|bookmaker|bingo|"
+    r"lottery|sweepstake|wagering|jackpot|free spins|no deposit|"
+    r"sign[ -]?up bonus|promo code|promotional code|discount code|"
+    r"best deal|great deal|deals? now|deals? right now|biggest discount|"
+    r"clearance sale|shop now|buy now|limited offer|grab your|"
+    r"don'?t miss out|click here|coupon code|код бонус|бонус казино",
+    re.IGNORECASE,
+)
+
 # Bot source tag -> APITube query.
 #   category: grouped by IPTC code (max 3 codes per request, OR logic)
 #   keywords: free-text query against titles (AND/OR/NOT supported)
@@ -195,6 +210,14 @@ def _clean_title(title: str) -> str:
     title = str(title or "")
     title = _PREVIEW_MARKER_RE.sub("", title)
     return html.unescape(title).strip()
+
+
+def _is_junk(art: dict) -> bool:
+    """True when an aggregated article looks like spam/deal-farm content."""
+    if not config.NEWS_AGG_JUNK_FILTER:
+        return False
+    text = f"{art.get('title', '')} {art.get('description', '')}"
+    return bool(_JUNK_RE.search(text))
 
 
 def _normalize_article(art: dict, tag: str) -> dict:
@@ -389,7 +412,7 @@ async def _fetch_category_batch(lang: str, codes: tuple[str, ...]) -> list[dict]
     articles = await _apitube_request(_category_params(codes, lang))
     items = []
     for art in articles:
-        if not isinstance(art, dict) or not art.get("title"):
+        if not isinstance(art, dict) or not art.get("title") or _is_junk(art):
             continue
         tag = _infer_tag(art, lang, codes)
         if tag is None:
@@ -402,7 +425,7 @@ async def _fetch_keyword_batch(tag: str, keywords: str) -> list[dict]:
     articles = await _apitube_request(_keyword_params(keywords))
     items = []
     for art in articles:
-        if not isinstance(art, dict) or not art.get("title"):
+        if not isinstance(art, dict) or not art.get("title") or _is_junk(art):
             continue
         items.append(_normalize_article(art, tag))
     return items

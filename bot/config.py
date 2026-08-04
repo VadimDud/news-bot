@@ -60,6 +60,9 @@ NEWS_AGG_OPR_MIN: int = int(os.getenv("NEWS_AGG_OPR_MIN", "0"))
 # Phase-3 enrichment toggles: use provider sentiment / OPR in the pipeline
 NEWS_AGG_USE_SENTIMENT: bool = os.getenv("NEWS_AGG_USE_SENTIMENT", "true").lower() in ("1", "true", "yes")
 NEWS_AGG_USE_OPR: bool = os.getenv("NEWS_AGG_USE_OPR", "true").lower() in ("1", "true", "yes")
+# Drop aggregated items that match junk-signal phrases (casino/deal-farm spam).
+# RSS sources are trusted and unaffected; see bot.aggregators._JUNK_RE.
+NEWS_AGG_JUNK_FILTER: bool = os.getenv("NEWS_AGG_JUNK_FILTER", "true").lower() in ("1", "true", "yes")
 # Minimum |score| for trusting the provider sentiment without an LLM call
 NEWS_AGG_SENTIMENT_THRESHOLD: float = float(os.getenv("NEWS_AGG_SENTIMENT_THRESHOLD", "0.5"))
 # Default language for category-driven aggregator queries

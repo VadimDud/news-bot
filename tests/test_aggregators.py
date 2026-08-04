@@ -95,6 +95,32 @@ class TestNormalize:
         assert item["is_breaking"] is True
 
 
+class TestJunkFilter:
+    def test_detects_casino_spam(self):
+        assert agg._is_junk({"title": "Best Online Casino Free Spins", "description": ""})
+
+    def test_detects_deal_farm(self):
+        assert agg._is_junk(
+            {"title": "Reliance TV Sale: Best Deals, Discounts Right Now",
+             "description": "Limited offer, buy now"})
+
+    def test_detects_gambling_clickbait(self):
+        assert agg._is_junk({"title": "Greatest Online slots games Cash", "description": ""})
+
+    def test_allows_legit_finance(self):
+        assert not agg._is_junk(
+            {"title": "Wall Street Hits Records, AI Stocks Rally",
+             "description": "Oil prices jump on supply concerns"})
+
+    def test_allows_deal_merger_headlines(self):
+        # Bare "deal" in a merger headline must NOT be flagged.
+        assert not agg._is_junk({"title": "Company X agrees $2bn merger deal", "description": ""})
+
+    def test_toggle_disables_filter(self, monkeypatch):
+        monkeypatch.setattr(agg.config, "NEWS_AGG_JUNK_FILTER", False)
+        assert not agg._is_junk({"title": "Free spins casino bonus", "description": ""})
+
+
 class TestFetchAggregated:
     @pytest.fixture(autouse=True)
     def _clean_agg_cache(self):

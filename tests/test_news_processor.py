@@ -384,6 +384,24 @@ class TestSplitNewsText:
         result = split_news_text(text, max_len=4000)
         assert len(result) >= 2
 
+    def test_html_tags_stay_balanced(self):
+        text = (
+            "📰 <b>Новости</b> (2 шт.)\n\n"
+            "<b>1. Газпром: итоги 2024. Рост выручки на 30%</b>\n"
+            "📡 Коммерсантъ\n"
+            "🟡 NEUTRAL\n\n"
+            "<b>2. Сбер и ВТБ подвели итоги полугодия</b>\n"
+            "📡 Интерфакс\n"
+            "🟢 POSITIVE"
+        )
+        chunks = split_news_text(text, max_len=100)
+        assert len(chunks) >= 2
+        for chunk in chunks:
+            assert chunk.count("<b>") == chunk.count("</b>")
+        title_chunk = next(c for c in chunks if "Газпром" in c)
+        assert "Рост выручки на 30%</b>" in title_chunk
+
+
 
 class TestGlobalScanRelevanceVerification:
     """AI verification must drop ambiguous matches the LLM deems irrelevant."""

@@ -666,7 +666,7 @@ def _safe_html(text: str) -> str:
 def split_news_text(text: str, max_len: int = 4000) -> list[str]:
     if not text:
         return []
-    items = re.split(r'(?=\d+\.\s)', text)
+    items = re.split(r'(?=\n(?:<b>)?\d+\.\s)', text)
     items = [item for item in items if item]
     chunks = []
     current = ""

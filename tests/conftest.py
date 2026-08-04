@@ -43,3 +43,4 @@ async def setup_db():
     await init_db()
     yield
     await _clean_db()
+    await close_db()

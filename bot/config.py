@@ -44,6 +44,31 @@ MAX_AI_CALLS_PER_SCAN: int = int(os.getenv("MAX_AI_CALLS_PER_SCAN", "8"))
 # Auto-scan news interval (in seconds, default 3600 = 60 minutes)
 AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "3600"))
 
+# APITube news aggregator (global news provider, runs in parallel with RSS)
+APITUBE_API_KEY: str = os.getenv("APITUBE_API_KEY", "")
+APITUBE_BASE_URL: str = os.getenv("APITUBE_BASE_URL", "https://api.apitube.io")
+# Primary aggregator provider (only "apitube" implemented; reserved for future providers)
+DEFAULT_NEWS_PROVIDER: str = os.getenv("DEFAULT_NEWS_PROVIDER", "apitube")
+# Master switch for the aggregator layer. Without APITUBE_API_KEY it stays
+# disabled regardless, and the bot keeps working on RSS only.
+NEWS_AGG_ENABLED: bool = os.getenv("NEWS_AGG_ENABLED", "true").lower() in ("1", "true", "yes")
+# How long aggregated responses are cached (seconds) to stay within API limits
+NEWS_AGG_CACHE_TTL: int = int(os.getenv("NEWS_AGG_CACHE_TTL", "600"))
+# Optional source authority floor (0 = disabled). Kept out of requests by
+# default because niche tags would otherwise lose low-OPR sources.
+NEWS_AGG_OPR_MIN: int = int(os.getenv("NEWS_AGG_OPR_MIN", "0"))
+# Phase-3 enrichment toggles: use provider sentiment / OPR in the pipeline
+NEWS_AGG_USE_SENTIMENT: bool = os.getenv("NEWS_AGG_USE_SENTIMENT", "true").lower() in ("1", "true", "yes")
+NEWS_AGG_USE_OPR: bool = os.getenv("NEWS_AGG_USE_OPR", "true").lower() in ("1", "true", "yes")
+# Minimum |score| for trusting the provider sentiment without an LLM call
+NEWS_AGG_SENTIMENT_THRESHOLD: float = float(os.getenv("NEWS_AGG_SENTIMENT_THRESHOLD", "0.5"))
+# Default language for category-driven aggregator queries
+NEWS_LANGUAGE: str = os.getenv("NEWS_LANGUAGE", "ru")
+# IPTC Media Topics category codes (verify via /v1/suggest/categories)
+APITUBE_CATEGORY_FINANCE: str = os.getenv("APITUBE_CATEGORY_FINANCE", "medtop:04000000")
+APITUBE_CATEGORY_POLITICS: str = os.getenv("APITUBE_CATEGORY_POLITICS", "medtop:11000000")
+APITUBE_CATEGORY_SCIENCE_TECH: str = os.getenv("APITUBE_CATEGORY_SCIENCE_TECH", "medtop:13000000")
+
 # Web interface (web_app.py)
 WEB_HOST: str = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT: int = int(os.getenv("WEB_PORT", "8080"))

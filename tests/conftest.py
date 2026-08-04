@@ -16,6 +16,10 @@ _tmp_db.close()
 # Ensure a bot token exists so web session signing works in tests
 os.environ.setdefault("BOT_TOKEN", "test-token-123")
 
+# Disable the APITube aggregator by default so unit tests never hit the API
+os.environ["APITUBE_API_KEY"] = ""
+os.environ["NEWS_AGG_ENABLED"] = "false"
+
 from bot.database import init_db, close_db, _get_db
 
 

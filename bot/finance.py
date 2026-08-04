@@ -11,6 +11,7 @@ import feedparser
 from datetime import datetime
 
 from . import config
+from .aggregators import fetch_aggregated
 from .feed_filter import should_keep
 from .retry_utils import async_retry
 from .sources import get_sources_by_tags
@@ -184,10 +185,24 @@ async def fetch_news(source_tags: list[str] | None = None,
     if not sources:
         sources = get_sources_by_tags([])
 
-    unique = await _fetch_sources(sources)
+    # Fetch RSS sources and the API aggregator (APITube) in parallel, then
+    # dedup across both. The aggregator returns [] when disabled, so the
+    # existing RSS-only behavior is preserved.
+    rss_result, agg_result = await asyncio.gather(
+        _fetch_sources(sources),
+        fetch_aggregated(source_tags),
+        return_exceptions=True,
+    )
+    rss_news = rss_result if isinstance(rss_result, list) else []
+    agg_news = agg_result if isinstance(agg_result, list) else []
+    unique = _dedup_news(rss_news + agg_news)
 
     _fetch_cache[cache_key] = (now, unique)
-    logger.info(f"fetch_news: fetched {len(unique)} unique items from {len(sources)} sources (tags: {list(cache_key) or 'all'})")
+    logger.info(
+        f"fetch_news: fetched {len(unique)} unique items "
+        f"({len(rss_news)} RSS + {len(agg_news)} aggregated) "
+        f"(tags: {list(cache_key) or 'all'})"
+    )
 
     return _filter_news(unique, source_tags, keep_keywords)
 

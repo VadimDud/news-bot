@@ -117,6 +117,18 @@ def _sentiment_cache_key(content_hash: str, ticker: str | None) -> str:
     return f"sent:{content_hash}:{ticker or 'none'}"
 
 
+def _polarity_from_provider(value: str) -> str | None:
+    """Map an aggregator polarity label to the bot's sentiment vocabulary."""
+    v = str(value).strip().lower()
+    if v in ("positive", "pos"):
+        return "POSITIVE"
+    if v in ("negative", "neg"):
+        return "NEGATIVE"
+    if v in ("neutral", "neu"):
+        return "NEUTRAL"
+    return None
+
+
 # Russian morphological endings, longest first so longer endings win over
 # their single-letter suffixes (e.g. "ого" over "о").
 _STEM_ENDINGS = (
@@ -335,15 +347,23 @@ async def refine_sentiment(
     ai_calls_count: int,
     positive_triggers: list[str] | None = None,
     negative_triggers: list[str] | None = None,
+    agg_sentiment: str | None = None,
+    agg_sentiment_score: float | None = None,
 ) -> tuple[str, int]:
     """Refine rule-based sentiment via AI cache or LLM when confidence is low.
 
     Shared by global_scan and the legacy manual scans. Applies the per-scan AI
     budget: cache hits and low-confidence-but-high-signal results don't cost a
-    call. Returns (impact, ai_calls_used).
+    call. When the aggregator provided a confident sentiment (NEWS_AGG_USE_
+    SENTIMENT) it is trusted without an LLM call. Returns (impact, ai_calls_used).
     """
     if confidence != "low" and impact != "NEUTRAL":
         return impact, 0
+
+    if config.NEWS_AGG_USE_SENTIMENT and agg_sentiment:
+        polarity = _polarity_from_provider(agg_sentiment)
+        if polarity and abs(float(agg_sentiment_score or 0.0)) >= config.NEWS_AGG_SENTIMENT_THRESHOLD:
+            return polarity, 0
 
     sent_cache_key = _sentiment_cache_key(
         content_hash, asset.get("ticker") if asset else None
@@ -416,6 +436,8 @@ def compute_importance_score(
     subscriber_count: int = 0,
     max_subscriber_count: int = 1,
     created_at: datetime.datetime | None = None,
+    opr: int | None = None,
+    is_breaking: bool = False,
 ) -> float:
     now = datetime.datetime.now()
 
@@ -429,7 +451,10 @@ def compute_importance_score(
 
     ai_confidence_factor = 1.0 if confidence == "high" else 0.5
 
-    source_authority = 0.7
+    if config.NEWS_AGG_USE_OPR and opr is not None:
+        source_authority = min(max(float(opr), 0.0) / 10.0, 1.0)
+    else:
+        source_authority = 0.7
 
     if created_at:
         hours_old = (now - created_at).total_seconds() / 3600
@@ -450,6 +475,9 @@ def compute_importance_score(
         IMPORTANCE_WEIGHTS["match_count"] * match_factor +
         IMPORTANCE_WEIGHTS["subscriber_popularity"] * subscriber_factor
     )
+
+    if is_breaking:
+        score += 0.05
 
     return round(min(max(score, 0.0), 1.0), 4)
 
@@ -553,6 +581,8 @@ async def global_scan(
             sentiment, used = await refine_sentiment(
                 content_hash, title, summary, asset, sentiment, confidence,
                 ai_calls_count, pos_triggers, neg_triggers,
+                agg_sentiment=item.get("agg_sentiment"),
+                agg_sentiment_score=item.get("agg_sentiment_score"),
             )
             ai_calls_count += used
 
@@ -586,6 +616,8 @@ async def global_scan(
             subscriber_count=max_sub_for_item,
             max_subscriber_count=max_sub_count,
             created_at=created_at,
+            opr=item.get("opr"),
+            is_breaking=bool(item.get("is_breaking")),
         )
 
         buffer_updates.append({

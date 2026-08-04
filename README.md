@@ -81,7 +81,7 @@ cp .env.example .env
 | `DASHSCOPE_BASE_URL` | URL API DashScope |
 | `DASHSCOPE_MODEL` | Модель DashScope |
 | `HTTP_PROXY` | Прокси для Telegram API |
-| `AUTO_SCAN_INTERVAL` | Интервал сканирования в секундах (по умолчанию 1800) |
+| `AUTO_SCAN_INTERVAL` | Интервал сканирования в секундах (по умолчанию 3600 = 60 минут) |
 | `BOT_USERNAME` | Имя бота без `@` — включает Telegram Login Widget в веб-интерфейсе |
 | `WEB_HOST` | Хост веб-интерфейса (по умолчанию `127.0.0.1`) |
 | `WEB_PORT` | Порт веб-интерфейса (по умолчанию `8080`) |

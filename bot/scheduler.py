@@ -5,7 +5,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 
 
-def setup_scheduler(bot, cleanup_func, expiry_func, auto_scan_func, auto_scan_interval=1800):
+def setup_scheduler(bot, cleanup_func, expiry_func, auto_scan_func, auto_scan_interval=3600):
     """Create and configure an AsyncIOScheduler with three periodic jobs.
 
     Each job calls the corresponding function once per interval.

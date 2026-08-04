@@ -41,8 +41,8 @@ SCAN_TIMEOUT: int = int(os.getenv("SCAN_TIMEOUT", "120"))
 # Max number of AI calls per scan (relevance/sentiment verification)
 MAX_AI_CALLS_PER_SCAN: int = int(os.getenv("MAX_AI_CALLS_PER_SCAN", "8"))
 
-# Auto-scan news interval (in seconds, default 1800 = 30 minutes)
-AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "1800"))
+# Auto-scan news interval (in seconds, default 3600 = 60 minutes)
+AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "3600"))
 
 # Web interface (web_app.py)
 WEB_HOST: str = os.getenv("WEB_HOST", "127.0.0.1")

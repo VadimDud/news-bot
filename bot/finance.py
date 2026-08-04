@@ -11,6 +11,7 @@ import feedparser
 from datetime import datetime
 
 from . import config
+from .feed_filter import should_keep
 from .retry_utils import async_retry
 from .sources import get_sources_by_tags
 
@@ -157,15 +158,18 @@ _FETCH_CACHE_TTL = 300  # 5 minutes
 
 
 @async_retry(max_retries=2, base_delay=2.0)
-async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
+async def fetch_news(source_tags: list[str] | None = None,
+                     keep_keywords: list[str] | None = None) -> list[dict]:
     """Fetch news from sources matching the given tags.
 
     Args:
         source_tags: List of category tags (e.g. ["finance", "macro"]).
                      None or empty = fetch from all sources.
+        keep_keywords: Channel keywords that always protect an item from the
+                     stage-0 relevance filter (see bot.feed_filter).
 
     Returns:
-        Deduplicated list of news dicts.
+        Deduplicated, relevance-filtered list of news dicts.
     """
     cache_key = frozenset(source_tags or [])
     now = time.time()
@@ -174,7 +178,7 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
         cached_time, cached_news = _fetch_cache[cache_key]
         if now - cached_time < _FETCH_CACHE_TTL:
             logger.info(f"fetch_news: cache hit for {list(cache_key) or 'all'} ({len(cached_news)} items)")
-            return cached_news
+            return _filter_news(cached_news, source_tags, keep_keywords)
 
     sources = get_sources_by_tags(source_tags)
     if not sources:
@@ -185,7 +189,20 @@ async def fetch_news(source_tags: list[str] | None = None) -> list[dict]:
     _fetch_cache[cache_key] = (now, unique)
     logger.info(f"fetch_news: fetched {len(unique)} unique items from {len(sources)} sources (tags: {list(cache_key) or 'all'})")
 
-    return unique
+    return _filter_news(unique, source_tags, keep_keywords)
+
+
+def _filter_news(news: list[dict], tags: list[str] | None,
+                 keep_keywords: list[str] | None) -> list[dict]:
+    """Drop clearly irrelevant items for finance-like categories."""
+    filtered = [
+        item for item in news
+        if should_keep(item.get("title", ""), item.get("summary", ""),
+                       tags, keep_keywords)
+    ]
+    if len(filtered) != len(news):
+        logger.info(f"fetch_news: relevance filter dropped {len(news) - len(filtered)} of {len(news)} items")
+    return filtered
 
 
 def _clean_html(text: str) -> str:

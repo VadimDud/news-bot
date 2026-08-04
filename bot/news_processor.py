@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 # Maximum number of AI calls per scan to prevent blocking (configurable via env)
 MAX_AI_CALLS_PER_SCAN = config.MAX_AI_CALLS_PER_SCAN
 
+# News items examined per scan and the target number of matched items after
+# which scanning stops early. Items are processed freshest-first, so the
+# window contains the most relevant part of the stream instead of whatever
+# the first feed happened to return.
+MAX_SCAN_ITEMS = 40
+MAX_SCAN_MATCHED = 15
+
 # Keywords that are ambiguous outside their domain and should be verified by
 # the LLM before delivery (e.g. "золото" → gold medal, «Золотой глобус»,
 # «Южуралзолото»). Normalized (lowercase) forms.
@@ -468,8 +475,17 @@ async def global_scan(
     ticker_counts = await get_all_ticker_subscriber_counts()
     tracked_by_ticker = {a["ticker"].upper(): a for a in await get_all_tracked_assets()}
     buffer_updates: list[dict] = []
+    matched_so_far = 0
 
-    for item in news_items[:20]:
+    # Freshest items first, so the window isn't dominated by the first feed.
+    items = sorted(
+        news_items[:MAX_SCAN_ITEMS],
+        key=lambda it: _parse_published(it.get("published_at") or it.get("published"))
+                       or datetime.datetime.min,
+        reverse=True,
+    )
+
+    for item in items:
         title = item["title"]
         summary = item.get("summary", "")
         content_hash = compute_hash(title)
@@ -478,6 +494,7 @@ async def global_scan(
         matches = match_news_to_channels(title, summary, all_channels)
         if not matches:
             continue
+        matched_so_far += 1
 
         # ── AI relevance verification: drop ambiguous / summary-only matches ──
         if not skip_ai:
@@ -599,6 +616,10 @@ async def global_scan(
                 "content_hash": content_hash,
                 "importance_score": importance_score,
             })
+
+        if matched_so_far >= MAX_SCAN_MATCHED:
+            logger.info(f"global_scan: reached {MAX_SCAN_MATCHED} matched items, stopping early")
+            break
 
     return results, buffer_updates
 

@@ -141,12 +141,15 @@ async def auto_scan_job(bot: Bot):
 
         # Collect union of all source_tags from active channels
         all_tags = set()
+        keep_keywords = []
         for ch in all_channels:
             for tag in ch.get("source_tags", []):
                 all_tags.add(tag)
+            keep_keywords.extend(ch.get("keywords", []))
 
         try:
-            news = await fetch_news(list(all_tags) if all_tags else None)
+            news = await fetch_news(list(all_tags) if all_tags else None,
+                                    keep_keywords=keep_keywords)
             _cached_news = news
         except Exception as e:
             logger.warning(f"Auto-scan: fetch failed ({e}), using cache")

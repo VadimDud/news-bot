@@ -6,10 +6,8 @@ SOURCES = {
         "name_en": "Finance",
         "description": "Основные финансовые и деловые СМИ",
         "feeds": [
-            {"name": "Коммерсантъ", "url": "https://www.kommersant.ru/RSS/news.xml", "type": "rss", "lang": "ru"},
-            {"name": "Интерфакс", "url": "https://www.interfax.ru/rss.asp", "type": "rss", "lang": "ru"},
-            {"name": "ТАСС", "url": "https://tass.ru/rss/v2.xml", "type": "rss", "lang": "ru"},
-            {"name": "Ведомости", "url": "https://www.vedomosti.ru/rss/news.xml", "type": "rss", "lang": "ru"},
+            {"name": "Коммерсантъ Business", "url": "https://www.kommersant.ru/RSS/section-business.xml", "type": "rss", "lang": "ru"},
+            {"name": "Интерфакс Финансы", "url": "https://www.interfax.ru/rss.asp?sec=1821", "type": "rss", "lang": "ru"},
         ],
     },
     "macro": {
@@ -18,8 +16,6 @@ SOURCES = {
         "description": "ЦБ, инфляция, ВВП, госдолг, бюджет",
         "feeds": [
             {"name": "ЦБ РФ", "url": "https://www.cbr.ru/rss/eventrss", "type": "rss", "lang": "ru"},
-            {"name": "Росстат", "url": "https://rosstat.gov.ru/rss/news", "type": "rss", "lang": "ru"},
-            {"name": "Минфин РФ", "url": "https://minfin.gov.ru/rss/news/", "type": "rss", "lang": "ru"},
         ],
     },
     "commodities": {

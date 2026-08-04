@@ -470,3 +470,96 @@ class TestAICacheInGlobalScan:
             second_calls = mock_analyze.await_count
         assert second_calls == 0
         assert any(len(v) > 0 for v in results.values())
+
+
+class TestGlobalScanWindow:
+    """global_scan must examine the freshest items first and stop early."""
+
+    async def _make_channel(self, keyword="сбербанк"):
+        await db.set_user(100, "test", "Test User", "ru")
+        await db.grant_access(100, 30)
+        await db.create_channel(100, "SBER", [keyword], ticker="SBER")
+        return await db.get_all_user_channels()
+
+    async def test_freshest_item_beyond_old_20_limit_is_processed(self):
+        from bot import news_processor as np
+        channels = await self._make_channel()
+        news = [
+            {
+                "title": f"Обычная новость номер {i}",
+                "summary": "Без совпадений",
+                "source": "Тест",
+                "link": f"http://x/{i}",
+                "published_at": f"2026-08-04T00:{i:02d}:00",
+            }
+            for i in range(30)
+        ]
+        news.append({
+            "title": "Сбербанк объявил о новых тарифах",
+            "summary": "Банк обновил условия",
+            "source": "Тест",
+            "link": "http://x/sber",
+            "published_at": "2026-08-04T12:00:00",
+        })
+        with patch.object(np, "analyze", new=AsyncMock(return_value="NEUTRAL")):
+            results, _ = await np.global_scan(news, channels)
+        titles = [r["title"] for v in results.values() for r in v]
+        assert any("Сбербанк" in t for t in titles)
+
+    async def test_early_stop_after_max_matched(self):
+        from bot import news_processor as np
+        channels = await self._make_channel()
+        news = [
+            {
+                "title": f"Сбербанк новость {i}",
+                "summary": "Банк",
+                "source": "Тест",
+                "link": f"http://x/{i}",
+                "published_at": f"2026-08-04T12:{i:02d}:00",
+            }
+            for i in range(30)
+        ]
+        calls = {"n": 0}
+        orig = np.match_news_to_channels
+
+        def spy(title, summary, chs):
+            calls["n"] += 1
+            return orig(title, summary, chs)
+
+        with patch.object(np, "match_news_to_channels", new=spy), \
+             patch.object(np, "analyze", new=AsyncMock(return_value="NEUTRAL")):
+            results, _ = await np.global_scan(news, channels)
+        assert calls["n"] == np.MAX_SCAN_MATCHED
+        total = sum(len(v) for v in results.values())
+        assert 1 <= total <= np.MAX_SCAN_MATCHED
+
+    async def test_oldest_news_still_processed_within_window(self):
+        from bot import news_processor as np
+        channels = await self._make_channel()
+        news = [
+            {
+                "title": "Сбербанк отчитался о прибыли",
+                "summary": "Банк опубликовал результаты",
+                "source": "Тест",
+                "link": "http://x/old",
+                "published_at": "2026-08-04T00:00:00",
+            },
+            {
+                "title": "Обычная новость 1",
+                "summary": "Без совпадений",
+                "source": "Тест",
+                "link": "http://x/1",
+                "published_at": "2026-08-04T01:00:00",
+            },
+            {
+                "title": "Обычная новость 2",
+                "summary": "Без совпадений",
+                "source": "Тест",
+                "link": "http://x/2",
+                "published_at": "2026-08-04T02:00:00",
+            },
+        ]
+        with patch.object(np, "analyze", new=AsyncMock(return_value="NEUTRAL")):
+            results, _ = await np.global_scan(news, channels)
+        titles = [r["title"] for v in results.values() for r in v]
+        assert any("Сбербанк отчитался" in t for t in titles)

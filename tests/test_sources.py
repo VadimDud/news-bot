@@ -82,3 +82,20 @@ class TestGetSourceTagsDisplay:
         for item in display:
             cat = SOURCES[item["id"]]
             assert item["count"] == len(cat["feeds"])
+
+
+class TestFinanceMacroFeeds:
+    """finance/macro categories must use business feeds, not general news."""
+
+    def test_finance_uses_business_feeds(self):
+        urls = {s["url"] for s in get_sources_by_tags(["finance"])}
+        assert urls == {
+            "https://www.kommersant.ru/RSS/section-business.xml",
+            "https://www.interfax.ru/rss.asp?sec=1821",
+        }
+
+    def test_macro_has_only_cbr(self):
+        sources = get_sources_by_tags(["macro"])
+        assert len(sources) == 1
+        assert sources[0]["url"] == "https://www.cbr.ru/rss/eventrss"
+        assert sources[0]["name"] == "ЦБ РФ"

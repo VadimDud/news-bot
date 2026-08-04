@@ -408,6 +408,15 @@ class TestPinnedNews:
         pinned = await get_pinned_news_by_channel(ch_id)
         assert pinned["message_id"] == 400
 
+    async def test_multiple_channels_same_user(self):
+        await set_user(100, "u1", "U", "ru")
+        ch1 = await create_channel(100, "Ch1", ["kw"])
+        ch2 = await create_channel(100, "Ch2", ["kw"])
+        await save_pinned_news(100, chat_id=200, message_id=300, channel_id=ch1)
+        await save_pinned_news(100, chat_id=210, message_id=310, channel_id=ch2)
+        assert (await get_pinned_news_by_channel(ch1))["message_id"] == 300
+        assert (await get_pinned_news_by_channel(ch2))["message_id"] == 310
+
     async def test_remove_pinned(self):
         await set_user(100, "u1", "U", "ru")
         await save_pinned_news(100, chat_id=200, message_id=300)

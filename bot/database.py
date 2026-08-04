@@ -85,7 +85,8 @@ async def init_db():
     """)
     await _db.execute("""
         CREATE TABLE IF NOT EXISTS pinned_news (
-            user_id    INTEGER PRIMARY KEY,
+            channel_id INTEGER PRIMARY KEY,
+            user_id    INTEGER NOT NULL,
             chat_id    INTEGER NOT NULL,
             message_id INTEGER NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -250,9 +251,31 @@ async def init_db():
     if "user_id" not in news_cols:
         await _db.execute("ALTER TABLE news ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
 
-    pinned_cols = {row[1] for row in await (await _db.execute("PRAGMA table_info(pinned_news)")).fetchall()}
-    if "channel_id" not in pinned_cols:
+    async with _db.execute("PRAGMA table_info(pinned_news)") as cur:
+        pinned_cols = await cur.fetchall()
+    if not any(row[1] == "channel_id" for row in pinned_cols):
         await _db.execute("ALTER TABLE pinned_news ADD COLUMN channel_id INTEGER")
+        async with _db.execute("PRAGMA table_info(pinned_news)") as cur:
+            pinned_cols = await cur.fetchall()
+    pinned_pk = next((row[1] for row in pinned_cols if row[5] == 1), None)
+    if pinned_pk != "channel_id":
+        await _db.execute("ALTER TABLE pinned_news RENAME TO pinned_news_old")
+        await _db.execute("""
+            CREATE TABLE pinned_news (
+                channel_id INTEGER PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await _db.execute("""
+            INSERT INTO pinned_news (channel_id, user_id, chat_id, message_id, updated_at)
+            SELECT channel_id, user_id, chat_id, message_id, updated_at
+            FROM pinned_news_old
+            WHERE channel_id IS NOT NULL
+        """)
+        await _db.execute("DROP TABLE pinned_news_old")
 
     uc_cols = {row[1] for row in await (await _db.execute("PRAGMA table_info(user_channels)")).fetchall()}
     if "source_tags" not in uc_cols:
@@ -1127,7 +1150,9 @@ async def has_tracked_asset(ticker: str) -> bool:
 async def get_pinned_news(user_id: int) -> dict | None:
     db = await _get_db()
     async with db.execute(
-        "SELECT * FROM pinned_news WHERE user_id = ?", (user_id,)
+        "SELECT * FROM pinned_news WHERE user_id = ? "
+        "ORDER BY updated_at DESC, message_id DESC LIMIT 1",
+        (user_id,)
     ) as cur:
         row = await cur.fetchone()
         return dict(row) if row else None
@@ -1161,14 +1186,20 @@ async def save_pinned_news(user_id: int, chat_id: int, message_id: int,
             """, (user_id, chat_id, message_id, channel_id))
         await db.commit()
     else:
-        await db.execute("""
-            INSERT INTO pinned_news (user_id, chat_id, message_id, updated_at)
-            VALUES (?, ?, ?, datetime('now'))
-            ON CONFLICT(user_id) DO UPDATE SET
-                chat_id = excluded.chat_id,
-                message_id = excluded.message_id,
-                updated_at = datetime('now')
-        """, (user_id, chat_id, message_id))
+        existing = await (await db.execute(
+            "SELECT 1 FROM pinned_news WHERE user_id = ? AND channel_id IS NULL",
+            (user_id,)
+        )).fetchone()
+        if existing:
+            await db.execute("""
+                UPDATE pinned_news SET chat_id = ?, message_id = ?, updated_at = datetime('now')
+                WHERE user_id = ? AND channel_id IS NULL
+            """, (chat_id, message_id, user_id))
+        else:
+            await db.execute("""
+                INSERT INTO pinned_news (user_id, chat_id, message_id, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+            """, (user_id, chat_id, message_id))
         await db.commit()
 
 

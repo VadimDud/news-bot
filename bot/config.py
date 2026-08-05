@@ -49,9 +49,11 @@ APITUBE_API_KEY: str = os.getenv("APITUBE_API_KEY", "")
 APITUBE_BASE_URL: str = os.getenv("APITUBE_BASE_URL", "https://api.apitube.io")
 # Primary aggregator provider (only "apitube" implemented; reserved for future providers)
 DEFAULT_NEWS_PROVIDER: str = os.getenv("DEFAULT_NEWS_PROVIDER", "apitube")
-# Master switch for the aggregator layer. Without APITUBE_API_KEY it stays
-# disabled regardless, and the bot keeps working on RSS only.
-NEWS_AGG_ENABLED: bool = os.getenv("NEWS_AGG_ENABLED", "true").lower() in ("1", "true", "yes")
+# Master switch for the aggregator layer. Disabled by default: APITube only
+# indexes non-Russian / non-Russia news, which no current subscriber wants, so
+# the bot runs on RSS sources only. Without APITUBE_API_KEY it stays disabled
+# regardless.
+NEWS_AGG_ENABLED: bool = os.getenv("NEWS_AGG_ENABLED", "false").lower() in ("1", "true", "yes")
 # How long aggregated responses are cached (seconds) to stay within API limits
 NEWS_AGG_CACHE_TTL: int = int(os.getenv("NEWS_AGG_CACHE_TTL", "600"))
 # Optional source authority floor (0 = disabled). Kept out of requests by

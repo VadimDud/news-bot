@@ -32,6 +32,7 @@ from bot.database import (
 )
 from bot.finance import fetch_news
 from bot.i18n import t
+from bot.macro_monitor import build_linker_alert
 from bot.middlewares import LanguageMiddleware
 from bot.handlers import start, language, finance, admin, channels, ai
 from bot.news_processor import (
@@ -320,6 +321,27 @@ async def auto_scan_job(bot: Bot):
             logger.warning(f"Failed to save scan metrics: {e}")
 
 
+async def macro_alert_job(bot: Bot):
+    """Single execution: daily CBR check for devaluation/inflation decline.
+
+    When both are falling, inflation-linked OFZ (52002/52003) may drop in
+    price — a Telegram alert is sent to the owner.
+    """
+    if not config.LINKER_ALERT_ENABLED:
+        return
+    chat_id = config.LINKER_ALERT_CHAT_ID or config.ADMIN_ID
+    if not chat_id:
+        logger.info("Macro alert: no chat_id configured (ADMIN_ID empty), skipping")
+        return
+    try:
+        message = await build_linker_alert()
+        if message:
+            await bot.send_message(chat_id, message, parse_mode="HTML")
+            logger.info(f"Sent linker macro alert to {chat_id}")
+    except Exception as e:
+        logger.warning(f"Macro alert job error: {e}")
+
+
 async def main():
     if not config.BOT_TOKEN:
         logger.error("BOT_TOKEN is not set! Check your .env file.")
@@ -363,6 +385,8 @@ async def main():
         expiry_func=expiry_reminder_job,
         auto_scan_func=auto_scan_job,
         auto_scan_interval=config.AUTO_SCAN_INTERVAL,
+        macro_func=macro_alert_job,
+        macro_interval=config.MACRO_CHECK_INTERVAL,
     )
     scheduler.start()
 

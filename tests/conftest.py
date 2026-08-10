@@ -31,6 +31,7 @@ async def _clean_db():
         "pinned_news", "scan_metrics", "news_delivery_log",
         "user_channels", "channel_news", "ai_cache",
         "news_buffer", "user_news_priority", "news_ticker_popularity",
+        "macro_indicators", "macro_state",
     ]:
         await db.execute(f"DELETE FROM {table}")
     await db.commit()

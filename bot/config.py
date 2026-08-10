@@ -44,6 +44,21 @@ MAX_AI_CALLS_PER_SCAN: int = int(os.getenv("MAX_AI_CALLS_PER_SCAN", "8"))
 # Auto-scan news interval (in seconds, default 3600 = 60 minutes)
 AUTO_SCAN_INTERVAL: int = int(os.getenv("AUTO_SCAN_INTERVAL", "3600"))
 
+# Macro monitor / ОФЗ-ИН (линкеры) alert
+# Daily check of CBR data: USD/RUB rate + inflation (% г/г) + key rate.
+# Alerts when both devaluation and inflation are falling — a sign that
+# inflation-linked OFZ (52002/52003) may lose value.
+MACRO_CHECK_INTERVAL: int = int(os.getenv("MACRO_CHECK_INTERVAL", "86400"))
+LINKER_ALERT_ENABLED: bool = os.getenv("LINKER_ALERT_ENABLED", "true").lower() in ("1", "true", "yes")
+# Chat to receive linker alerts; 0 = fall back to ADMIN_ID
+LINKER_ALERT_CHAT_ID: int = int(os.getenv("LINKER_ALERT_CHAT_ID", "0"))
+# Ruble strengthening threshold (%) vs window start — "девальвация снижается"
+FX_STRENGTH_THRESHOLD_PCT: float = float(os.getenv("FX_STRENGTH_THRESHOLD_PCT", "3.0"))
+# Inflation (г/г) drop in percentage points vs window start — "инфляция снижается"
+INFLATION_DROP_PP: float = float(os.getenv("INFLATION_DROP_PP", "0.3"))
+# Minimum history window (days) before the trend check may fire
+MACRO_WINDOW_DAYS: int = int(os.getenv("MACRO_WINDOW_DAYS", "14"))
+
 # APITube news aggregator (global news provider, runs in parallel with RSS)
 APITUBE_API_KEY: str = os.getenv("APITUBE_API_KEY", "")
 APITUBE_BASE_URL: str = os.getenv("APITUBE_BASE_URL", "https://api.apitube.io")

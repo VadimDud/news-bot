@@ -240,6 +240,22 @@ async def init_db():
             created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS macro_indicators (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_on TEXT NOT NULL UNIQUE,
+            usd_rub     REAL,
+            inflation_yy REAL,
+            key_rate    REAL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await _db.execute("""
+        CREATE TABLE IF NOT EXISTS macro_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
 
     cols = {row[1] for row in await (await _db.execute("PRAGMA table_info(users)")).fetchall()}
     if "access_until" not in cols:
@@ -1344,3 +1360,53 @@ async def cleanup_old_delivery_logs(max_age_days: int = 30) -> int:
     )
     await db.commit()
     return cursor.rowcount
+
+
+# ── Macro indicators / linker alert state ──
+
+async def save_macro_indicator(observed_on: str, usd_rub: float | None,
+                               inflation_yy: float | None, key_rate: float | None):
+    """Store a daily macro snapshot (CBR USD/RUB rate, inflation % г/г, key rate)."""
+    db = await _get_db()
+    await db.execute("""
+        INSERT INTO macro_indicators (observed_on, usd_rub, inflation_yy, key_rate)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(observed_on) DO UPDATE SET
+            usd_rub = excluded.usd_rub,
+            inflation_yy = excluded.inflation_yy,
+            key_rate = excluded.key_rate,
+            created_at = CURRENT_TIMESTAMP
+    """, (observed_on, usd_rub, inflation_yy, key_rate))
+    await db.commit()
+
+
+async def get_macro_history(limit: int = 180) -> list[dict]:
+    """Return macro snapshots ordered by date ascending (oldest first)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT observed_on, usd_rub, inflation_yy, key_rate "
+        "FROM macro_indicators ORDER BY observed_on DESC LIMIT ?",
+        (limit,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+async def get_macro_state(key: str) -> str | None:
+    """Read a persisted macro state flag (e.g. linker_alert_active)."""
+    db = await _get_db()
+    async with db.execute(
+        "SELECT value FROM macro_state WHERE key = ?", (key,)
+    ) as cur:
+        row = await cur.fetchone()
+        return row["value"] if row else None
+
+
+async def set_macro_state(key: str, value: str):
+    """Persist a macro state flag."""
+    db = await _get_db()
+    await db.execute("""
+        INSERT INTO macro_state (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    """, (key, value))
+    await db.commit()

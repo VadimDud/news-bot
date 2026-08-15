@@ -1,9 +1,13 @@
 """Backtrader-стратегии для бэктеста + реестр с описаниями параметров для веб-формы.
 
-Логика повторяет чистые функции из ``signals.py``.
+Логика повторяет чистые функции из ``signals.py``. Риск-менеджмент по мотивам
+Price Action: лот от % риска, стоп-лосс по ATR, тейк по R:R, трендовый фильтр EMA.
 """
 
 import backtrader as bt
+
+from . import risk as risk_module
+from . import signals as sig
 
 
 class TradeRecordingStrategy(bt.Strategy):
@@ -27,52 +31,238 @@ class TradeRecordingStrategy(bt.Strategy):
             )
 
 
-class SmaCross(TradeRecordingStrategy):
-    params = (("fast", 10), ("slow", 30))
+# Общие параметры риск-менеджмента: кортеж для backtrader и список для веб-формы
+_RISK_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),        # % риска на сделку (1.0 = 1%)
+    ("atr_period", 14),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("trend_period", 0),      # 0 — трендовый фильтр выключен
+)
+
+_RISK_PARAMS = [
+    {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+    {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 14},
+    {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
+    {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+    {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 0},
+]
+
+
+class RiskAwareStrategy(TradeRecordingStrategy):
+    """Базовая стратегия с риск-менеджментом.
+
+    - лот рассчитывается от ``risk_pct`` риска и дистанции стопа (ATR);
+    - при входе ставится стоп-лосс по ATR и тейк-профит с соотношением R:R;
+    - длинные позиции открываются только выше EMA ``trend_period`` (0 — выкл).
+    """
 
     def __init__(self):
         super().__init__()
-        sma_fast = bt.indicators.SMA(self.data.close, period=self.p.fast)
-        sma_slow = bt.indicators.SMA(self.data.close, period=self.p.slow)
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        self._sl_order = None
+        self._tp_order = None
+        if int(self.p.trend_period) > 0:
+            self.ema_ind = bt.indicators.EMA(self.data.close, period=int(self.p.trend_period))
+        else:
+            self.ema_ind = None
+
+    # ── риск / тренд ─────────────────────────────────────────────────────────
+
+    def _risk_fraction(self) -> float:
+        return float(self.p.risk_pct) / 100.0
+
+    def _atr_value(self) -> float:
+        val = float(self.atr_ind[0])
+        return 0.0 if val != val or val <= 0 else val  # защита от NaN
+
+    def _stop_distance(self) -> float:
+        price = float(self.data.close[0])
+        atr_dist = self._atr_value() * float(self.p.atr_stop_mult)
+        return max(atr_dist, price * 0.005)  # минимум 0.5% цены
+
+    def _trend_up(self) -> bool:
+        if self.ema_ind is None:
+            return True
+        return float(self.data.close[0]) > float(self.ema_ind[0])
+
+    def _risk_size(self) -> int:
+        price = float(self.data.close[0])
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), self._risk_fraction(), self._stop_distance(), price
+        )
+        # Не превышать ~95% свободного кэша (защита от гигантских лотов при узком стопе)
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        return max(min(size, max_by_cash), 1) if max_by_cash > 0 else size
+
+    def _open_long(self) -> None:
+        if not self._trend_up():
+            return
+        size = self._risk_size()
+        if size <= 0:
+            return
+        self.buy(size=size)  # SL/TP выставляются в notify_order после исполнения
+
+    def _place_bracket(self) -> None:
+        """Выставить стоп-лосс (по ATR) и тейк-профит (R:R) по открытой позиции."""
+        if self.position.size <= 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = self._stop_distance()
+        stop = price - stop_dist
+        target = price + stop_dist * float(self.p.rr_ratio)
+        self._sl_order = self.sell(exectype=bt.Order.Stop, price=stop, size=self.position.size)
+        self._tp_order = self.sell(exectype=bt.Order.Limit, price=target, size=self.position.size)
+
+    def notify_order(self, order):
+        if order.status == bt.Order.Completed:
+            if order.isbuy() and self.position.size > 0:
+                # вход исполнился — ставим стоп и тейк
+                self._sl_order = None
+                self._tp_order = None
+                self._place_bracket()
+            else:
+                # позиция закрыта (стоп/тейк/сигнальный выход) — снять вторую ногу
+                for pending in (self._sl_order, self._tp_order):
+                    if pending is not None and pending is not order:
+                        self.cancel(pending)
+                self._sl_order = None
+                self._tp_order = None
+        elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin, bt.Order.Expired):
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+
+    def _exit(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted,
+                bt.Order.Accepted,
+                bt.Order.Partial,
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+        if self.position:
+            self.close()
+
+    def _trend_exit(self) -> bool:
+        """Закрыть позицию при развороте тренда. Возвращает True, если вышли."""
+        if self.position and not self._trend_up():
+            self._exit()
+            return True
+        return False
+
+
+class SmaCross(RiskAwareStrategy):
+    params = (("fast", 10), ("slow", 30)) + _RISK_PARAMS_TUPLE
+
+    def __init__(self):
+        super().__init__()
+        sma_fast = bt.indicators.SMA(self.data.close, period=int(self.p.fast))
+        sma_slow = bt.indicators.SMA(self.data.close, period=int(self.p.slow))
         self.crossover = bt.indicators.CrossOver(sma_fast, sma_slow)
 
     def next(self):
+        if self._trend_exit():
+            return
         if not self.position:
             if self.crossover[0] > 0:
-                self.buy()
+                self._open_long()
         elif self.crossover[0] < 0:
-            self.close()
+            self._exit()
 
 
-class RSIStrategy(TradeRecordingStrategy):
-    params = (("period", 14), ("buy_threshold", 30), ("sell_threshold", 70))
+class RSIStrategy(RiskAwareStrategy):
+    params = (("period", 14), ("buy_threshold", 30), ("sell_threshold", 70)) + _RISK_PARAMS_TUPLE
 
     def __init__(self):
         super().__init__()
-        self.rsi = bt.indicators.RSI(self.data.close, period=self.p.period)
+        self.rsi = bt.indicators.RSI(self.data.close, period=int(self.p.period), safediv=True)
 
     def next(self):
+        if self._trend_exit():
+            return
         if not self.position:
             if self.rsi[0] < self.p.buy_threshold:
-                self.buy()
+                self._open_long()
         elif self.rsi[0] > self.p.sell_threshold:
-            self.close()
+            self._exit()
 
 
-class DonchianBreakout(TradeRecordingStrategy):
-    params = (("period", 20),)
+class DonchianBreakout(RiskAwareStrategy):
+    params = (("period", 20),) + _RISK_PARAMS_TUPLE
 
     def __init__(self):
         super().__init__()
-        self.highest = bt.indicators.Highest(self.data.high, period=self.p.period)
-        self.lowest = bt.indicators.Lowest(self.data.low, period=self.p.period)
+        self.highest = bt.indicators.Highest(self.data.high, period=int(self.p.period))
+        self.lowest = bt.indicators.Lowest(self.data.low, period=int(self.p.period))
 
     def next(self):
+        if self._trend_exit():
+            return
         if not self.position:
             if self.data.close[0] > self.highest[-1]:
-                self.buy()
+                self._open_long()
         elif self.data.close[0] < self.lowest[-1]:
-            self.close()
+            self._exit()
+
+
+class PinbarStrategy(RiskAwareStrategy):
+    """Молот / падающая звезда. Вход на бычьем пин-баре, выход — по SL/TP или медвежьему."""
+
+    params = (("wick_ratio", 2.0),) + _RISK_PARAMS_TUPLE
+
+    def _bull(self) -> bool:
+        return sig.is_bullish_pinbar(
+            float(self.data.open[0]), float(self.data.high[0]),
+            float(self.data.low[0]), float(self.data.close[0]), float(self.p.wick_ratio),
+        )
+
+    def _bear(self) -> bool:
+        return sig.is_bearish_pinbar(
+            float(self.data.open[0]), float(self.data.high[0]),
+            float(self.data.low[0]), float(self.data.close[0]), float(self.p.wick_ratio),
+        )
+
+    def next(self):
+        if self._trend_exit():
+            return
+        if not self.position:
+            if self._bull():
+                self._open_long()
+        elif self._bear():
+            self._exit()
+
+
+class EngulfingStrategy(RiskAwareStrategy):
+    """Бычье/медвежье поглощение. Вход на бычьем, выход — по SL/TP или медвежьему."""
+
+    params = _RISK_PARAMS_TUPLE
+
+    def _bull(self) -> bool:
+        return sig.is_bullish_engulfing(
+            float(self.data.open[0]), float(self.data.high[0]),
+            float(self.data.low[0]), float(self.data.close[0]),
+            float(self.data.open[-1]), float(self.data.close[-1]),
+        )
+
+    def _bear(self) -> bool:
+        return sig.is_bearish_engulfing(
+            float(self.data.open[0]), float(self.data.high[0]),
+            float(self.data.low[0]), float(self.data.close[0]),
+            float(self.data.open[-1]), float(self.data.close[-1]),
+        )
+
+    def next(self):
+        if self._trend_exit():
+            return
+        if not self.position:
+            if self._bull():
+                self._open_long()
+        elif self._bear():
+            self._exit()
 
 
 STRATEGIES = {
@@ -82,7 +272,7 @@ STRATEGIES = {
         "params": [
             {"key": "fast", "label": "Быстрая SMA (период)", "type": "int", "default": 10},
             {"key": "slow", "label": "Медленная SMA (период)", "type": "int", "default": 30},
-        ],
+        ] + _RISK_PARAMS,
     },
     "rsi": {
         "name": "RSI (перепроданность/перекупленность)",
@@ -91,14 +281,26 @@ STRATEGIES = {
             {"key": "period", "label": "Период RSI", "type": "int", "default": 14},
             {"key": "buy_threshold", "label": "Порог покупки (<)", "type": "int", "default": 30},
             {"key": "sell_threshold", "label": "Порог продажи (>)", "type": "int", "default": 70},
-        ],
+        ] + _RISK_PARAMS,
     },
     "donchian": {
         "name": "Donchian Breakout",
         "cls": DonchianBreakout,
         "params": [
             {"key": "period", "label": "Период канала", "type": "int", "default": 20},
-        ],
+        ] + _RISK_PARAMS,
+    },
+    "pinbar": {
+        "name": "Pinbar (молот / падающая звезда)",
+        "cls": PinbarStrategy,
+        "params": [
+            {"key": "wick_ratio", "label": "Тень / тело", "type": "float", "default": 2.0},
+        ] + _RISK_PARAMS,
+    },
+    "engulfing": {
+        "name": "Поглощение (Engulfing)",
+        "cls": EngulfingStrategy,
+        "params": _RISK_PARAMS,
     },
 }
 

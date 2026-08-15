@@ -27,6 +27,14 @@
       <div class="value">{{ result.sharpe if result.sharpe is not none else '—' }}</div></div>
     <div class="metric"><div class="label">Сделок</div>
       <div class="value">{{ result.trades_total }} <span style="font-size:12px;color:var(--muted)">(win {{ result.win_rate_pct }}%)</span></div></div>
+    <div class="metric"><div class="label">Profit Factor</div>
+      <div class="value {{ 'pos' if (result.profit_factor or 0) >= 1 else 'neg' }}">{{ result.profit_factor if result.profit_factor is not none else '—' }}</div></div>
+    <div class="metric"><div class="label">Expectancy, ₽</div>
+      <div class="value {{ 'pos' if result.expectancy >= 0 else 'neg' }}">{{ '%+.2f' % result.expectancy }}</div></div>
+    <div class="metric"><div class="label">Средние win / loss</div>
+      <div class="value" style="font-size:15px">{{ '%+.2f' % result.avg_win }} / {{ '%.2f' % result.avg_loss }}</div></div>
+    <div class="metric"><div class="label">Серии win / loss</div>
+      <div class="value" style="font-size:15px">{{ result.longest_win_streak }} / {{ result.longest_loss_streak }}</div></div>
     <div class="metric"><div class="label">Баров</div>
       <div class="value">{{ result.n_bars }}</div></div>
   </div>

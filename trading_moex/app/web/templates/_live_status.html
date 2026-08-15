@@ -14,24 +14,47 @@
   <h3>Котировки и сигналы</h3>
   {% if status.prices %}
   <table>
-    <thead><tr><th>Тикер</th><th>Цена</th><th>Сигнал</th></tr></thead>
+    <thead><tr><th>Тикер</th><th>Цена</th><th>Сигнал</th><th>SL</th><th>TP</th></tr></thead>
     <tbody>
       {% for p in status.prices %}
+      {% set s = status.signals.get(p.ticker, {}) %}
       <tr>
         <td>{{ p.ticker }}</td>
         <td>{{ p.price }}</td>
         <td>
-          {% set s = status.signals.get(p.ticker, '—') %}
-          {% if s == 'buy' %}<span class="chip ok">BUY</span>
-          {% elif s == 'sell' %}<span class="chip danger">SELL</span>
+          {% if s.action == 'buy' %}<span class="chip ok">BUY</span>
+          {% elif s.action == 'sell' %}<span class="chip danger">SELL</span>
           {% else %}<span class="chip">hold</span>{% endif %}
         </td>
+        <td>{{ s.stop if s.stop is not none else '—' }}</td>
+        <td>{{ s.target if s.target is not none else '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   {% else %}
   <div class="empty">Нет данных (запустите цикл).</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Открытые входы (SL/TP)</h3>
+  {% if status.entries %}
+  <table>
+    <thead><tr><th>Тикер</th><th>Вход</th><th>Стоп</th><th>Тейк</th></tr></thead>
+    <tbody>
+      {% for t, e in status.entries.items() %}
+      <tr>
+        <td>{{ t }}</td>
+        <td>{{ e.entry_price }}</td>
+        <td>{{ e.stop }}</td>
+        <td>{{ e.target }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Открытых входов нет.</div>
   {% endif %}
 </div>
 

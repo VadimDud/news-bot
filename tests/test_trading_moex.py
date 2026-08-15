@@ -183,3 +183,161 @@ def test_catalog_find():
     assert "SBER" in AVAILABLE_TICKER_KEYS
     assert find("sber")["ticker"] == "SBER"
     assert find("NOT_EXIST") is None
+
+
+# ── Риск-менеджмент ─────────────────────────────────────────────────────────
+
+def test_risk_position_size():
+    from trading_moex.app.risk import position_size
+
+    # риск 1% от 100 000 = 1000; стоп-дистанция 10 → лот 100
+    assert position_size(100_000, 0.01, 10.0, 100.0) == 100
+    # округление вниз
+    assert position_size(100_000, 0.01, 7.0, 100.0) == 142
+    # минимум 1
+    assert position_size(100_000, 0.01, 5000.0, 100.0) == 1
+    assert position_size(100_000, 0.01, 0.0, 100.0) == 1
+
+
+def test_risk_atr_and_stops():
+    import numpy as np
+    import pandas as pd
+
+    from trading_moex.app.risk import atr, stop_distance
+
+    close = np.linspace(100, 120, 60)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 2.0, "low": close - 2.0, "close": close}
+    )
+    a = atr(df, 14)
+    tail = a.iloc[20:]  # первые бары — NaN на прогреве Wilder
+    assert tail.notna().all()
+    assert (tail > 0).all()
+    sd = stop_distance(df, 14, 1.5)
+    assert (sd.iloc[20:] > 0).all()
+    # дистанция стопа растёт с коэффициентом ATR
+    assert stop_distance(df, 14, 3.0).iloc[-1] > sd.iloc[-1]
+
+
+def test_risk_candle_pattern_helpers():
+    from trading_moex.app.risk import atr
+
+    import pandas as pd
+
+    close = [100.0] * 20
+    df = pd.DataFrame(
+        {"open": close, "high": [x + 1 for x in close], "low": [x - 1 for x in close], "close": close}
+    )
+    assert atr(df, 14).iloc[-1] > 0
+
+
+# ── Свечные паттерны / трендовый фильтр ─────────────────────────────────────
+
+def test_is_bullish_pinbar():
+    from trading_moex.app.signals import is_bearish_pinbar, is_bullish_pinbar
+
+    # молот: тело 0.2, нижняя тень 2.0 >= 2*тело, верхняя тень 0.1 <= тело
+    assert is_bullish_pinbar(10, 10.3, 8, 10.2, 2.0) is True
+    # падающая звезда: верхняя тень 0.5 >= 2*тело 0.2, нижняя тень мала
+    assert is_bearish_pinbar(10.2, 10.7, 10.1, 10.0, 2.0) is True
+    # обычная свеча — не пин-бар
+    assert is_bullish_pinbar(10, 10.3, 9.9, 10.2, 2.0) is False
+
+
+def test_is_bullish_engulfing():
+    from trading_moex.app.signals import is_bearish_engulfing, is_bullish_engulfing
+
+    # бычье поглощение: медвежья (110→105) поглощена бычьей (102→112)
+    assert is_bullish_engulfing(102, 113, 101, 112, 110, 105) is True
+    # медвежье поглощение: бычья (102→112) поглощена медвежьей (113→101)
+    assert is_bearish_engulfing(113, 114, 101, 101, 102, 112) is True
+    # тела не поглощаются
+    assert is_bullish_engulfing(106, 112, 104, 111, 110, 105) is False
+
+
+def test_pinbar_position_state():
+    import numpy as np
+
+    from trading_moex.app.signals import pinbar_position
+
+    n = 50
+    close = np.full(n, 100.0)
+    df = pd.DataFrame({"open": close, "high": close, "low": close, "close": close})
+    # бар 10 — молот: тело 0.2, нижняя тень 2.0, верхняя тень 0.1
+    df.loc[10, "open"] = 100.0
+    df.loc[10, "high"] = 100.3
+    df.loc[10, "low"] = 98.0
+    df.loc[10, "close"] = 100.2
+    pos = pinbar_position(df)
+    assert pos.iloc[10] == 1
+    assert pos.iloc[9] == 0
+
+
+def test_engulfing_position_state():
+    import numpy as np
+
+    from trading_moex.app.signals import engulfing_position
+
+    n = 30
+    close = np.full(n, 100.0)
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1, "close": close})
+    # бар 5: медвежий (101→99), бар 6: бычье поглощение (98→102, охват 97..103)
+    df.loc[5, "open"], df.loc[5, "close"] = 101.0, 99.0
+    df.loc[6, "open"], df.loc[6, "close"] = 98.0, 102.0
+    df.loc[6, "low"], df.loc[6, "high"] = 97.0, 103.0
+    pos = engulfing_position(df)
+    assert pos.iloc[6] == 1
+    assert pos.iloc[5] == 0
+
+
+def test_trend_filter_blocks_countertrend_entries():
+    import numpy as np
+
+    from trading_moex.app.signals import apply_trend_filter, rsi_position
+
+    n = 300
+    close = 200 - 0.4 * np.arange(n) + np.sin(np.arange(n) / 5) * 12
+    df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99, "close": close})
+    df.index = pd.date_range("2024-01-01", periods=n, freq="D")
+    pos = rsi_position(df, period=14, buy_threshold=30, sell_threshold=70)
+    assert int((pos.diff() == 1).sum()) >= 1  # RSI входит на просадках
+    filtered = apply_trend_filter(pos, df["close"], 200)
+    assert int((filtered.diff() == 1).sum()) == 0  # EMA200-фильтр блокирует
+
+
+def test_trend_filter_disabled():
+    import numpy as np
+
+    from trading_moex.app.signals import apply_trend_filter, rsi_position
+
+    n = 100
+    close = np.linspace(100, 150, n)
+    df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99, "close": close})
+    pos = rsi_position(df, period=14)
+    assert apply_trend_filter(pos, df["close"], 0).equals(pos)
+
+
+# ── Бэктест с риск-стратегиями ──────────────────────────────────────────────
+
+def test_backtest_smoke_with_risk_strategies():
+    import numpy as np
+    import pandas as pd
+
+    from trading_moex.app.backtest import run_backtest
+    from trading_moex.app.strategies import STRATEGIES
+
+    n = 200
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.linspace(100, 130, n) + np.sin(np.arange(n) / 7) * 3
+    df = pd.DataFrame(
+        {"open": close, "high": close * 1.01, "low": close * 0.99, "close": close, "volume": 1000.0},
+        index=idx,
+    )
+    for key in STRATEGIES:
+        params = {p["key"]: p["default"] for p in STRATEGIES[key]["params"]}
+        res = run_backtest(df, STRATEGIES[key]["cls"], params, cash=100_000, commission=0.0005)
+        assert "profit_factor" in res
+        assert "expectancy" in res
+        assert "longest_win_streak" in res
+        assert "n_bars" in res
+

@@ -41,7 +41,7 @@ def run_backtest(
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(_EquityCurve, _name="equity")
 
-    strat = cerebro.run()[0]
+    strat = cerebro.run(runonce=False)[0]
 
     initial = float(cash)
     final = float(strat.broker.getvalue())
@@ -58,6 +58,15 @@ def run_backtest(
     lost = int((ta.get("lost") or {}).get("total", 0))
     win_rate = round(won / total_trades * 100, 2) if total_trades else 0.0
 
+    won_pnl = float((ta.get("won") or {}).get("pnl", {}).get("total", 0.0) or 0.0)
+    lost_pnl = float((ta.get("lost") or {}).get("pnl", {}).get("total", 0.0) or 0.0)
+    avg_win = float((ta.get("won") or {}).get("pnl", {}).get("average", 0.0) or 0.0)
+    avg_loss = float((ta.get("lost") or {}).get("pnl", {}).get("average", 0.0) or 0.0)
+    profit_factor = round(won_pnl / abs(lost_pnl), 2) if lost_pnl else (None if won_pnl else 0.0)
+    expectancy = (win_rate / 100) * avg_win - (1 - win_rate / 100) * abs(avg_loss)
+    longest_win_streak = int((ta.get("streak") or {}).get("longest", {}).get("won", 0))
+    longest_loss_streak = int((ta.get("streak") or {}).get("longest", {}).get("lost", 0))
+
     equity = strat.analyzers.equity.curve or [[str(df.index[0]), round(initial, 2)]]
     trades = getattr(strat, "recorded_trades", [])[-100:]
 
@@ -71,6 +80,12 @@ def run_backtest(
         "trades_won": won,
         "trades_lost": lost,
         "win_rate_pct": win_rate,
+        "profit_factor": profit_factor,
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "expectancy": round(expectancy, 2),
+        "longest_win_streak": longest_win_streak,
+        "longest_loss_streak": longest_loss_streak,
         "n_bars": int(len(df)),
         "equity_curve": equity,
         "trades": trades,

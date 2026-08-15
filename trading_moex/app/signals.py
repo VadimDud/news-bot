@@ -64,10 +64,106 @@ def donchian_position(df: pd.DataFrame, period: int = 20) -> pd.Series:
     return pd.Series(pos, index=df.index)
 
 
+# ── Трендовый фильтр ────────────────────────────────────────────────────────
+
+def apply_trend_filter(
+    position: pd.Series, close: pd.Series, trend_period: int = 200
+) -> pd.Series:
+    """Торговать только по тренду: длинные позиции разрешены выше EMA.
+
+    ``trend_period <= 0`` — фильтр выключен. Правило Карен Фу: покупки только
+    выше скользящей средней (по умолчанию EMA 200).
+    """
+    if not trend_period or trend_period <= 0:
+        return position
+    ema = close.ewm(span=trend_period, adjust=False).mean()
+    filtered = position.copy()
+    filtered[close < ema] = 0
+    return filtered
+
+
+# ── Свечные паттерны ────────────────────────────────────────────────────────
+
+def _body(o: float, c: float) -> float:
+    return abs(c - o)
+
+
+def _lower_wick(o: float, h: float, l: float, c: float) -> float:
+    return min(o, c) - l
+
+
+def _upper_wick(o: float, h: float, l: float, c: float) -> float:
+    return h - max(o, c)
+
+
+def is_bullish_pinbar(o: float, h: float, l: float, c: float, wick_ratio: float = 2.0) -> bool:
+    """Молот: тело в верхней части, длинная нижняя тень >= wick_ratio * тело."""
+    body = _body(o, c)
+    if body <= 0:
+        return False
+    return _lower_wick(o, h, l, c) >= wick_ratio * body and _upper_wick(o, h, l, c) <= body
+
+
+def is_bearish_pinbar(o: float, h: float, l: float, c: float, wick_ratio: float = 2.0) -> bool:
+    """Падающая звезда: тело в нижней части, длинная верхняя тень."""
+    body = _body(o, c)
+    if body <= 0:
+        return False
+    return _upper_wick(o, h, l, c) >= wick_ratio * body and _lower_wick(o, h, l, c) <= body
+
+
+def is_bullish_engulfing(o: float, h: float, l: float, c: float, po: float, pc: float) -> bool:
+    """Бычье поглощение: тело текущей бычьей свечи полностью поглощает тело предыдущей."""
+    prev_bear = pc < po
+    cur_bull = c > o
+    return prev_bear and cur_bull and min(o, c) < min(po, pc) and max(o, c) > max(po, pc)
+
+
+def is_bearish_engulfing(o: float, h: float, l: float, c: float, po: float, pc: float) -> bool:
+    prev_bull = pc > po
+    cur_bear = c < o
+    return prev_bull and cur_bear and min(o, c) < min(po, pc) and max(o, c) > max(po, pc)
+
+
+def pinbar_position(df: pd.DataFrame, wick_ratio: float = 2.0) -> pd.Series:
+    """Вход на бычьем пин-баре (молот), выход на медвежьем (падающая звезда)."""
+    o, h, l, c = df["open"].values, df["high"].values, df["low"].values, df["close"].values
+    pos = np.zeros(len(df), dtype=int)
+    cur = 0
+    for i in range(1, len(df)):
+        if cur == 0:
+            if is_bullish_pinbar(o[i], h[i], l[i], c[i], wick_ratio):
+                cur = 1
+        elif is_bearish_pinbar(o[i], h[i], l[i], c[i], wick_ratio):
+            cur = 0
+        pos[i] = cur
+    return pd.Series(pos, index=df.index)
+
+
+def engulfing_position(df: pd.DataFrame) -> pd.Series:
+    """Вход на бычьем поглощении, выход на медвежьем поглощении."""
+    o = df["open"].values
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+    pos = np.zeros(len(df), dtype=int)
+    cur = 0
+    for i in range(1, len(df)):
+        if cur == 0:
+            if is_bullish_engulfing(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1]):
+                cur = 1
+        elif is_bearish_engulfing(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1]):
+            cur = 0
+        pos[i] = cur
+    return pd.Series(pos, index=df.index)
+
+
 SIGNAL_FUNCS = {
     "sma_cross": sma_cross_position,
     "rsi": rsi_position,
     "donchian": donchian_position,
+    "pinbar": pinbar_position,
+    "engulfing": engulfing_position,
 }
 
 

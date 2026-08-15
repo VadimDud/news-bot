@@ -92,6 +92,15 @@ async def _auth_middleware(request: web.Request, handler) -> web.StreamResponse:
     return await handler(request)
 
 
+@web.middleware
+async def _no_cache_middleware(request: web.Request, handler) -> web.StreamResponse:
+    """HTML-страницы не кэшируются браузером — иначе не видны свежие правки шаблонов."""
+    resp = await handler(request)
+    if not request.path.startswith("/static") and resp.content_type == "text/html":
+        resp.headers.setdefault("Cache-Control", "no-cache, no-store, must-revalidate")
+    return resp
+
+
 def _error_page(request: web.Request, message: str) -> web.Response:
     return aiohttp_jinja2.render_template("error.html", request, {"error": message})
 
@@ -533,7 +542,7 @@ TICKER_INTERVAL_LABELS = {
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[_auth_middleware])
+    app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
         app,
         loader=jinja2.FileSystemLoader(str(_TEMPLATES_DIR)),

@@ -37,6 +37,12 @@ _MAX_BATCH = 5000
 # Поэтому для них запрашиваем нативные 1min и ресэмплим сами через pandas.
 RESAMPLE_FROM_1MIN = {"5min": "5min", "15min": "15min", "30min": "30min"}
 
+# Известные переименования/делистинги (подсказка в тексте ошибки).
+# Проверено 2026-08: FIVE (X5 Group) и остальные тикеры каталога торгуются.
+DELISTED_HINTS = {
+    "YNDX": "Актуальный тикер — YDEX (МКПАО «Яндекс»).",
+}
+
 
 def _resample_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Ресэмпл 1-минутных свечей (begin) в более крупный таймфрейм.
@@ -171,10 +177,14 @@ def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: b
 
     out = storage.get_candles(ticker, period, start=start, end=end)
     if out.empty:
-        raise ValueError(
+        msg = (
             f"MOEX не вернул данных по {ticker} за {start.isoformat()}..{end.isoformat()}. "
             "Проверьте тикер и даты — возможно, бумага делистингована или не торговалась в этот период."
         )
+        hint = DELISTED_HINTS.get(ticker.upper())
+        if hint:
+            msg += f"\n{hint}"
+        raise ValueError(msg)
     return normalize_history(out)
 
 

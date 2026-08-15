@@ -554,8 +554,23 @@ def test_fetch_history_empty_moex_raises_clear_error(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CANDLE_CACHE_DIR", tmp_path / "candles")
     storage.init_db()
     monkeypatch.setattr(moex_data, "_fetch_raw", lambda *a, **k: [])
-    with pytest.raises(ValueError, match="не вернул данных.*делистингована"):
+    with pytest.raises(ValueError, match="(?s)не вернул данных.*делистингована.*YDEX"):
         moex_data.fetch_history("YNDX", "15min", d(2025, 8, 15), d(2026, 8, 15), use_cache=False)
+
+
+def test_fetch_history_empty_unknown_ticker_without_hint(tmp_path, monkeypatch):
+    from datetime import date as d
+
+    from trading_moex.app import config, data as moex_data, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    monkeypatch.setattr(config, "CANDLE_CACHE_DIR", tmp_path / "candles")
+    storage.init_db()
+    monkeypatch.setattr(moex_data, "_fetch_raw", lambda *a, **k: [])
+    with pytest.raises(ValueError) as exc:
+        moex_data.fetch_history("SBER", "15min", d(2025, 8, 15), d(2026, 8, 15), use_cache=False)
+    assert "YDEX" not in str(exc.value)
 
 
 def test_fetch_history_resamples_non_native_period(tmp_path, monkeypatch):

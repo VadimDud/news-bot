@@ -42,7 +42,7 @@ AVAILABLE_TICKERS: list[dict[str, str]] = [
     {"ticker": "TCSG", "name": "Т-Технологии"},
     {"ticker": "TRMK", "name": "ТМК"},
     {"ticker": "VKCO", "name": "VK"},
-    {"ticker": "YNDX", "name": "Яндекс"},
+    {"ticker": "YDEX", "name": "Яндекс (МКПАО)"},
     {"ticker": "AFLT", "name": "Аэрофлот"},
     {"ticker": "BANE", "name": "Башнефть"},
     {"ticker": "BANEP", "name": "Башнефть (прив.)"},

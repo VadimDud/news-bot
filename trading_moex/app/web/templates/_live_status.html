@@ -1,0 +1,73 @@
+<div class="card">
+  <h3>Состояние</h3>
+  {% if status.running %}
+  <span class="chip ok">● цикл работает</span>
+  {% else %}
+  <span class="chip">○ цикл остановлен</span>
+  {% endif %}
+  <span class="chip {{ 'warn' if status.dry_run else 'danger' }}">{{ 'dry-run' if status.dry_run else 'LIVE' }}</span>
+  <span class="chip">обновление: {{ status.last_update[:19].replace('T', ' ') if status.last_update else '—' }}</span>
+  {% if status.last_error %}<div class="notice error" style="margin-top:10px;">{{ status.last_error }}</div>{% endif %}
+</div>
+
+<div class="card">
+  <h3>Котировки и сигналы</h3>
+  {% if status.prices %}
+  <table>
+    <thead><tr><th>Тикер</th><th>Цена</th><th>Сигнал</th></tr></thead>
+    <tbody>
+      {% for p in status.prices %}
+      <tr>
+        <td>{{ p.ticker }}</td>
+        <td>{{ p.price }}</td>
+        <td>
+          {% set s = status.signals.get(p.ticker, '—') %}
+          {% if s == 'buy' %}<span class="chip ok">BUY</span>
+          {% elif s == 'sell' %}<span class="chip danger">SELL</span>
+          {% else %}<span class="chip">hold</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Нет данных (запустите цикл).</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Позиции</h3>
+  {% if status.portfolio %}
+  <table>
+    <thead><tr><th>FIGI</th><th>Кол-во</th><th>Цена</th><th>PNL, ₽</th></tr></thead>
+    <tbody>
+      {% for p in status.portfolio %}
+      <tr>
+        <td>{{ p.figi }}</td>
+        <td>{{ p.quantity }}</td>
+        <td>{{ p.price }}</td>
+        <td class="{{ 'pos' if p.pnl >= 0 else 'neg' }}">{{ '%+.2f' % p.pnl }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Позиций нет.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Журнал</h3>
+  {% if status.log %}
+  <table>
+    <thead><tr><th>Время</th><th>Событие</th></tr></thead>
+    <tbody>
+      {% for e in status.log|reverse %}
+      <tr><td>{{ e.time[:19].replace('T', ' ') }}</td><td>{{ e.message }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Журнал пуст.</div>
+  {% endif %}
+</div>

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Бэктест #{{ run.id }}{% endblock %}
+{% block content %}
+<p><a class="btn secondary" href="/">← К списку</a></p>
+
+{% if run.status == 'error' %}
+<div class="notice error">Ошибка бэктеста: {{ run.error }}</div>
+{% elif run.status == 'running' %}
+<div class="notice warn">Бэктест выполняется... <a href="/backtest/{{ run.id }}">Обновить</a></div>
+{% else %}
+
+<div class="card">
+  <h2>Результат бэктеста #{{ run.id }}</h2>
+  <p class="hint">
+    {{ run.ticker }} · {{ run.period }} · {{ run.strategy }} ·
+    {{ run.start_date }} → {{ run.end_date }} ·
+    параметры: {{ run.params }}
+  </p>
+  <div class="metrics">
+    <div class="metric"><div class="label">Доходность</div>
+      <div class="value {{ 'pos' if result.total_return_pct >= 0 else 'neg' }}">{{ '%+.2f' % result.total_return_pct }}%</div></div>
+    <div class="metric"><div class="label">Итоговый капитал</div>
+      <div class="value">{{ '%.0f' % result.final_value }} ₽</div></div>
+    <div class="metric"><div class="label">Max просадка</div>
+      <div class="value neg">{{ result.max_drawdown_pct }}%</div></div>
+    <div class="metric"><div class="label">Sharpe</div>
+      <div class="value">{{ result.sharpe if result.sharpe is not none else '—' }}</div></div>
+    <div class="metric"><div class="label">Сделок</div>
+      <div class="value">{{ result.trades_total }} <span style="font-size:12px;color:var(--muted)">(win {{ result.win_rate_pct }}%)</span></div></div>
+    <div class="metric"><div class="label">Баров</div>
+      <div class="value">{{ result.n_bars }}</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Кривая капитала</h2>
+  <canvas id="equity" height="120"></canvas>
+</div>
+
+<div class="card">
+  <h2>Последние сделки</h2>
+  {% if result.trades %}
+  <table>
+    <thead><tr><th>#</th><th>Дата</th><th>Статус</th><th>PNL, ₽</th></tr></thead>
+    <tbody>
+      {% for t in result.trades %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ t.traded }}</td>
+        <td>{{ t.status }}</td>
+        <td class="{{ 'pos' if t.pnl >= 0 else 'neg' }}">{{ '%+.2f' % t.pnl }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Сделок не было.</div>
+  {% endif %}
+</div>
+
+<script>
+const equityData = {{ equity_json | safe }};
+new Chart(document.getElementById("equity"), {
+  type: "line",
+  data: {
+    labels: equityData.map(p => p[0]),
+    datasets: [{ label: "Капитал, ₽", data: equityData.map(p => p[1]), borderColor: "#4f8cff", backgroundColor: "rgba(79,140,255,.1)", fill: true, tension: .2, pointRadius: 0 }]
+  },
+  options: {
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: { x: { ticks: { color: "#9aa3b8", maxTicksLimit: 10 } }, y: { ticks: { color: "#9aa3b8" } } }
+  }
+});
+</script>
+{% endif %}
+{% endblock %}

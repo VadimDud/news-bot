@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}MOEX Trader{% endblock %}</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0f1420;
+  --panel: #171d2e;
+  --border: #262e45;
+  --text: #e6e9f2;
+  --muted: #9aa3b8;
+  --accent: #4f8cff;
+  --accent-hover: #3a74e0;
+  --danger: #ff5d5d;
+  --ok: #3ecf8e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+header .logo { font-weight: 700; font-size: 18px; }
+nav { display: flex; gap: 8px; }
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+nav a.active, nav a:hover { background: rgba(79,140,255,.15); color: var(--accent); }
+header form { margin-left: auto; }
+main { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.card h2 { margin: 0 0 10px; font-size: 18px; }
+.card h3 { margin: 0 0 8px; font-size: 15px; color: var(--muted); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+label { display: block; margin: 12px 0 6px; font-weight: 600; font-size: 14px; }
+input[type=text], input[type=number], input[type=date], select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+}
+.hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+button, .btn {
+  display: inline-block;
+  padding: 10px 18px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  margin-top: 16px;
+}
+button:hover, .btn:hover { background: var(--accent-hover); }
+button.secondary, .btn.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+button.secondary:hover, .btn.secondary:hover { background: var(--border); }
+button.danger, .btn.danger { background: var(--danger); }
+button.link {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+button.link:hover { color: var(--text); }
+.chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(79,140,255,.15);
+  color: var(--accent);
+  font-size: 12px;
+}
+.chip.ok { background: rgba(62,207,142,.15); color: var(--ok); }
+.chip.warn { background: rgba(255,165,0,.15); color: #ffc45c; }
+.chip.danger { background: rgba(255,93,93,.15); color: var(--danger); }
+.empty { color: var(--muted); text-align: center; padding: 30px 0; }
+.notice {
+  padding: 12px 16px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.notice.warn { background: rgba(255,165,0,.12); border: 1px solid rgba(255,165,0,.4); color: #ffc45c; }
+.notice.error { background: rgba(255,93,93,.12); border: 1px solid var(--danger); color: var(--danger); }
+.notice.ok { background: rgba(62,207,142,.12); border: 1px solid var(--ok); color: var(--ok); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 600; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.metric {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+.metric .value { font-size: 20px; font-weight: 700; }
+.metric .value.pos { color: var(--ok); }
+.metric .value.neg { color: var(--danger); }
+.metric .label { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">🤖 MOEX Trader</span>
+  <nav>
+    <a href="/" class="{{ 'active' if request.path == '/' }}">Бэктест</a>
+    <a href="/live" class="{{ 'active' if request.path == '/live' }}">Live</a>
+  </nav>
+  <form method="post" action="/logout">
+    <button class="link" type="submit">Выйти</button>
+  </form>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

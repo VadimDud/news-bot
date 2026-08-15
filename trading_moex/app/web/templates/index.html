@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Бэктест — MOEX Trader{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Бэктест стратегии на истории MOEX</h2>
+  <p class="hint">Данные: AlgoPack (moexalgo), движок: Backtrader. Обычные свечи доступны без авторизации.</p>
+  <form method="post" action="/backtest/run">
+    <div class="grid">
+      <div>
+        <label for="ticker">Тикер (MOEX)</label>
+        <input type="text" id="ticker" name="ticker" value="SBER" placeholder="SBER, LKOH, GMKN..." required>
+      </div>
+      <div>
+        <label for="period">Таймфрейм</label>
+        <select id="period" name="period">
+          {% for key in periods %}
+          <option value="{{ key }}" {{ 'selected' if key == '1day' }}>{{ key }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="strategy">Стратегия</label>
+        <select id="strategy" name="strategy">
+          {% for key, info in strategies.items() %}
+          <option value="{{ key }}">{{ info.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="cash">Стартовый капитал, ₽</label>
+        <input type="number" id="cash" name="cash" value="100000" min="1" step="any">
+      </div>
+    </div>
+    <div class="grid">
+      <div>
+        <label for="start">С даты</label>
+        <input type="date" id="start" name="start" value="{{ year_ago }}">
+      </div>
+      <div>
+        <label for="end">По дату</label>
+        <input type="date" id="end" name="end" value="{{ today }}">
+      </div>
+      <div>
+        <label for="commission">Комиссия, доля (0.0005 = 0.05%)</label>
+        <input type="number" id="commission" name="commission" value="0.0005" min="0" step="any">
+      </div>
+    </div>
+    <div id="params">
+      {% for key, info in strategies.items() %}
+      <div class="grid" data-strategy-params="{{ key }}" {% if not loop.first %}style="display:none"{% endif %}>
+        {% for p in info.params %}
+        <div>
+          <label for="p_{{ key }}_{{ p.key }}">{{ p.label }}</label>
+          <input type="number" id="p_{{ key }}_{{ p.key }}" name="{{ p.key }}" value="{{ p.default }}" step="any">
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    <button type="submit">Запустить бэктест</button>
+  </form>
+</div>
+
+<script>
+const sel = document.getElementById("strategy");
+function showParams() {
+  document.querySelectorAll("[data-strategy-params]").forEach(el => {
+    el.style.display = (el.dataset.strategyParams === sel.value) ? "grid" : "none";
+  });
+}
+sel.addEventListener("change", showParams);
+showParams();
+</script>
+
+<div class="card">
+  <h2>История бэктестов</h2>
+  {% if runs %}
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Тикер</th><th>Таймфрейм</th><th>Стратегия</th><th>Статус</th><th>Доходность</th><th>Дата</th></tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td><a href="/backtest/{{ r.id }}">#{{ r.id }}</a></td>
+        <td>{{ r.ticker }}</td>
+        <td>{{ r.period }}</td>
+        <td>{{ r.strategy }}</td>
+        <td>
+          {% if r.status == 'done' %}<span class="chip ok">готово</span>
+          {% elif r.status == 'error' %}<span class="chip danger">ошибка</span>
+          {% else %}<span class="chip warn">выполняется</span>{% endif %}
+        </td>
+        <td>
+          {% if r.result %}
+            {% set tr = r.result.total_return_pct %}
+            <span class="{{ 'pos' if tr >= 0 else 'neg' }}">{{ '%+.2f' % tr }}%</span>
+          {% else %}—{% endif %}
+        </td>
+        <td>{{ r.created_at[:16].replace('T', ' ') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Бэктесты ещё не запускались.</div>
+  {% endif %}
+</div>
+{% endblock %}

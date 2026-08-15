@@ -1,0 +1,76 @@
+"""Юнит-тесты торгового модуля: сигналы на синтетических данных."""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from trading_moex.app.signals import (
+    donchian_position,
+    rsi_position,
+    signal_from_position,
+    sma_cross_position,
+)
+
+
+def make_df(close_values):
+    n = len(close_values)
+    idx = pd.date_range("2025-01-01", periods=n, freq="D")
+    close = np.asarray(close_values, dtype=float)
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": 1000.0,
+        },
+        index=idx,
+    )
+
+
+def test_sma_cross_position_up_then_down():
+    df = make_df(list(range(50)))
+    pos = sma_cross_position(df, fast=5, slow=10)
+    assert pos.iloc[0] == 0
+    assert pos.iloc[-1] == 1
+
+
+def test_sma_cross_flat_market_no_position():
+    df = make_df([100.0] * 40)
+    pos = sma_cross_position(df, fast=5, slow=10)
+    assert (pos == 0).all()
+
+
+def test_rsi_position_oversold_enter_overbought_exit():
+    # Падение до перепроданности (вход), потом рост до перекупленности (выход)
+    values = list(np.linspace(100, 80, 20)) + list(np.linspace(80, 120, 30))
+    df = make_df(values)
+    pos = rsi_position(df, period=14, buy_threshold=40, sell_threshold=60)
+    arr = pos.to_numpy()
+    assert arr[0] == 0
+    assert arr.max() == 1  # вошли в позицию на перепроданности
+    assert arr[-1] == 0  # вышли на перекупленности
+
+
+def test_donchian_breakout():
+    flat = [100.0] * 25
+    df = make_df(flat + [105.0, 106.0])
+    pos = donchian_position(df, period=20)
+    assert pos.iloc[-1] == 1
+    assert pos.iloc[24] == 0
+
+
+def test_signal_from_position():
+    assert signal_from_position(pd.Series([0, 0, 0])) == "hold"
+    assert signal_from_position(pd.Series([0, 1])) == "buy"
+    assert signal_from_position(pd.Series([1, 0])) == "sell"
+    assert signal_from_position(pd.Series([1, 1])) == "hold"
+    assert signal_from_position(pd.Series([1])) == "hold"
+
+
+def test_rsi_bounds():
+    df = make_df(list(np.linspace(100, 80, 50)))
+    from trading_moex.app.signals import rsi
+
+    values = rsi(df["close"], 14)
+    assert values.between(0, 100).all()

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Live — MOEX Trader{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Live-торговля (T-Bank Invest API)</h2>
+  <p class="hint">
+    Сигналы считаются на свежих свечах, ордера выставляются через T-Bank.
+    Реальный режим включается только через TRADER_DRY_RUN=false или переключателем ниже.
+  </p>
+  {% if not has_token %}
+  <div class="notice warn">TINKOFF_API_TOKEN не задан — live-цикл недоступен (работает только бэктест).</div>
+  {% endif %}
+  <div class="grid">
+    <div>
+      <label for="lstrategy">Стратегия</label>
+      <select id="lstrategy" name="strategy" hx-post="/live/strategy" hx-target="#live-msg" hx-swap="innerHTML">
+        {% for key, info in strategies.items() %}
+        <option value="{{ key }}" {{ 'selected' if status.strategy == key }}>{{ info.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Режим</label>
+      <form hx-post="/live/dryrun" hx-target="#live-msg" hx-swap="innerHTML" style="display:flex;gap:8px;align-items:center;margin-top:6px;">
+        <select name="dry_run">
+          <option value="true" {{ 'selected' if status.dry_run }}>Dry-run (без ордеров)</option>
+          <option value="false" {{ 'selected' if not status.dry_run }}>LIVE (реальные ордера)</option>
+        </select>
+        <button type="submit" class="secondary" style="margin:0;">Применить</button>
+      </form>
+    </div>
+  </div>
+  <div id="live-msg" style="margin-top:10px;"></div>
+  <div style="display:flex;gap:8px;margin-top:8px;">
+    {% if status.running %}
+    <button hx-post="/live/stop" hx-target="#live-msg" hx-swap="innerHTML" class="danger">⏹ Остановить</button>
+    {% else %}
+    <button hx-post="/live/start" hx-target="#live-msg" hx-swap="innerHTML">▶ Запустить</button>
+    {% endif %}
+  </div>
+</div>
+
+<div id="live-status"
+     hx-get="/live/data" hx-trigger="every 5s" hx-swap="innerHTML">
+  {% include "_live_status.html" %}
+</div>
+{% endblock %}

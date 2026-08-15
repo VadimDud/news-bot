@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Вход — MOEX Trader{% endblock %}
+{% block content %}
+<div class="card" style="max-width:400px;margin:80px auto;">
+  <h2>Вход в дашборд</h2>
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <label for="password">Пароль (TRADER_WEB_PASSWORD)</label>
+    <input type="password" id="password" name="password" required autofocus>
+    <button type="submit">Войти</button>
+  </form>
+</div>
+{% endblock %}

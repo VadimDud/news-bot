@@ -1,0 +1,17 @@
+moexalgo
+backtrader
+numpy
+pandas
+matplotlib
+websockets
+requests
+aiohttp
+aiohttp-jinja2
+jinja2
+python-dotenv
+cachetools
+deprecation
+grpcio
+protobuf
+python-dateutil
+pytest-asyncio

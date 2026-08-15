@@ -1,4 +1,31 @@
 services:
+  moex-trader:
+    build: ./trading_moex
+    container_name: moex-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TRADER_DRY_RUN: "${TRADER_DRY_RUN:-true}"
+      TRADER_POLL_INTERVAL: "${TRADER_POLL_INTERVAL:-60}"
+      TRADER_WATCH_TICKERS: "${TRADER_WATCH_TICKERS:-SBER,LKOH}"
+      TRADER_WEB_PORT: "${TRADER_WEB_PORT:-8081}"
+      TRADER_WEB_PASSWORD: "${TRADER_WEB_PASSWORD:-}"
+      TRADER_QUANTITY: "${TRADER_QUANTITY:-1}"
+      TRADER_LIVE_INTERVAL: "${TRADER_LIVE_INTERVAL:-hour}"
+      TINKOFF_API_TOKEN: "${TINKOFF_API_TOKEN:-}"
+      MOEX_LOGIN: "${MOEX_LOGIN:-}"
+      MOEX_PASSWORD: "${MOEX_PASSWORD:-}"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./dbdata/trader:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   bot:
     build: .
     container_name: tech-news-bot

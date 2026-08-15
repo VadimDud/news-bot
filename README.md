@@ -117,6 +117,27 @@ python web_app.py
 docker compose up -d
 ```
 
+## MOEX-торговый робот (контейнер `moex-trader`)
+
+Отдельный контейнер в `trading_moex/` для бэктеста стратегий на истории Московской
+биржи (AlgoPack / `moexalgo`, движок Backtrader) и live-торговли через
+T-Bank Invest API (`tinkoff-invest`).
+
+- **Бэктест**: `GET/POST` в веб-дашборде — тикер (SBER, LKOH, ...), таймфрейм,
+  период, стратегия (SMA Cross / RSI / Donchian), капитал и комиссия. Результат:
+  доходность, max просадка, Sharpe, список сделок, кривая капитала (Chart.js).
+- **Live**: цикл опроса котировок T-Bank, сигнал по выбранной стратегии, ордера
+  через `OrdersService`. По умолчанию **dry-run** (`TRADER_DRY_RUN=true`) — реальные
+  ордера выставляются только при явном отключении.
+- **Веб-дашборд**: `http://<host>:8081` (порт настраивается `TRADER_WEB_PORT`),
+  вход по паролю `TRADER_WEB_PASSWORD`.
+
+Переменные окружения — блок `MOEX trading bot` в `.env` / `.env.example`:
+`TINKOFF_API_TOKEN`, `TRADER_DRY_RUN`, `TRADER_POLL_INTERVAL`,
+`TRADER_WATCH_TICKERS`, `TRADER_QUANTITY`, `TRADER_LIVE_INTERVAL`,
+`TRADER_WEB_HOST/PORT/PASSWORD`, `MOEX_LOGIN/MOEX_PASSWORD` (только для
+Super Candles, обычные свечи доступны без авторизации).
+
 ## Тесты
 
 ```bash

@@ -29,6 +29,35 @@ CACHE_TTL_SECONDS = 24 * 3600
 
 _MAX_BATCH = 5000
 
+# Таймфреймы без нативного интервала на MOEX: moexalgo качает 1-минутные свечи
+# и ресэмплит сам, но его resample падает с AttributeError на пустых данных.
+# Поэтому для них запрашиваем нативные 1min и ресэмплим сами через pandas.
+RESAMPLE_FROM_1MIN = {"5min": "5min", "15min": "15min"}
+
+
+def _resample_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Ресэмпл 1-минутных свечей (begin) в более крупный таймфрейм.
+
+    Границы бакетов от полуночи, метка = начало бакета — как у moexalgo.
+    Пустые бакеты (неторговые паузы) отбрасываются.
+    """
+    out = df.copy()
+    out["begin"] = pd.to_datetime(out["begin"])
+    return (
+        out.set_index("begin")
+        .resample(rule, closed="left", label="left")
+        .agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            volume=("volume", "sum"),
+            value=("value", "sum"),
+        )
+        .dropna()
+        .reset_index()
+    )
+
 
 def _ensure_login():
     login_value = settings.moex_login()
@@ -60,6 +89,25 @@ def _cache_path(ticker: str, period: str, start: date, end: date) -> Path:
     return config.CANDLE_CACHE_DIR / f"{ticker}_{period}_{start.isoformat()}_{end.isoformat()}.csv"
 
 
+def _fetch_raw(ticker: str, period: str, start: date, end: date) -> list[dict]:
+    """Свечи с MOEX через moexalgo (нативный таймфрейм, без ресэмпла)."""
+    from moexalgo import Ticker
+
+    ticker_obj = Ticker(ticker)
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        raw = ticker_obj.candles(start, end, period=period, offset=offset)
+        batch = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
+        if batch.empty:
+            break
+        rows.extend(batch.to_dict("records"))
+        if len(batch) < _MAX_BATCH:
+            break
+        offset += len(batch)
+    return rows
+
+
 def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: bool = True) -> pd.DataFrame:
     """Исторические свечи с MOEX. Кэш действителен 24 часа.
 
@@ -70,6 +118,7 @@ def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: b
     if start >= end:
         raise ValueError("Дата начала должна быть раньше даты окончания")
     moex_period = PERIODS[period]
+    request_period = "1min" if period in RESAMPLE_FROM_1MIN else moex_period
 
     cache_path = _cache_path(ticker, period, start, end)
     if use_cache and cache_path.exists():
@@ -79,26 +128,17 @@ def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: b
             logger.info("Данные из кэша: %s", cache_path.name)
             return normalize_history(df)
 
-    from moexalgo import Ticker
-
     _ensure_login()
     logger.info("Загрузка %s %s [%s .. %s] с MOEX", ticker, period, start, end)
-    ticker_obj = Ticker(ticker)
-    rows: list[dict] = []
-    offset = 0
-    while True:
-        raw = ticker_obj.candles(start, end, period=moex_period, offset=offset)
-        batch = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
-        if batch.empty:
-            break
-        rows.extend(batch.to_dict("records"))
-        if len(batch) < _MAX_BATCH:
-            break
-        offset += len(batch)
-
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(_fetch_raw(ticker, request_period, start, end))
     if df.empty:
-        raise ValueError(f"MOEX не вернул данных по {ticker} за указанный период")
+        raise ValueError(
+            f"MOEX не вернул данных по {ticker} за {start.isoformat()}..{end.isoformat()}. "
+            "Проверьте тикер и даты — возможно, бумага делистингована или не торговалась в этот период."
+        )
+
+    if period in RESAMPLE_FROM_1MIN:
+        df = _resample_candles(df, RESAMPLE_FROM_1MIN[period])
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(cache_path, index=False)

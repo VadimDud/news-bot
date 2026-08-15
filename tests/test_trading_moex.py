@@ -478,3 +478,116 @@ async def test_data_download_route(tmp_path, monkeypatch):
     finally:
         await client.close()
 
+
+# ── MOEX данные: ресэмпл и пустые ответы ─────────────────────────────────────
+
+def test_resample_candles_1min_to_15min():
+    from trading_moex.app.data import _resample_candles
+
+    t0 = pd.Timestamp("2026-07-01 07:00:00")
+    rows = []
+    for i in range(45):
+        ts = t0 + pd.Timedelta(minutes=i)
+        rows.append(
+            {
+                "begin": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": (ts + pd.Timedelta(seconds=59)).strftime("%Y-%m-%d %H:%M:%S"),
+                "open": 100.0 + i,
+                "high": 101.0 + i,
+                "low": 99.0 + i,
+                "close": 100.5 + i,
+                "volume": 10,
+                "value": 1000.0,
+            }
+        )
+    out = _resample_candles(pd.DataFrame(rows), "15min")
+    assert len(out) == 3
+    first = out.iloc[0]
+    assert first["begin"] == t0
+    assert first["open"] == 100.0
+    assert first["close"] == 114.5  # close последней минуты бакета (i=14)
+    assert first["high"] == 115.0
+    assert first["low"] == 99.0
+    assert first["volume"] == 150
+    assert out.iloc[-1]["begin"] == t0 + pd.Timedelta(minutes=30)
+
+
+def test_resample_candles_skips_empty_buckets():
+    from trading_moex.app.data import _resample_candles
+
+    t0 = pd.Timestamp("2026-07-01 07:00:00")
+    rows = [
+        {
+            "begin": t0.strftime("%Y-%m-%d %H:%M:%S"),
+            "end": (t0 + pd.Timedelta(seconds=59)).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+            "volume": 10, "value": 1000.0,
+        },
+        {
+            # следующая свеча — через час (обеденный перерыв MOEX): пустые бакеты между ними
+            "begin": (t0 + pd.Timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "end": (t0 + pd.Timedelta(hours=1, seconds=59)).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.5,
+            "volume": 10, "value": 1000.0,
+        },
+    ]
+    out = _resample_candles(pd.DataFrame(rows), "15min")
+    assert len(out) == 2
+    assert (out["volume"] == 10).all()
+
+
+def test_fetch_history_empty_moex_raises_clear_error(tmp_path, monkeypatch):
+    from datetime import date as d
+
+    from trading_moex.app import config, data as moex_data, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    monkeypatch.setattr(config, "CANDLE_CACHE_DIR", tmp_path / "candles")
+    storage.init_db()
+    monkeypatch.setattr(moex_data, "_fetch_raw", lambda *a, **k: [])
+    with pytest.raises(ValueError, match="не вернул данных.*делистингована"):
+        moex_data.fetch_history("YNDX", "15min", d(2025, 8, 15), d(2026, 8, 15), use_cache=False)
+
+
+def test_fetch_history_resamples_non_native_period(tmp_path, monkeypatch):
+    from datetime import date as d
+
+    from trading_moex.app import config, data as moex_data, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    monkeypatch.setattr(config, "CANDLE_CACHE_DIR", tmp_path / "candles")
+    storage.init_db()
+
+    t0 = pd.Timestamp("2026-07-01 07:00:00")
+    rows = []
+    for i in range(30):
+        ts = t0 + pd.Timedelta(minutes=i)
+        rows.append(
+            {
+                "begin": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": (ts + pd.Timedelta(seconds=59)).strftime("%Y-%m-%d %H:%M:%S"),
+                "open": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i,
+                "close": 100.5 + i, "volume": 10, "value": 1000.0,
+            }
+        )
+    requested_periods = []
+    monkeypatch.setattr(
+        moex_data,
+        "_fetch_raw",
+        lambda ticker, period, start, end: (requested_periods.append(period), rows)[1],
+    )
+
+    df = moex_data.fetch_history("SBER", "15min", d(2026, 7, 1), d(2026, 7, 2), use_cache=False)
+    assert requested_periods == ["1min"]  # качаем нативные 1min, ресэмплим сами
+    assert len(df) == 2
+    assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+    assert df.index[0] == t0  # datetime-индекс для backtrader
+
+    # нативный период идёт как есть, без ресэмпла
+    requested_periods.clear()
+    df = moex_data.fetch_history("SBER", "1day", d(2026, 7, 1), d(2026, 7, 2), use_cache=False)
+    assert requested_periods == ["1D"]
+    assert len(df) == len(rows)
+

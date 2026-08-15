@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import config
+from . import settings
 
 logger = logging.getLogger("moex_trader.data")
 
@@ -30,11 +31,13 @@ _MAX_BATCH = 5000
 
 
 def _ensure_login():
-    if config.MOEX_LOGIN and config.MOEX_PASSWORD:
+    login_value = settings.moex_login()
+    password_value = settings.moex_password()
+    if login_value and password_value:
         try:
             from moexalgo.session import authorize
 
-            authorize(config.MOEX_LOGIN, config.MOEX_PASSWORD)
+            authorize(login_value, password_value)
             logger.info("Авторизован на moex.com (Super Candles доступны)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось авторизоваться на moex.com: %s", exc)

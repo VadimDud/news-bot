@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from . import config
+from . import settings as app_settings
 from . import signals as sig
 from .strategies import STRATEGIES
 
@@ -96,7 +97,7 @@ class LiveTrader:
         async with self._lock:
             if self.running:
                 return
-            if not config.TINKOFF_API_TOKEN:
+            if not app_settings.tinkoff_token():
                 raise RuntimeError("TINKOFF_API_TOKEN не задан — live-торговля недоступна")
             self.running = True
             self.status["running"] = True
@@ -142,7 +143,7 @@ class LiveTrader:
     async def _cycle(self) -> None:
         from tinkoff.invest import AsyncClient
 
-        async with AsyncClient(token=config.TINKOFF_API_TOKEN, app_name="moex-trader") as client:
+        async with AsyncClient(token=app_settings.tinkoff_token(), app_name="moex-trader") as client:
             accounts = await client.users.get_accounts()
             if not accounts.accounts:
                 raise RuntimeError("Нет доступных счетов в T-Bank")

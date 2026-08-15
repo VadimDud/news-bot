@@ -16,7 +16,7 @@ import aiohttp_jinja2
 import jinja2
 from aiohttp import web
 
-from .. import config, data, storage
+from .. import config, data, settings, storage
 from ..backtest import run_backtest
 from ..live import live_trader
 from ..strategies import STRATEGIES
@@ -32,10 +32,15 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _PUBLIC_PATHS = {"/login", "/static"}
 
 
+def _effective_password() -> str:
+    return settings.get("TRADER_WEB_PASSWORD")
+
+
 def _cookie_secret() -> bytes:
-    if not config.WEB_PASSWORD:
+    password = _effective_password()
+    if not password:
         raise RuntimeError("TRADER_WEB_PASSWORD не задан")
-    return config.WEB_PASSWORD.encode()
+    return password.encode()
 
 
 def _sign() -> str:
@@ -61,6 +66,13 @@ def _current_user(request: web.Request) -> bool:
 async def _auth_middleware(request: web.Request, handler) -> web.StreamResponse:
     if any(request.path.startswith(p) for p in _PUBLIC_PATHS):
         return await handler(request)
+    if request.path == "/settings":
+        # Без установленного пароля /settings открыт для начальной настройки;
+        # иначе страница настроек требует авторизации как и остальные.
+        if not _effective_password():
+            return await handler(request)
+    if not _effective_password():
+        raise web.HTTPFound("/settings")
     if not _current_user(request):
         raise web.HTTPFound("/login")
     return await handler(request)
@@ -97,13 +109,20 @@ def _parse_date(raw: str, fallback: date) -> date:
 # ── Маршруты ─────────────────────────────────────────────────────────────────
 
 async def login_page(request: web.Request) -> web.Response:
+    if _current_user(request):
+        raise web.HTTPFound("/")
     return aiohttp_jinja2.render_template("login.html", request, {})
 
 
 async def login_post(request: web.Request) -> web.Response:
     form = await request.post()
     password = form.get("password", "")
-    if not config.WEB_PASSWORD or not hmac.compare_digest(password, config.WEB_PASSWORD):
+    effective = _effective_password()
+    if not effective:
+        return aiohttp_jinja2.render_template(
+            "login.html", request, {"error": "Пароль не задан. Установите его на странице настроек."}
+        )
+    if not hmac.compare_digest(password, effective):
         return aiohttp_jinja2.render_template(
             "login.html", request, {"error": "Неверный пароль"}
         )
@@ -119,6 +138,67 @@ async def logout(request: web.Request) -> web.Response:
     resp = web.HTTPFound("/login")
     resp.del_cookie(config.COOKIE_NAME)
     raise resp
+
+
+async def settings_page(request: web.Request) -> web.Response:
+    values = {}
+    for key, meta in settings.EDITABLE.items():
+        current = settings.get(key)
+        values[key] = {
+            "label": meta["label"],
+            "hint": meta["hint"],
+            "masked": settings.mask(current) if current else "",
+            "configured": bool(current),
+            "secret": key in settings.SECRET_KEYS,
+        }
+    return aiohttp_jinja2.render_template(
+        "settings.html",
+        request,
+        {
+            "values": values,
+            "bootstrap": not _effective_password(),
+            "notice": "",
+        },
+    )
+
+
+async def settings_save(request: web.Request) -> web.Response:
+    form = await request.post()
+    password_changed = False
+    for key in settings.EDITABLE:
+        value = form.get(key, "").strip()
+        if value:
+            settings.set(key, value)
+            if key == "TRADER_WEB_PASSWORD":
+                password_changed = True
+
+    values = {}
+    for key, meta in settings.EDITABLE.items():
+        current = settings.get(key)
+        values[key] = {
+            "label": meta["label"],
+            "hint": meta["hint"],
+            "masked": settings.mask(current) if current else "",
+            "configured": bool(current),
+            "secret": key in settings.SECRET_KEYS,
+        }
+
+    resp = aiohttp_jinja2.render_template(
+        "settings.html",
+        request,
+        {
+            "values": values,
+            "bootstrap": not _effective_password(),
+            "notice": "Настройки сохранены.",
+        },
+    )
+    if password_changed and _current_user(request):
+        # Переиздать куку новым секретом, чтобы сессия не слетела после смены пароля
+        resp.set_cookie(
+            config.COOKIE_NAME, _sign(), max_age=config.COOKIE_MAX_AGE,
+            httponly=True, samesite="Lax",
+        )
+    return resp
 
 
 async def index(request: web.Request) -> web.Response:
@@ -203,7 +283,7 @@ async def live_page(request: web.Request) -> web.Response:
         {
             "status": live_trader.snapshot(),
             "strategies": STRATEGIES,
-            "has_token": bool(config.TINKOFF_API_TOKEN),
+            "has_token": bool(settings.tinkoff_token()),
             "live_intervals": TICKER_INTERVAL_LABELS,
         },
     )
@@ -212,7 +292,7 @@ async def live_page(request: web.Request) -> web.Response:
 async def live_data(request: web.Request) -> web.Response:
     ctx = {
         "status": live_trader.snapshot(),
-        "has_token": bool(config.TINKOFF_API_TOKEN),
+        "has_token": bool(settings.tinkoff_token()),
     }
     return aiohttp_jinja2.render_template("_live_status.html", request, ctx)
 
@@ -272,6 +352,8 @@ def create_app() -> web.Application:
     app.router.add_get("/login", login_page)
     app.router.add_post("/login", login_post)
     app.router.add_post("/logout", logout)
+    app.router.add_get("/settings", settings_page)
+    app.router.add_post("/settings", settings_save)
     app.router.add_get("/", index)
     app.router.add_post("/backtest/run", backtest_run)
     app.router.add_get("/backtest/{run_id}", backtest_detail)

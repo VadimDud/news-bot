@@ -140,6 +140,7 @@ th { color: var(--muted); font-weight: 600; }
   <nav>
     <a href="/" class="{{ 'active' if request.path == '/' }}">Бэктест</a>
     <a href="/live" class="{{ 'active' if request.path == '/live' }}">Live</a>
+    <a href="/settings" class="{{ 'active' if request.path == '/settings' }}">Настройки</a>
   </nav>
   <form method="post" action="/logout">
     <button class="link" type="submit">Выйти</button>

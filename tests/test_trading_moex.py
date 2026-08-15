@@ -74,3 +74,36 @@ def test_rsi_bounds():
 
     values = rsi(df["close"], 14)
     assert values.between(0, 100).all()
+
+
+# ── Настройки / токены ───────────────────────────────────────────────────────
+
+def test_settings_roundtrip(tmp_path, monkeypatch):
+    from trading_moex.app import config, settings, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+
+    settings.set("TINKOFF_API_TOKEN", "tok-123")
+    settings.set("MOEX_LOGIN", "  user@moex.ru  ")
+    settings.set("TRADER_WEB_PASSWORD", "secret")
+
+    assert settings.tinkoff_token() == "tok-123"
+    assert settings.moex_login() == "user@moex.ru"
+    assert settings.moex_password() == ""
+    assert settings.get("TRADER_WEB_PASSWORD") == "secret"
+
+
+def test_settings_env_fallback(tmp_path, monkeypatch):
+    from trading_moex.app import config, settings, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+
+    monkeypatch.setattr(config, "MOEX_LOGIN", "env-login")
+    assert settings.moex_login() == "env-login"
+    assert settings.mask("1234567890") == "1234•••"
+    assert settings.mask("") == ""
+    assert settings.mask("ab") == "••••"

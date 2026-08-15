@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Настройки — MOEX Trader{% endblock %}
+{% block content %}
+{% if bootstrap %}
+<div class="notice warn">
+  Пароль входа в дашборд ещё не задан. Установите его ниже (или укажите
+  <code>TRADER_WEB_PASSWORD</code> в <code>.env</code> и перезапустите контейнер).
+</div>
+{% endif %}
+{% if notice %}<div class="notice ok">{{ notice }}</div>{% endif %}
+<div class="card">
+  <h2>Настройки и токены</h2>
+  <p class="hint">Пустые поля не изменяют текущие значения. Значения из базы приоритетнее переменных окружения.</p>
+  <form method="post" action="/settings">
+    {% for key, v in values.items() %}
+    <label for="{{ key }}">{{ v.label }}</label>
+    <input type="{{ 'password' if v.secret else 'text' }}" id="{{ key }}" name="{{ key }}"
+           placeholder="{{ v.masked if v.masked else 'не задано' }}" autocomplete="off">
+    <div class="hint">
+      {{ v.hint }}
+      {% if v.configured %}<span class="chip ok">задан</span>
+      {% else %}<span class="chip">не задан</span>{% endif %}
+    </div>
+    {% endfor %}
+    <button type="submit">Сохранить</button>
+  </form>
+</div>
+{% endblock %}

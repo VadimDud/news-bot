@@ -21,6 +21,7 @@ async def main() -> None:
     storage.init_db()
 
     from app.live import live_trader
+    from app import settings as app_settings
 
     live_trader.tickers = list(config.WATCH_TICKERS)
 
@@ -35,7 +36,7 @@ async def main() -> None:
         config.DRY_RUN, config.POLL_INTERVAL, config.WATCH_TICKERS, live_trader.strategy,
     )
 
-    if not config.TINKOFF_API_TOKEN:
+    if not app_settings.tinkoff_token():
         logger.warning("TINKOFF_API_TOKEN не задан — live-торговля недоступна, только бэктест")
 
     try:

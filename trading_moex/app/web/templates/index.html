@@ -4,7 +4,7 @@
 <div class="card">
   <h2>Бэктест стратегии на истории MOEX</h2>
   <p class="hint">Данные: AlgoPack (moexalgo), движок: Backtrader. Обычные свечи доступны без авторизации.</p>
-  <form method="post" action="/backtest/run">
+  <form method="post" action="/backtest/run" id="bt-form">
     <div class="grid">
       <div>
         <label for="ticker">Тикер (MOEX)</label>
@@ -62,8 +62,12 @@
       </div>
       {% endfor %}
     </div>
-    <button type="submit">Запустить бэктест</button>
+    <button type="submit" id="bt-btn">Запустить бэктест</button>
   </form>
+  <div id="bt-progress" style="display:none">
+    <div class="progress-track"><div class="progress-bar" id="bt-progress-bar"></div></div>
+    <p class="hint" id="bt-progress-text"></p>
+  </div>
 </div>
 
 <script>
@@ -75,6 +79,63 @@ function showParams() {
 }
 sel.addEventListener("change", showParams);
 showParams();
+
+const btForm = document.getElementById("bt-form");
+const btBtn = document.getElementById("bt-btn");
+const btProgress = document.getElementById("bt-progress");
+const btProgressBar = document.getElementById("bt-progress-bar");
+const btProgressText = document.getElementById("bt-progress-text");
+let btPollTimer = null;
+
+btForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  btBtn.disabled = true;
+  btProgress.style.display = "block";
+  btProgressBar.style.width = "0%";
+  btProgressText.textContent = "Запуск бэктеста…";
+
+  let jobId = null;
+  try {
+    const startResp = await fetch("/backtest/run", { method: "POST", body: new FormData(btForm) });
+    const startData = await startResp.json().catch(() => ({}));
+    if (!startResp.ok) {
+      btProgressText.textContent = "Ошибка: " + (startData.error || "не удалось запустить");
+      btBtn.disabled = false;
+      return;
+    }
+    jobId = startData.job_id;
+  } catch (err) {
+    btProgressText.textContent = "Ошибка запуска: " + err;
+    btBtn.disabled = false;
+    return;
+  }
+
+  const poll = async () => {
+    let data;
+    try {
+      const resp = await fetch(`/backtest/status?job_id=${encodeURIComponent(jobId)}`);
+      data = await resp.json();
+    } catch {
+      btPollTimer = setTimeout(poll, 500);
+      return;
+    }
+    if (data.state === "error") {
+      clearTimeout(btPollTimer);
+      btProgressText.textContent = "Ошибка: " + (data.error || "неизвестная");
+      btBtn.disabled = false;
+      return;
+    }
+    btProgressBar.style.width = (data.percent || 0) + "%";
+    btProgressText.textContent = `Загрузка данных и расчёт… ${data.percent || 0}%`;
+    if (data.state === "done") {
+      clearTimeout(btPollTimer);
+      window.location.href = `/backtest/result?job_id=${encodeURIComponent(jobId)}`;
+      return;
+    }
+    btPollTimer = setTimeout(poll, 500);
+  };
+  poll();
+});
 </script>
 
 <div class="card">

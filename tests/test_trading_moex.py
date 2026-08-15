@@ -1017,3 +1017,142 @@ async def test_data_download_job_error_and_validation(tmp_path, monkeypatch):
     finally:
         await client.close()
 
+
+async def test_backtest_job_flow(tmp_path, monkeypatch):
+    """Job-поток бэктеста: start -> status(done) -> редирект на страницу результата."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from trading_moex.app import config, data as moex_data, settings, storage
+    from trading_moex.app.web import app as web_app
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    settings.set("TRADER_WEB_PASSWORD", "testpass")
+
+    idx = pd.date_range("2025-06-01", periods=100, freq="D")
+    close = np.linspace(100, 110, 100)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1000.0},
+        index=idx,
+    )
+    df.index.name = "datetime"
+    monkeypatch.setattr(moex_data, "fetch_history", lambda *a, **k: df)
+    monkeypatch.setattr(
+        web_app, "run_backtest",
+        lambda *a, **k: {"total_return_pct": 5.5, "n_bars": 100, "trades": [], "equity_curve": []},
+    )
+
+    app = web_app.create_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        # без авторизации — редирект на логин
+        resp = await client.post("/backtest/run", data={"ticker": "SBER"}, allow_redirects=False)
+        assert resp.status == 302
+
+        await client.post("/login", data={"password": "testpass"}, allow_redirects=False)
+
+        resp = await client.post(
+            "/backtest/run",
+            data={
+                "ticker": "SBER", "period": "1day", "strategy": "sma_cross",
+                "start": "2025-06-01", "end": "2025-09-01", "cash": "100000", "commission": "0.0005",
+            },
+        )
+        assert resp.status == 200
+        job_id = (await resp.json())["job_id"]
+
+        for _ in range(100):
+            status = await client.get(f"/backtest/status?job_id={job_id}")
+            data = await status.json()
+            if data["state"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert data["state"] == "done"
+        assert data["percent"] == 100
+
+        resp = await client.get(f"/backtest/result?job_id={job_id}", allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"] == "/backtest/1"
+
+        run = storage.get_run(1)
+        assert run is not None and run["status"] == "done"
+        assert run["result"]["total_return_pct"] == 5.5
+
+        # результат редиректит один раз
+        resp = await client.get(f"/backtest/result?job_id={job_id}", allow_redirects=False)
+        assert resp.status == 200  # задача уже удалена -> страница «Задача не найдена»
+        assert "Задача не найдена" in await resp.text()
+    finally:
+        await client.close()
+
+
+async def test_backtest_job_error_and_validation(tmp_path, monkeypatch):
+    """Ошибка бэктеста -> state=error; невалидные данные -> 400."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from trading_moex.app import config, data as moex_data, settings, storage
+    from trading_moex.app.web import app as web_app
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    settings.set("TRADER_WEB_PASSWORD", "testpass")
+
+    def fake_fetch_history(ticker, period, start, end, use_cache=True, progress=None):
+        raise ValueError("MOEX не вернул данных по TEST")
+
+    monkeypatch.setattr(moex_data, "fetch_history", fake_fetch_history)
+
+    app = web_app.create_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        await client.post("/login", data={"password": "testpass"}, allow_redirects=False)
+
+        # старт раньше конца — валидация
+        resp = await client.post(
+            "/backtest/run",
+            data={"ticker": "SBER", "start": "2025-06-10", "end": "2025-06-01"},
+        )
+        assert resp.status == 400
+
+        # некорректный капитал
+        resp = await client.post(
+            "/backtest/run",
+            data={"ticker": "SBER", "cash": "abc"},
+        )
+        assert resp.status == 400
+
+        resp = await client.post(
+            "/backtest/run",
+            data={
+                "ticker": "SBER", "period": "1day", "strategy": "sma_cross",
+                "start": "2025-06-01", "end": "2025-09-01", "cash": "100000", "commission": "0.0005",
+            },
+        )
+        assert resp.status == 200
+        job_id = (await resp.json())["job_id"]
+
+        for _ in range(100):
+            status = await client.get(f"/backtest/status?job_id={job_id}")
+            data = await status.json()
+            if data["state"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert data["state"] == "error"
+        assert "MOEX не вернул данных" in (data["error"] or "")
+
+        resp = await client.get(f"/backtest/result?job_id={job_id}")
+        assert resp.status == 200
+        assert "Ошибка бэктеста" in await resp.text()
+
+        # неизвестный job
+        resp = await client.get("/backtest/status?job_id=nope")
+        assert resp.status == 404
+    finally:
+        await client.close()
+

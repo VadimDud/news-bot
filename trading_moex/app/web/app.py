@@ -34,16 +34,25 @@ logger = logging.getLogger("moex_trader.web")
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _PUBLIC_PATHS = {"/login", "/static"}
 
-# ── Фоновые задачи скачивания (прогресс в UI) ────────────────────────────────
+# ── Фоновые задачи (прогресс в UI) ───────────────────────────────────────────
 
-_DL_TTL_SECONDS = 15 * 60
+_TTL_SECONDS = 15 * 60
 _DL_JOBS: dict[str, dict] = {}
+_BT_JOBS: dict[str, dict] = {}
+
+
+def _prune_jobs(jobs: dict[str, dict]) -> None:
+    now = time.monotonic()
+    for jid in [j for j, job in jobs.items() if now - job["created"] > _TTL_SECONDS]:
+        jobs.pop(jid, None)
 
 
 def _prune_dl_jobs() -> None:
-    now = time.monotonic()
-    for jid in [j for j, job in _DL_JOBS.items() if now - job["created"] > _DL_TTL_SECONDS]:
-        _DL_JOBS.pop(jid, None)
+    _prune_jobs(_DL_JOBS)
+
+
+def _prune_bt_jobs() -> None:
+    _prune_jobs(_BT_JOBS)
 
 
 def _effective_password() -> str:
@@ -414,6 +423,7 @@ async def data_download_result(request: web.Request) -> web.Response:
 
 
 async def backtest_run(request: web.Request) -> web.Response:
+    """Запустить бэктест в фоне; вернуть job_id для опроса прогресса."""
     form = await request.post()
     ticker = form.get("ticker", "").strip().upper()
     period = form.get("period", "1day")
@@ -424,7 +434,7 @@ async def backtest_run(request: web.Request) -> web.Response:
         cash = float(form.get("cash", "100000"))
         commission = float(form.get("commission", "0.0005"))
     except (TypeError, ValueError):
-        return _error_page(request, "Некорректный капитал или комиссия")
+        return web.json_response({"error": "Некорректный капитал или комиссия"}, status=400)
 
     errors = []
     if not ticker:
@@ -436,28 +446,86 @@ async def backtest_run(request: web.Request) -> web.Response:
     if cash <= 0:
         errors.append("Стартовый капитал должен быть больше нуля.")
     if errors:
-        return _error_page(request, " ".join(errors))
+        return web.json_response({"error": " ".join(errors)}, status=400)
 
     start = _parse_date(start_raw, date.today() - timedelta(days=365))
     end = _parse_date(end_raw, date.today())
     if start >= end:
-        return _error_page(request, "Дата начала должна быть раньше даты окончания.")
+        return web.json_response({"error": "Дата начала должна быть раньше даты окончания."}, status=400)
 
     params = _parse_params(strategy_key, form)
     run_id = storage.create_run(ticker, period, strategy_key, params, start.isoformat(), end.isoformat())
 
+    _prune_bt_jobs()
+    job_id = secrets.token_hex(8)
+    _BT_JOBS[job_id] = {
+        "state": "running",
+        "percent": 0,
+        "error": None,
+        "run_id": run_id,
+        "created": time.monotonic(),
+    }
+    asyncio.get_running_loop().create_task(
+        _run_backtest_job(job_id, run_id, ticker, period, strategy_key, params, cash, commission, start, end)
+    )
+    return web.json_response({"job_id": job_id})
+
+
+async def _run_backtest_job(
+    job_id: str,
+    run_id: int,
+    ticker: str,
+    period: str,
+    strategy_key: str,
+    params: dict,
+    cash: float,
+    commission: float,
+    start: date,
+    end: date,
+) -> None:
+    job = _BT_JOBS[job_id]
     loop = asyncio.get_running_loop()
+
+    def set_progress(pct: int) -> None:
+        job["percent"] = pct
+
     try:
-        df = await loop.run_in_executor(None, data.fetch_history, ticker, period, start, end, True)
+        df = await loop.run_in_executor(None, data.fetch_history, ticker, period, start, end, True, set_progress)
+        job["percent"] = 90
         result = await loop.run_in_executor(
             None, run_backtest, df, STRATEGIES[strategy_key]["cls"], params, cash, commission
         )
         storage.finish_run(run_id, result)
-        return web.HTTPFound(f"/backtest/{run_id}")
+        job["percent"] = 100
+        job["state"] = "done"
     except Exception as exc:  # noqa: BLE001
         logger.warning("Backtest %s (%s %s) failed: %s", run_id, ticker, period, exc)
         storage.finish_run(run_id, None, str(exc))
-        return _error_page(request, f"Ошибка бэктеста: {exc}")
+        job["state"] = "error"
+        job["error"] = str(exc)
+
+
+async def backtest_status(request: web.Request) -> web.Response:
+    """Прогресс фонового бэктеста."""
+    job = _BT_JOBS.get(request.query.get("job_id", ""))
+    if job is None:
+        return web.json_response({"state": "not_found"}, status=404)
+    return web.json_response({"state": job["state"], "percent": job["percent"], "error": job["error"]})
+
+
+async def backtest_result(request: web.Request) -> web.Response:
+    """По завершении — редирект на страницу результата; иначе ошибка/промежуточный статус."""
+    job_id = request.query.get("job_id", "")
+    job = _BT_JOBS.get(job_id)
+    if job is None:
+        return _error_page(request, "Задача не найдена.")
+    if job["state"] == "running":
+        return web.json_response({"error": "Бэктест ещё выполняется"}, status=425)
+    if job["state"] == "error":
+        return _error_page(request, f"Ошибка бэктеста: {job['error']}")
+    run_id = job["run_id"]
+    _BT_JOBS.pop(job_id, None)
+    raise web.HTTPFound(f"/backtest/{run_id}")
 
 
 async def backtest_detail(request: web.Request) -> web.Response:
@@ -559,6 +627,8 @@ def create_app() -> web.Application:
     app.router.add_post("/settings", settings_save)
     app.router.add_get("/", index)
     app.router.add_post("/backtest/run", backtest_run)
+    app.router.add_get("/backtest/status", backtest_status)
+    app.router.add_get("/backtest/result", backtest_result)
     app.router.add_get("/backtest/{run_id}", backtest_detail)
     app.router.add_post("/data/download", data_download)
     app.router.add_get("/data/status", data_status)

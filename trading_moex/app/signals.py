@@ -199,6 +199,46 @@ def volume_profile_levels(
     return support, resistance
 
 
+def ma_stacked(fast: float, mid: float, slow: float) -> bool:
+    """Стекинг MA: быстрая выше средней, средняя выше медленной (тренд выстроен)."""
+    return fast > mid > slow
+
+
+def ma_golden_cross(
+    fast_prev: float, mid_prev: float, fast: float, mid: float,
+) -> bool:
+    """Золотое сечение: быстрая MA пересекла среднюю снизу вверх."""
+    return fast_prev <= mid_prev and fast > mid
+
+
+def ma_slope_up(prev: float, cur: float) -> bool:
+    """Наклон вверх: текущее значение MA выше значения bars назад (моментум)."""
+    return cur > prev
+
+
+def ma_pullback(low: float, close: float, mid: float) -> bool:
+    """Откат к динамической поддержке (mid): низ коснулся/пробил mid и закрылся выше."""
+    return low <= mid and close > mid
+
+
+def ma_spread(
+    fast: float, mid: float, slow: float, atr: float, min_spread: float,
+) -> bool:
+    """Расширение тренда: нормализованная разница между быстрой и медленной MA.
+
+    Трендовый сигнал берётся только при «разжатых» линиях — когда дистанция
+    ``(fast - slow)`` заметно больше разброса относительно средней. В стекинге
+    эта «игла» равна ``(mid - slow)`` — минимальному зазору между соседними
+    линиями. При сжатии (compression) зазор близок к нулю — входа нет.
+    """
+    if atr <= 0:
+        return False
+    span = max(fast - slow, 0.0)
+    ref = max(max(fast, slow) - mid, 0.0)
+    needle = max(span - ref, 0.0)
+    return needle >= min_spread * atr
+
+
 def scale_plan(
     ref: float, atr: float, parts: int, dist: float, stop_dist: float, rr: float,
 ) -> tuple[list[float], float, float, float]:

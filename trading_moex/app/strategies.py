@@ -551,6 +551,140 @@ class EngulfingStrategy(RiskAwareStrategy):
             self._exit()
 
 
+# Параметры MA-трендовой стратегии. Подобраны перебором на YDEX 30min
+# (бычье окно 2025-10..2026-02 и полный год 2025-08..2026-08, +60min):
+# стек 20/100/200 (медленная MA — фильтр большого тренда), наклон 5 баров,
+# вход по откату к средней, без фильтра цены>медленной (sf=0), разжатие линий
+# 0.1 ATR (sp=0.1 vs 0.0: +7.4%/+4.2% vs +5.2%/+1.2% на 30min up/full).
+# Итог 30min: бычье окно +7.4% PF 1.94, полный год +4.2% PF 1.34 (40 сделок).
+# Классический стек 50/100/200 на полном году убыточен (-6.3%) — не дефолт.
+_MA_TREND_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("ma_fast", 20),
+    ("ma_mid", 100),
+    ("ma_slow", 200),
+    ("slope_bars", 5),
+    ("enter_pullback", 1),
+    ("use_slow_filter", 0),
+    ("spread_min", 0.1),
+    ("atr_period", 20),
+    ("atr_stop_mult", 4.0),
+    ("rr_ratio", 3.0),
+    ("trend_period", 0),
+    ("trend_vwap", 0),
+    ("vol_period", 0),
+    ("vol_mult", 1.5),
+    ("bull_frac", 0.7),
+    ("vol_profile", 0),
+    ("profile_bins", 40),
+    ("profile_period", 200),
+    ("profile_mult", 1.5),
+    ("scale_in", 0),
+    ("scale_out", 0),
+    ("scale_parts", 3),
+    ("scale_dist", 1.0),
+    ("scale_out_interval", 1),
+)
+
+
+class MATrendStrategy(RiskAwareStrategy):
+    """Трендовая стратегия на стекинге скользящих средних.
+
+    Компоненты методики MA-trend:
+    - ``ma_fast/ma_mid/ma_slow`` — стек из трёх SMA (по умолчанию 50/100/200);
+    - ``slope_bars`` — подтверждение моментума: быстрая MA растёт N баров;
+    - вход: золотое сечение (пересечение fast/mid вверх) — старт тренда, либо
+      откат к mid (``enter_pullback``) — вход на динамической поддержке;
+    - ``use_slow_filter`` — фильтр «большой картины»: цена выше медленной MA
+      (аналог тренда старшего таймфрейма);
+    - ``spread_min`` — «разжатие» линий (expansion): в сжатие MA (боковик)
+      не входим. 0 — компонент выключен;
+    - выход: быстрая MA ниже средней (тренд сломан) или цена ниже медленной.
+    """
+
+    params = _MA_TREND_PARAMS_TUPLE
+
+    def __init__(self):
+        super().__init__()
+        self.sma_f = bt.indicators.SMA(self.data.close, period=int(self.p.ma_fast))
+        self.sma_m = bt.indicators.SMA(self.data.close, period=int(self.p.ma_mid))
+        self.sma_s = bt.indicators.SMA(self.data.close, period=int(self.p.ma_slow))
+
+    def _stacked(self) -> bool:
+        f, m, s = float(self.sma_f[0]), float(self.sma_m[0]), float(self.sma_s[0])
+        if f != f or m != m or s != s:
+            return False  # тёплый период SMA
+        return sig.ma_stacked(f, m, s)
+
+    def _slope_up(self) -> bool:
+        bars = int(self.p.slope_bars)
+        if bars <= 0:
+            return True
+        cur, prev = float(self.sma_f[0]), float(self.sma_f[-bars])
+        if cur != cur or prev != prev:
+            return False
+        return sig.ma_slope_up(prev, cur)
+
+    def _golden_cross(self) -> bool:
+        f0, m0 = float(self.sma_f[0]), float(self.sma_m[0])
+        f1, m1 = float(self.sma_f[-1]), float(self.sma_m[-1])
+        for x in (f0, m0, f1, m1):
+            if x != x:
+                return False
+        return sig.ma_golden_cross(f1, m1, f0, m0)
+
+    def _pullback(self) -> bool:
+        m = float(self.sma_m[0])
+        if m != m:
+            return False
+        return sig.ma_pullback(float(self.data.low[0]), float(self.data.close[0]), m)
+
+    def _slow_filter(self) -> bool:
+        if not int(self.p.use_slow_filter):
+            return True
+        s = float(self.sma_s[0])
+        if s != s:
+            return False
+        return float(self.data.close[0]) > s
+
+    def _expanded(self) -> bool:
+        min_spread = float(self.p.spread_min)
+        if min_spread <= 0:
+            return True
+        f, m, s = float(self.sma_f[0]), float(self.sma_m[0]), float(self.sma_s[0])
+        for x in (f, m, s):
+            if x != x:
+                return False
+        atr = self._atr_value()
+        return sig.ma_spread(f, m, s, atr, min_spread)
+
+    def _long_signal(self) -> bool:
+        if not (self._stacked() and self._slope_up() and self._slow_filter()):
+            return False
+        if not self._expanded():
+            return False  # сжатие линий MA — боковик, входа нет
+        if self._golden_cross():
+            return True
+        return bool(int(self.p.enter_pullback)) and self._pullback()
+
+    def _long_exit(self) -> bool:
+        f, m = float(self.sma_f[0]), float(self.sma_m[0])
+        if f == f and m == m and f < m:
+            return True
+        s = float(self.sma_s[0])
+        return s == s and float(self.data.close[0]) < s
+
+    def next(self):
+        self._step_scale_out()
+        if self._trend_exit():
+            return
+        if not self.position:
+            if self._long_signal():
+                self._open_long()
+        elif self._long_exit():
+            self._exit()
+
+
 STRATEGIES = {
     "sma_cross": {
         "name": "SMA Crossover",
@@ -594,6 +728,33 @@ STRATEGIES = {
             {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 50},
             {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 100},
             {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.2},
+            *_SCALE_PARAMS,
+        ],
+    },
+    "ma_trend": {
+        "name": "MA-тренд (стекинг скользящих)",
+        "cls": MATrendStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "ma_fast", "label": "Быстрая MA (период)", "type": "int", "default": 20},
+            {"key": "ma_mid", "label": "Средняя MA (период)", "type": "int", "default": 100},
+            {"key": "ma_slow", "label": "Медленная MA (период)", "type": "int", "default": 200},
+            {"key": "slope_bars", "label": "Наклон быстрой MA, баров (0 = выкл)", "type": "int", "default": 5},
+            {"key": "enter_pullback", "label": "Вход по откату к средней (1 = да)", "type": "int", "default": 1},
+            {"key": "use_slow_filter", "label": "Фильтр большого тренда: цена > медл. MA (1 = да)", "type": "int", "default": 0},
+            {"key": "spread_min", "label": "Разжатие MA, x ATR (0 = выкл)", "type": "float", "default": 0.1},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 4.0},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 3.0},
+            {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 0},
+            {"key": "trend_vwap", "label": "Трендовый по объёму VWMA (1 = да, 0 = нет)", "type": "int", "default": 0},
+            {"key": "vol_period", "label": "Объём: период среднего (0 = выкл)", "type": "int", "default": 0},
+            {"key": "vol_mult", "label": "Объём: мин. кратность среднего", "type": "float", "default": 1.5},
+            {"key": "bull_frac", "label": "Доля быков на свече входа (0 = выкл)", "type": "float", "default": 0.7},
+            {"key": "vol_profile", "label": "SL/TP по объёмному профилю HVN (1 = да)", "type": "int", "default": 0},
+            {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 40},
+            {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 200},
+            {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.5},
             *_SCALE_PARAMS,
         ],
     },

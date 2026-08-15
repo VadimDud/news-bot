@@ -371,6 +371,35 @@ def test_trend_filter_disabled():
 
 # ── Бэктест с риск-стратегиями ──────────────────────────────────────────────
 
+def test_ma_helpers():
+    from trading_moex.app.signals import (
+        ma_golden_cross,
+        ma_pullback,
+        ma_slope_up,
+        ma_spread,
+        ma_stacked,
+    )
+
+    assert ma_stacked(51, 50, 49) is True
+    assert ma_stacked(49, 50, 51) is False
+    assert ma_stacked(50, 50, 49) is False
+
+    assert ma_golden_cross(fast_prev=49, mid_prev=50, fast=51, mid=50) is True
+    assert ma_golden_cross(fast_prev=51, mid_prev=50, fast=51, mid=50) is False
+    assert ma_golden_cross(fast_prev=49, mid_prev=50, fast=49.5, mid=50) is False
+
+    assert ma_slope_up(50, 51) is True
+    assert ma_slope_up(51, 50) is False
+
+    assert ma_pullback(low=100, close=102, mid=101) is True
+    assert ma_pullback(low=102, close=100, mid=101) is False
+
+    # разжатие: в стекинге «игла» = mid - slow
+    assert ma_spread(102, 100, 98, atr=10, min_spread=0.1) is True   # needle 2 >= 1
+    assert ma_spread(102, 100, 98, atr=25, min_spread=0.1) is False  # needle 2 < 2.5
+    assert ma_spread(102, 100, 98, atr=0, min_spread=0.1) is False   # нет ATR — нельзя судить
+
+
 def test_scale_plan():
     from trading_moex.app.signals import scale_plan
 

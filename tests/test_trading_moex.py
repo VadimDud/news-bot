@@ -260,6 +260,33 @@ def test_is_bullish_engulfing():
     assert is_bullish_engulfing(106, 112, 104, 111, 110, 105) is False
 
 
+def test_volume_confirms():
+    from trading_moex.app.signals import volume_confirms
+
+    # фильтр выключен (period = 0) — всегда True
+    assert volume_confirms(1.0, 1000.0, 1.5, 0) is True
+    # объём >= множитель * среднее
+    assert volume_confirms(2000.0, 1000.0, 1.5, 20) is True
+    assert volume_confirms(1400.0, 1000.0, 1.5, 20) is False
+    assert volume_confirms(1000.0, 1000.0, 1.0, 20) is True
+    # NaN/нулевое среднее (тёплый период) — достаточно ненулевого объёма
+    assert volume_confirms(5.0, float("nan"), 1.5, 20) is True
+    assert volume_confirms(5.0, 0.0, 1.5, 20) is True
+    assert volume_confirms(0.0, float("nan"), 1.5, 20) is False
+
+
+def test_bulls_dominate():
+    from trading_moex.app.signals import bulls_dominate
+
+    # выключено (frac = 0)
+    assert bulls_dominate(110, 90, 100, 0) is True
+    # close в верхних 70% диапазона — быки
+    assert bulls_dominate(110, 90, 104, 0.7) is True   # (104-90)/20 = 0.7
+    assert bulls_dominate(110, 90, 100, 0.7) is False  # (100-90)/20 = 0.5
+    # нулевой диапазон — нельзя определить
+    assert bulls_dominate(100, 100, 100, 0.7) is False
+
+
 def test_pinbar_position_state():
     import numpy as np
 

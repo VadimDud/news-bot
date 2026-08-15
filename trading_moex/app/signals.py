@@ -125,6 +125,32 @@ def is_bearish_engulfing(o: float, h: float, l: float, c: float, po: float, pc: 
     return prev_bull and cur_bear and min(o, c) < min(po, pc) and max(o, c) > max(po, pc)
 
 
+def volume_confirms(vol: float, avg_vol: float, vol_mult: float, vol_period: int) -> bool:
+    """Подтверждение сигнала объёмом: объём свечи не ниже среднего с множителем.
+
+    ``vol_period <= 0`` — фильтр выключен; при NaN/нулевом среднем (тёплый
+    период индикатора) требуем просто ненулевой объём.
+    """
+    if vol_period <= 0:
+        return True
+    if avg_vol != avg_vol or avg_vol <= 0:
+        return vol > 0
+    return vol >= vol_mult * avg_vol
+
+
+def bulls_dominate(high: float, low: float, close: float, bull_frac: float) -> bool:
+    """Доля «быков» на свече: close ближе к high, чем к low (покупки двигают цену).
+
+    ``bull_frac <= 0`` — выключено; при нулевом диапазоне свечи — False.
+    """
+    if bull_frac <= 0:
+        return True
+    rng = high - low
+    if rng <= 0:
+        return False
+    return (close - low) / rng >= bull_frac
+
+
 def pinbar_position(df: pd.DataFrame, wick_ratio: float = 2.0) -> pd.Series:
     """Вход на бычьем пин-баре (молот), выход на медвежьем (падающая звезда)."""
     o, h, l, c = df["open"].values, df["high"].values, df["low"].values, df["close"].values

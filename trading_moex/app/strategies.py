@@ -40,13 +40,18 @@ _RISK_PARAMS_TUPLE = (
     ("trend_period", 0),
 )
 
-# bt-параметры Поглощения — дефолты совпадают с подобранными на YDEX
+# bt-параметры Поглощения — подобраны перебором на YDEX (2025-10..2026-02, бычий период):
+# широкий стоп 4 ATR, тейк 1:3, вход выше EMA(100), подтверждение объёмом MOEX
+# (объём >= 1.5*SMA40) и доминирование быков (close в верхних 70% диапазона).
 _ENGULFING_PARAMS_TUPLE = (
     ("risk_pct", 1.0),
     ("atr_period", 20),
     ("atr_stop_mult", 4.0),
     ("rr_ratio", 3.0),
     ("trend_period", 100),
+    ("vol_period", 40),
+    ("vol_mult", 1.5),
+    ("bull_frac", 0.7),
 )
 
 _RISK_PARAMS = [
@@ -59,13 +64,18 @@ _RISK_PARAMS = [
 
 # Дефолты Поглощения подобраны перебором на YDEX (2025-10..2026-02, бычий период,
 # дивиденды 80 руб./год, последняя выплата 28.04.2025 вне окна): широкий стоп 4 ATR,
-# тейк 1:3, вход только выше EMA(100). 30min: PF 1.16 / +1.55%, 60min: ~PF 1.05.
+# тейк 1:3, вход только выше EMA(100), подтверждение объёмом MOEX.
+# На бычьем окне 30min: PF 1.16->2.98 / +1.55%->+3.98%; на падающем годе убыток
+# сокращается с -10.9% до -0.3% (объём отсекает движения без участия быков).
 _ENGULFING_PARAMS = [
     {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
     {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
     {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 4.0},
     {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 3.0},
     {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 100},
+    {"key": "vol_period", "label": "Объём: период среднего (0 = выкл)", "type": "int", "default": 40},
+    {"key": "vol_mult", "label": "Объём: мин. кратность среднего", "type": "float", "default": 1.5},
+    {"key": "bull_frac", "label": "Доля быков на свече входа (0 = выкл)", "type": "float", "default": 0.7},
 ]
 
 
@@ -257,15 +267,50 @@ class PinbarStrategy(RiskAwareStrategy):
 
 
 class EngulfingStrategy(RiskAwareStrategy):
-    """Бычье/медвежье поглощение. Вход на бычьем, выход — по SL/TP или медвежьему."""
+    """Бычье/медвежье поглощение. Вход на бычьем, выход — по SL/TP или медвежьему.
+
+    Объём MOEX (колонка volume) учитывается:
+    - ``vol_period``/``vol_mult`` — подтверждение: объём свечи паттерна не ниже
+      среднего (SMA) с множителем; 0 — фильтр выключен;
+    - ``bull_frac`` — доля «бычьего» объёма на свече входа (положение close
+      в диапазоне high-low): покупатели доминируют, если (close-low)/(high-low)
+      не ниже порога. 0 — выключено.
+    """
 
     params = _ENGULFING_PARAMS_TUPLE
 
+    def __init__(self):
+        super().__init__()
+        if int(self.p.vol_period) > 0:
+            self.vol_avg = bt.indicators.SMA(self.data.volume, period=int(self.p.vol_period))
+        else:
+            self.vol_avg = None
+
+    def _volume_confirms(self) -> bool:
+        """Объём свечи паттерна не ниже среднего с множителем (подтверждение сигнала)."""
+        if self.vol_avg is None:
+            return True
+        return sig.volume_confirms(
+            float(self.data.volume[0]), float(self.vol_avg[0]),
+            float(self.p.vol_mult), int(self.p.vol_period),
+        )
+
+    def _bulls_dominate(self) -> bool:
+        """Доля покупок на свече: close ближе к high, чем к low (быки двигают цену)."""
+        return sig.bulls_dominate(
+            float(self.data.high[0]), float(self.data.low[0]),
+            float(self.data.close[0]), float(self.p.bull_frac),
+        )
+
     def _bull(self) -> bool:
-        return sig.is_bullish_engulfing(
-            float(self.data.open[0]), float(self.data.high[0]),
-            float(self.data.low[0]), float(self.data.close[0]),
-            float(self.data.open[-1]), float(self.data.close[-1]),
+        return (
+            sig.is_bullish_engulfing(
+                float(self.data.open[0]), float(self.data.high[0]),
+                float(self.data.low[0]), float(self.data.close[0]),
+                float(self.data.open[-1]), float(self.data.close[-1]),
+            )
+            and self._volume_confirms()
+            and self._bulls_dominate()
         )
 
     def _bear(self) -> bool:

@@ -134,6 +134,56 @@ class TestFetchAggregated:
         assert await agg.fetch_aggregated(["finance"]) == []
 
     @pytest.mark.asyncio
+    async def test_per_page_capped_at_plan_limit(self, monkeypatch, apitube_article):
+        # Free/test plans reject per_page > 10 (ER0171)
+        monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
+        monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
+        with patch.object(agg_mod, "_apitube_request",
+                          new=AsyncMock(return_value=[apitube_article])) as mock_req:
+            await agg.fetch_aggregated(["finance"])
+        params = mock_req.call_args.args[0]
+        assert params["per_page"] == str(agg._PER_PAGE)
+        assert int(params["per_page"]) <= 10
+
+    @pytest.mark.asyncio
+    async def test_pagination_fetches_full_pages(self, monkeypatch, apitube_article):
+        monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
+        monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
+        full_page = [apitube_article] * agg._PER_PAGE
+        short_page = [apitube_article] * 3
+        with patch.object(agg_mod, "_apitube_request",
+                          new=AsyncMock(side_effect=[full_page, short_page])) as mock_req:
+            news = await agg.fetch_aggregated(["finance"])
+        # Полная страница → идём на вторую; неполная → стоп
+        assert mock_req.await_count == 2
+        assert mock_req.call_args_list[0].args[0]["page"] == "1"
+        assert mock_req.call_args_list[1].args[0]["page"] == "2"
+        # Дубликаты схлопываются дедупликацией
+        assert len(news) >= 1
+
+    @pytest.mark.asyncio
+    async def test_pagination_stops_on_empty_page(self, monkeypatch, apitube_article):
+        monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
+        monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
+        full_page = [apitube_article] * agg._PER_PAGE
+        with patch.object(agg_mod, "_apitube_request",
+                          new=AsyncMock(side_effect=[full_page, []])) as mock_req:
+            news = await agg.fetch_aggregated(["finance"])
+        # Полная первая страница → пробуем вторую, пустая → стоп
+        assert mock_req.await_count == 2
+        assert news
+
+    @pytest.mark.asyncio
+    async def test_short_page_stops_pagination(self, monkeypatch, apitube_article):
+        monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
+        monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)
+        with patch.object(agg_mod, "_apitube_request",
+                          new=AsyncMock(return_value=[apitube_article])) as mock_req:
+            await agg.fetch_aggregated(["finance"])
+        # Неполная первая страница → дальше не ходим
+        assert mock_req.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_keyword_tagging(self, monkeypatch, apitube_article):
         monkeypatch.setattr(agg.config, "APITUBE_API_KEY", "key")
         monkeypatch.setattr(agg.config, "NEWS_AGG_ENABLED", True)

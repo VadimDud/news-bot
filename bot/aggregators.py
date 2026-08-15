@@ -126,6 +126,12 @@ _SCIENCE_HINTS = (
     "physics", "biology", "astronomy", "research", "discovery",
 )
 
+# Plan limits: the free/test APITube plan allows at most 10 results per page
+# (larger per_page values fail the whole request with ER0171). To keep volume,
+# paginate up to _MAX_PAGES pages of _PER_PAGE items.
+_PER_PAGE = 10
+_MAX_PAGES = 3
+
 # Simple response cache: {key: (timestamp, items)} to stay within API limits.
 _AGG_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
@@ -171,13 +177,29 @@ async def _apitube_request(params: dict) -> list[dict]:
         return []
 
 
+async def _apitube_paged(params: dict) -> list[dict]:
+    """Fetch several pages of results, respecting the plan's per-page limit."""
+    results: list[dict] = []
+    for page in range(1, _MAX_PAGES + 1):
+        page_params = dict(params)
+        page_params["per_page"] = str(_PER_PAGE)
+        page_params["page"] = str(page)
+        batch = await _apitube_request(page_params)
+        if not batch:
+            break
+        results.extend(batch)
+        if len(batch) < _PER_PAGE:
+            break
+    return results
+
+
 def _category_params(codes: tuple[str, ...], lang: str) -> dict:
     params = {
         "category.id": ",".join(codes),
         "language.code": lang,
         "sort.by": "published_at",
         "sort.order": "desc",
-        "per_page": "100",
+        "per_page": str(_PER_PAGE),
         "fl": _FIELDS,
     }
     if config.NEWS_AGG_OPR_MIN > 0:
@@ -190,7 +212,7 @@ def _keyword_params(keywords: str) -> dict:
         "title": keywords,
         "sort.by": "published_at",
         "sort.order": "desc",
-        "per_page": "100",
+        "per_page": str(_PER_PAGE),
         "fl": _FIELDS,
     }
     if config.NEWS_AGG_OPR_MIN > 0:
@@ -409,7 +431,7 @@ async def fetch_aggregated(source_tags: list[str] | None = None) -> list[dict]:
 
 
 async def _fetch_category_batch(lang: str, codes: tuple[str, ...]) -> list[dict]:
-    articles = await _apitube_request(_category_params(codes, lang))
+    articles = await _apitube_paged(_category_params(codes, lang))
     items = []
     for art in articles:
         if not isinstance(art, dict) or not art.get("title") or _is_junk(art):
@@ -422,7 +444,7 @@ async def _fetch_category_batch(lang: str, codes: tuple[str, ...]) -> list[dict]
 
 
 async def _fetch_keyword_batch(tag: str, keywords: str) -> list[dict]:
-    articles = await _apitube_request(_keyword_params(keywords))
+    articles = await _apitube_paged(_keyword_params(keywords))
     items = []
     for art in articles:
         if not isinstance(art, dict) or not art.get("title") or _is_junk(art):

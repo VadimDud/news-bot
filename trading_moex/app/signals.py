@@ -6,6 +6,7 @@
 
 import numpy as np
 import pandas as pd
+from typing import Sequence
 
 POSITION_KEY = "position"
 
@@ -149,6 +150,53 @@ def bulls_dominate(high: float, low: float, close: float, bull_frac: float) -> b
     if rng <= 0:
         return False
     return (close - low) / rng >= bull_frac
+
+
+def volume_profile_levels(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+    vols: Sequence[float], price: float, bins: int = 40, mult: float = 1.5,
+) -> tuple[float | None, float | None]:
+    """Ближайшие высокообъёмные уровни (HVN) под и над ``price``.
+
+    Строит объёмный профиль по последним свечам (типичная цена (h+l+c)/3,
+    объём — в соответствующий бин диапазона цен). «Высокими» считаются бины
+    с объёмом не ниже ``mult`` среднего по бин. Возвращает (поддержка,
+    сопротивление) — центры ближайших HVN с нужной стороны от цены, либо
+    None, если такого уровня нет. NaN-бары (тёплый период) пропускаются.
+    """
+    lo, hi, cl, v = [], [], [], []
+    for h, l, c, vol in zip(highs, lows, closes, vols):
+        if not (h == h and l == l and c == c and vol == vol and vol > 0):
+            continue
+        lo.append(l)
+        hi.append(h)
+        cl.append(c)
+        v.append(vol)
+    if not lo:
+        return None, None
+    pricemin = min(lo)
+    pricemax = max(hi)
+    if pricemax <= pricemin:
+        return None, None
+    binw = (pricemax - pricemin) / bins
+    hist = [0.0] * bins
+    for l, h, c, vol in zip(lo, hi, cl, v):
+        b = int(((h + l + c) / 3.0 - pricemin) / binw)
+        b = min(b, bins - 1)
+        hist[b] += vol
+    avg = sum(hist) / bins
+    threshold = avg * mult
+    support = None
+    resistance = None
+    for b, vol in enumerate(hist):
+        if vol < threshold:
+            continue
+        center = pricemin + (b + 0.5) * binw
+        if center < price:
+            support = center
+        elif resistance is None:
+            resistance = center
+    return support, resistance
 
 
 def pinbar_position(df: pd.DataFrame, wick_ratio: float = 2.0) -> pd.Series:

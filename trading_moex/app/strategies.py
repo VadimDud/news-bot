@@ -44,6 +44,10 @@ _RISK_PARAMS_TUPLE = (
 # широкий стоп 4 ATR, тейк 1:3, вход выше EMA(150) (перебор trend 0/50/100/150/200 —
 # 150 лучший: +4.6% на бычьем окне PF 3.1 и +1.5% за весь год PF 1.2; 200 хуже),
 # подтверждение объёмом MOEX (объём >= 1.5*SMA40) и доминирование быков.
+# SL/TP по объёмному профилю HVN (vol_profile=1): стоп на HVN-поддержке, тейк на
+# HVN-сопротивлении. Перебор на YDEX 30min (b 20/40, p 100/200/400, m 1.2/1.5/2.0):
+# b=20 p=400 m=1.2 — полный год +4.2% PF 1.9 (базис ATR +1.5% PF 1.2), бычье окно
+# +6.8% PF 5.0 (+4.6% PF 3.1); просадка за год 4.8%→2.2%.
 _ENGULFING_PARAMS_TUPLE = (
     ("risk_pct", 1.0),
     ("atr_period", 20),
@@ -54,6 +58,10 @@ _ENGULFING_PARAMS_TUPLE = (
     ("vol_period", 40),
     ("vol_mult", 1.5),
     ("bull_frac", 0.7),
+    ("vol_profile", 1),
+    ("profile_bins", 20),
+    ("profile_period", 400),
+    ("profile_mult", 1.2),
 )
 
 _RISK_PARAMS = [
@@ -79,6 +87,10 @@ _ENGULFING_PARAMS = [
     {"key": "vol_period", "label": "Объём: период среднего (0 = выкл)", "type": "int", "default": 40},
     {"key": "vol_mult", "label": "Объём: мин. кратность среднего", "type": "float", "default": 1.5},
     {"key": "bull_frac", "label": "Доля быков на свече входа (0 = выкл)", "type": "float", "default": 0.7},
+    {"key": "vol_profile", "label": "SL/TP по объёмному профилю HVN (1 = да)", "type": "int", "default": 1},
+    {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 20},
+    {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 400},
+    {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.2},
 ]
 
 
@@ -123,6 +135,12 @@ class RiskAwareStrategy(TradeRecordingStrategy):
 
     def _stop_distance(self) -> float:
         price = float(self.data.close[0])
+        if self._use_profile():
+            sup, _ = self._profile_levels()
+            if sup is not None:
+                dist = price - sup
+                if dist >= price * 0.002:  # не впритык к цене
+                    return dist
         atr_dist = self._atr_value() * float(self.p.atr_stop_mult)
         return max(atr_dist, price * 0.005)  # минимум 0.5% цены
 
@@ -147,6 +165,22 @@ class RiskAwareStrategy(TradeRecordingStrategy):
             float(self.data.close[0]), float(getattr(self.p, "bull_frac", 0.0)),
         )
 
+    def _use_profile(self) -> bool:
+        return bool(getattr(self.p, "vol_profile", 0))
+
+    def _profile_levels(self) -> tuple[float | None, float | None]:
+        """HVN поддержка/сопротивление из объёмного профиля последних свечей."""
+        period = max(int(getattr(self.p, "profile_period", 200)), 2)
+        bins = max(int(getattr(self.p, "profile_bins", 40)), 5)
+        mult = float(getattr(self.p, "profile_mult", 1.5))
+        return sig.volume_profile_levels(
+            self.data.high.get(ago=-period, size=period),
+            self.data.low.get(ago=-period, size=period),
+            self.data.close.get(ago=-period, size=period),
+            self.data.volume.get(ago=-period, size=period),
+            float(self.data.close[0]), bins, mult,
+        )
+
     def _risk_size(self) -> int:
         price = float(self.data.close[0])
         size = risk_module.position_size(
@@ -165,13 +199,29 @@ class RiskAwareStrategy(TradeRecordingStrategy):
         self.buy(size=size)  # SL/TP выставляются в notify_order после исполнения
 
     def _place_bracket(self) -> None:
-        """Выставить стоп-лосс (по ATR) и тейк-профит (R:R) по открытой позиции."""
+        """Выставить стоп-лосс и тейк-профит по открытой позиции.
+
+        Режим ``vol_profile``: стоп на ближайшей HVN-поддержке, тейк на
+        ближайшем HVN-сопротивлении (объёмный профиль). Иначе — ATR-стоп и
+        тейк по R:R.
+        """
         if self.position.size <= 0:
             return
         price = float(self.data.close[0])
         stop_dist = self._stop_distance()
-        stop = price - stop_dist
-        target = price + stop_dist * float(self.p.rr_ratio)
+        if self._use_profile():
+            sup, res = self._profile_levels()
+            stop = sup if sup is not None else price - stop_dist
+            min_gap = price * 0.002
+            if price - stop < min_gap:
+                stop = price - stop_dist
+            if res is not None and res > price + min_gap:
+                target = res
+            else:
+                target = price + max(price - stop, min_gap) * float(self.p.rr_ratio)
+        else:
+            stop = price - stop_dist
+            target = price + stop_dist * float(self.p.rr_ratio)
         self._sl_order = self.sell(exectype=bt.Order.Stop, price=stop, size=self.position.size)
         self._tp_order = self.sell(exectype=bt.Order.Limit, price=target, size=self.position.size)
 
@@ -275,6 +325,8 @@ class DonchianBreakout(RiskAwareStrategy):
 # широкий стоп 4.5 ATR, тейк 1:3, вход выше EMA(250). Без фильтров стратегия
 # убыточна (-45%/год); с ними: бычье окно +8.4% PF 5.9, полный год +3.7% PF 1.5
 # (лучше Поглощения на обоих окнах). Стоп 5.0/5.5 ATR хуже — 4.5 оптимален.
+# SL/TP по объёмному профилю HVN (vol_profile=1): b=50 p=100 m=1.2 — бычье окно
+# +10.9% PF 7.1, полный год +4.2% PF 1.5 (базис ATR +8.4% PF 5.9 / +3.7% PF 1.5).
 _PINBAR_PARAMS_TUPLE = (
     ("wick_ratio", 2.5),
     ("risk_pct", 1.0),
@@ -286,6 +338,10 @@ _PINBAR_PARAMS_TUPLE = (
     ("vol_period", 40),
     ("vol_mult", 1.5),
     ("bull_frac", 0.7),
+    ("vol_profile", 1),
+    ("profile_bins", 50),
+    ("profile_period", 100),
+    ("profile_mult", 1.2),
 )
 
 
@@ -404,6 +460,10 @@ STRATEGIES = {
             {"key": "vol_period", "label": "Объём: период среднего (0 = выкл)", "type": "int", "default": 40},
             {"key": "vol_mult", "label": "Объём: мин. кратность среднего", "type": "float", "default": 1.5},
             {"key": "bull_frac", "label": "Доля быков на свече входа (0 = выкл)", "type": "float", "default": 0.7},
+            {"key": "vol_profile", "label": "SL/TP по объёмному профилю HVN (1 = да)", "type": "int", "default": 1},
+            {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 50},
+            {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 100},
+            {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.2},
         ],
     },
     "engulfing": {

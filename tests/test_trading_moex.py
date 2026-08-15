@@ -287,6 +287,26 @@ def test_bulls_dominate():
     assert bulls_dominate(100, 100, 100, 0.7) is False
 
 
+def test_volume_profile_levels():
+    from trading_moex.app.signals import volume_profile_levels
+
+    # однобокий объём: основной объём у нижней границы -> поддержка внизу
+    highs = [102.0] * 5 + [101.0]
+    lows = [100.0] * 5 + [100.0]
+    closes = [101.0] * 6
+    vols = [100.0] * 5 + [1000.0]  # огромный объём на последней свече у 100
+    sup, res = volume_profile_levels(highs, lows, closes, vols, price=101.5, bins=20, mult=1.5)
+    assert sup is not None and sup < 101.5
+    assert res is None or res > 101.5
+
+    # NaN-бары (тёплый период) пропускаются
+    sup2, res2 = volume_profile_levels([float("nan")] * 3, [float("nan")] * 3,
+                                       [float("nan")] * 3, [float("nan")] * 3,
+                                       price=100.0, bins=20, mult=1.5)
+    assert sup2 is None and res2 is None
+
+
+
 def test_pinbar_position_state():
     import numpy as np
 

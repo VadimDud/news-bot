@@ -120,6 +120,16 @@ def _parse_date(raw: str, fallback: date) -> date:
         return fallback
 
 
+def _ticker_suggestions() -> list[str]:
+    """Тикеры для подсказок в поле ввода: сначала добавленные в watchlist, потом каталог."""
+    current = storage.list_watchlist()
+    suggestions = list(current)
+    for item in AVAILABLE_TICKERS:
+        if item["ticker"] not in suggestions:
+            suggestions.append(item["ticker"])
+    return suggestions
+
+
 # ── Маршруты ─────────────────────────────────────────────────────────────────
 
 async def login_page(request: web.Request) -> web.Response:
@@ -167,6 +177,7 @@ async def watchlist_page(request: web.Request) -> web.Response:
             "periods": data.PERIODS,
             "today": date.today().isoformat(),
             "year_ago": (date.today() - timedelta(days=365)).isoformat(),
+            "ticker_suggestions": _ticker_suggestions(),
         },
     )
 
@@ -256,6 +267,7 @@ async def index(request: web.Request) -> web.Response:
         "runs": runs,
         "today": date.today().isoformat(),
         "year_ago": (date.today() - timedelta(days=365)).isoformat(),
+        "ticker_suggestions": _ticker_suggestions(),
     }
     return aiohttp_jinja2.render_template("index.html", request, ctx)
 

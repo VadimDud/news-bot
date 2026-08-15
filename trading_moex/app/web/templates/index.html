@@ -8,7 +8,12 @@
     <div class="grid">
       <div>
         <label for="ticker">Тикер (MOEX)</label>
-        <input type="text" id="ticker" name="ticker" value="SBER" placeholder="SBER, LKOH, GMKN..." required>
+        <input type="text" id="ticker" name="ticker" value="SBER" placeholder="SBER, LKOH, GMKN..." list="ticker-suggestions" required>
+        <datalist id="ticker-suggestions">
+          {% for t in ticker_suggestions %}
+          <option value="{{ t }}"></option>
+          {% endfor %}
+        </datalist>
       </div>
       <div>
         <label for="period">Таймфрейм</label>

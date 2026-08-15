@@ -70,7 +70,8 @@ def position_size(equity: float, risk_pct: float, stop_distance_value: float, pr
 
     ``risk_pct`` — доля (0.01 = 1 %). Лот округляется вниз, минимум 1.
     """
-    if equity <= 0 or price <= 0 or stop_distance_value <= 0:
+    if not (equity > 0) or not (price > 0) or not (stop_distance_value > 0):
+        # NaN тоже отсекается: сравнение NaN > 0 ложно
         return 1
     risk_amount = equity * risk_pct
     size = int(risk_amount / stop_distance_value)

@@ -197,6 +197,9 @@ def test_risk_position_size():
     # минимум 1
     assert position_size(100_000, 0.01, 5000.0, 100.0) == 1
     assert position_size(100_000, 0.01, 0.0, 100.0) == 1
+    # NaN-дистанция стопа не должна валить расчёт лота
+    assert position_size(100_000, 0.01, float("nan"), 100.0) == 1
+    assert position_size(100_000, 0.01, -5.0, 100.0) == 1
 
 
 def test_risk_atr_and_stops():
@@ -340,4 +343,66 @@ def test_backtest_smoke_with_risk_strategies():
         assert "expectancy" in res
         assert "longest_win_streak" in res
         assert "n_bars" in res
+
+
+# ── Live: уровни SL/TP в сигналах ────────────────────────────────────────────
+
+def _fake_live_trader(strategy: str, df):
+    from trading_moex.app.live import LiveTrader
+
+    trader = LiveTrader()
+    trader.set_strategy(strategy)
+
+    async def fake_candles(client, figi):
+        return df
+
+    trader._candles_df = fake_candles
+    return trader
+
+
+async def test_live_signals_stop_target_on_hold():
+    """Удерживаемая позиция (hold) должна нести уровни SL/TP, иначе live их не проверяет."""
+    close = np.linspace(100, 140, 60)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1000.0}
+    )
+    trader = _fake_live_trader("sma_cross", df)
+    signals = await trader._compute_signals(None, {"TEST": "figi"})
+    info = signals["TEST"]
+    assert info["action"] == "hold"  # уже в позиции, не вход
+    assert info["stop"] is not None and info["stop"] == info["stop"]
+    assert info["target"] is not None and info["target"] == info["target"]
+    assert info["stop"] < df["close"].iloc[-1] < info["target"]
+
+
+async def test_live_signals_buy_has_stop_target():
+    """Сигнал входа тоже несёт уровни SL/TP."""
+    n = 60
+    close = np.linspace(110, 100, 35).tolist()  # плавный спад
+    close += [100.0] * (n - 35 - 1)  # флэт
+    close += [120.0]  # скачок на последнем баре: SMA10 пересекает SMA30 → buy
+    close = np.array(close)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1000.0}
+    )
+    trader = _fake_live_trader("sma_cross", df)
+    signals = await trader._compute_signals(None, {"TEST": "figi"})
+    info = signals["TEST"]
+    assert info["action"] == "buy"
+    assert info["stop"] is not None and info["stop"] < df["close"].iloc[-1]
+    assert info["target"] is not None and info["target"] > df["close"].iloc[-1]
+
+
+async def test_live_signals_nan_atr_fallback():
+    """Короткая история при большом периоде ATR (NaN) не должна давать NaN-уровни."""
+    close = np.linspace(100, 140, 40)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1000.0}
+    )
+    trader = _fake_live_trader("sma_cross", df)
+    trader.strategy_params["atr_period"] = 200  # ATR целиком NaN на 40 барах
+    signals = await trader._compute_signals(None, {"TEST": "figi"})
+    info = signals["TEST"]
+    assert info["stop"] is not None and info["stop"] == info["stop"]
+    assert info["stop"] < df["close"].iloc[-1] < info["target"]
 

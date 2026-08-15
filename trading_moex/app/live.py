@@ -290,9 +290,13 @@ class LiveTrader:
                 if trend_period:
                     position = sig.apply_trend_filter(position, df["close"], trend_period)
                 entry["action"] = sig.signal_from_position(position)
-                if entry["action"] == "buy":
+                if bool(position.iloc[-1]):
+                    # позиция удерживается — считаем уровни SL/TP, чтобы
+                    # отслеживать их на каждом цикле (а не только на входе)
                     last = df.iloc[-1]
-                    atr_val = float(risk_module.atr(df, atr_period).iloc[-1] or 0.0)
+                    atr_val = float(risk_module.atr(df, atr_period).iloc[-1])
+                    if atr_val != atr_val or atr_val <= 0:  # NaN / вырожденные данные
+                        atr_val = 0.0
                     stop_dist = max(atr_val * atr_mult, float(last["close"]) * 0.005)
                     entry["stop"] = round(float(last["close"]) - stop_dist, 4)
                     entry["target"] = round(float(last["close"]) + stop_dist * rr_ratio, 4)

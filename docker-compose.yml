@@ -19,7 +19,10 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      - ./dbdata/trader:/app/data
+      # Именованный volume: при первом запуске Docker копирует /app/data из
+      # образа вместе с правами владельца (botuser), в отличие от bind-mount,
+      # который создаётся с root-правами и ломает SQLite.
+      - trader-data:/app/data
     logging:
       driver: json-file
       options:
@@ -48,3 +51,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  trader-data:

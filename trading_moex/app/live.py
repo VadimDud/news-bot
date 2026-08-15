@@ -24,6 +24,7 @@ TICKER_LIVE_INTERVALS = {
     "1min": "1_MIN",
     "5min": "5_MIN",
     "15min": "15_MIN",
+    "30min": "30_MIN",
     "hour": "HOUR",
     "day": "DAY",
     "week": "WEEK",

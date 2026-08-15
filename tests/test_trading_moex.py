@@ -475,6 +475,14 @@ async def test_data_download_route(tmp_path, monkeypatch):
         body = await resp.text()
         assert body.splitlines()[0] == "datetime,open,high,low,close,volume"
         assert "2025-06-01" in body
+
+        # дефолтный таймфрейм скачивания — 1 минута
+        resp = await client.post(
+            "/data/download",
+            data={"ticker": "SBER", "start": "2025-06-01", "end": "2025-06-02"},
+        )
+        assert resp.status == 200
+        assert "SBER_1min_2025-06-01_2025-06-02.csv" in resp.headers["Content-Disposition"]
     finally:
         await client.close()
 
@@ -590,4 +598,243 @@ def test_fetch_history_resamples_non_native_period(tmp_path, monkeypatch):
     df = moex_data.fetch_history("SBER", "1day", d(2026, 7, 1), d(2026, 7, 2), use_cache=False)
     assert requested_periods == ["1D"]
     assert len(df) == len(rows)
+
+    # 30min тоже ненативный — качаем 1min, ресэмплим в 1 бакет 30 минут
+    requested_periods.clear()
+    df = moex_data.fetch_history("SBER", "30min", d(2026, 7, 1), d(2026, 7, 2), use_cache=False)
+    assert requested_periods == ["1min"]
+    assert len(df) == 1
+    assert df.index[0] == t0
+
+
+# ── Синхронизация данных с базой ─────────────────────────────────────────────
+
+def _mock_trader_config(tmp_path, monkeypatch):
+    from trading_moex.app import config, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    monkeypatch.setattr(config, "CANDLE_CACHE_DIR", tmp_path / "candles")
+    storage.init_db()
+    return storage
+
+
+def test_storage_candles_upsert_and_range(tmp_path, monkeypatch):
+    from datetime import date
+
+    storage = _mock_trader_config(tmp_path, monkeypatch)
+
+    df = pd.DataFrame(
+        {
+            "begin": ["2026-07-01 10:00:00", "2026-07-01 10:15:00", "2026-07-02 10:00:00"],
+            "open": [1, 2, 3], "high": [1.5, 2.5, 3.5], "low": [0.5, 1.5, 2.5],
+            "close": [1.2, 2.2, 3.2], "volume": [10, 20, 30],
+        }
+    )
+    assert storage.save_candles("SBER", "15min", df) == 3
+    assert storage.candle_count("SBER", "15min") == 3
+    assert storage.first_candle_time("SBER", "15min") == "2026-07-01 10:00:00"
+    assert storage.last_candle_time("SBER", "15min") == "2026-07-02 10:00:00"
+
+    # upsert: тот же begin перезаписывается, дублей нет
+    upd = df.copy()
+    upd.loc[0, "close"] = 9.9
+    storage.save_candles("SBER", "15min", upd)
+    assert storage.candle_count("SBER", "15min") == 3
+
+    # диапазон [start, end] включает весь день end
+    day1 = storage.get_candles("SBER", "15min", start=date(2026, 7, 1), end=date(2026, 7, 1))
+    assert len(day1) == 2
+    assert day1.iloc[0]["close"] == 9.9
+    assert storage.candle_count("LKOH", "15min") == 0  # периоды изолированы
+
+
+def test_fetch_history_incremental_tail_only(tmp_path, monkeypatch):
+    """Если в базе есть данные до 10.07 — качается только хвост после этой даты."""
+    from datetime import date as d
+
+    from trading_moex.app import data as moex_data
+
+    storage = _mock_trader_config(tmp_path, monkeypatch)
+
+    existing = pd.DataFrame(
+        {
+            "begin": ["2026-07-01", "2026-07-02", "2026-07-10"],
+            "open": [100, 101, 102], "high": [101, 102, 103], "low": [99, 100, 101],
+            "close": [100.5, 101.5, 102.5], "volume": [10, 10, 10],
+        }
+    )
+    storage.save_candles("SBER", "1day", existing)
+
+    calls = []
+    new_rows = [
+        {"begin": "2026-07-11", "end": "2026-07-11", "open": 110, "high": 111, "low": 109,
+         "close": 110.5, "volume": 10, "value": 1000.0},
+        {"begin": "2026-07-12", "end": "2026-07-12", "open": 111, "high": 112, "low": 110,
+         "close": 111.5, "volume": 10, "value": 1000.0},
+    ]
+
+    def fake_fetch_raw(ticker, period, start, end):
+        calls.append((ticker, period, start, end))
+        return new_rows
+
+    monkeypatch.setattr(moex_data, "_fetch_raw", fake_fetch_raw)
+
+    df = moex_data.fetch_history("SBER", "1day", d(2026, 7, 1), d(2026, 7, 15), use_cache=True)
+    assert len(calls) == 1
+    _, period, start, _ = calls[0]
+    assert period == "1D"
+    # старт загрузки — ровно после последней сохранённой свечи (10.07 00:00:00 + 1с)
+    assert start == pd.Timestamp("2026-07-10") + pd.Timedelta(seconds=1)
+    # результат: существующие + новые, отсортированные
+    assert len(df) == 5
+    assert df.index[0] == pd.Timestamp("2026-07-01")
+    assert df.index[-1] == pd.Timestamp("2026-07-12")
+    assert storage.candle_count("SBER", "1day") == 5
+
+
+def test_fetch_history_backfill_before_stored(tmp_path, monkeypatch):
+    """Запрошенный диапазон раньше первой сохранённой свечи — докачивается бэкфилл."""
+    from datetime import date as d
+
+    from trading_moex.app import data as moex_data
+
+    storage = _mock_trader_config(tmp_path, monkeypatch)
+
+    existing = pd.DataFrame(
+        {
+            "begin": ["2026-07-05", "2026-07-10"],
+            "open": [102, 105], "high": [103, 106], "low": [101, 104],
+            "close": [102.5, 105.5], "volume": [10, 10],
+        }
+    )
+    storage.save_candles("SBER", "1day", existing)
+
+    calls = []
+    backfill_rows = [
+        {"begin": "2026-07-01", "end": "2026-07-01", "open": 100, "high": 101, "low": 99,
+         "close": 100.5, "volume": 10, "value": 1000.0},
+        {"begin": "2026-07-03", "end": "2026-07-03", "open": 101, "high": 102, "low": 100,
+         "close": 101.5, "volume": 10, "value": 1000.0},
+    ]
+
+    def fake_fetch_raw(ticker, period, start, end):
+        calls.append((start, end))
+        if start < pd.Timestamp("2026-07-05"):
+            return backfill_rows
+        return []  # хвоста нет
+
+    monkeypatch.setattr(moex_data, "_fetch_raw", fake_fetch_raw)
+
+    df = moex_data.fetch_history("SBER", "1day", d(2026, 7, 1), d(2026, 7, 15), use_cache=True)
+    # два окна: хвост (10.07+, пусто) и бэкфилл [01.07, 05.07)
+    assert len(calls) == 2
+    starts = sorted((start for start, _ in calls))
+    assert starts[0] == pd.Timestamp("2026-07-01")  # бэкфилл
+    assert starts[1] == pd.Timestamp("2026-07-10") + pd.Timedelta(seconds=1)  # хвост
+    backfill_start, backfill_end = min(calls, key=lambda c: c[0])
+    assert backfill_end == pd.Timestamp("2026-07-05")  # до первой сохранённой свечи
+    assert len(df) == 4  # 2 бэкфилла + 2 существующих
+    assert df.index[0] == pd.Timestamp("2026-07-01")
+    assert storage.candle_count("SBER", "1day") == 4
+
+
+def test_fetch_history_no_new_data_keeps_db(tmp_path, monkeypatch):
+    """Хвост пуст (данные уже актуальны) — база не меняется, результат из базы."""
+    from datetime import date as d
+
+    from trading_moex.app import data as moex_data
+
+    storage = _mock_trader_config(tmp_path, monkeypatch)
+
+    existing = pd.DataFrame(
+        {
+            "begin": ["2026-07-01", "2026-07-02"],
+            "open": [100, 101], "high": [101, 102], "low": [99, 100],
+            "close": [100.5, 101.5], "volume": [10, 10],
+        }
+    )
+    storage.save_candles("SBER", "1day", existing)
+
+    calls = []
+    monkeypatch.setattr(moex_data, "_fetch_raw", lambda *a, **k: (calls.append(a), [])[1])
+
+    df = moex_data.fetch_history("SBER", "1day", d(2026, 7, 1), d(2026, 7, 2), use_cache=True)
+    assert calls  # хвост запрашивался
+    assert len(df) == 2
+    assert storage.candle_count("SBER", "1day") == 2
+
+
+def test_fetch_history_use_cache_false_reloads_full_range(tmp_path, monkeypatch):
+    """use_cache=False — полная перезагрузка диапазона, несмотря на базу."""
+    from datetime import date as d
+
+    from trading_moex.app import data as moex_data
+
+    storage = _mock_trader_config(tmp_path, monkeypatch)
+
+    existing = pd.DataFrame(
+        {
+            "begin": ["2026-07-01"],
+            "open": [100], "high": [101], "low": [99],
+            "close": [100.5], "volume": [10],
+        }
+    )
+    storage.save_candles("SBER", "1day", existing)
+
+    calls = []
+    rows = [
+        {"begin": "2026-07-01", "end": "2026-07-01", "open": 200, "high": 201, "low": 199,
+         "close": 200.5, "volume": 20, "value": 2000.0},
+        {"begin": "2026-07-02", "end": "2026-07-02", "open": 201, "high": 202, "low": 200,
+         "close": 201.5, "volume": 20, "value": 2000.0},
+    ]
+    monkeypatch.setattr(moex_data, "_fetch_raw", lambda *a, **k: (calls.append(a), rows)[1])
+
+    df = moex_data.fetch_history("SBER", "1day", d(2026, 7, 1), d(2026, 7, 2), use_cache=False)
+    assert len(calls) == 1
+    _, period, start, _ = calls[0]
+    assert period == "1D"
+    assert start == pd.Timestamp("2026-07-01")  # полный диапазон с начала
+    assert len(df) == 2
+    assert df["open"].iloc[0] == 200  # перезаписано свежими данными
+
+
+async def test_data_status_endpoint(tmp_path, monkeypatch):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from trading_moex.app import config, settings, storage
+    from trading_moex.app.web.app import create_app
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    settings.set("TRADER_WEB_PASSWORD", "testpass")
+
+    df = pd.DataFrame(
+        {
+            "begin": ["2026-07-01", "2026-07-10"],
+            "open": [100, 110], "high": [101, 111], "low": [99, 109],
+            "close": [100.5, 110.5], "volume": [10, 10],
+        }
+    )
+    storage.save_candles("SBER", "1day", df)
+
+    app = create_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        await client.post("/login", data={"password": "testpass"}, allow_redirects=False)
+        resp = await client.get("/data/status?ticker=SBER&period=1day")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["count"] == 2
+        assert body["last"] == "2026-07-10"
+
+        resp = await client.get("/data/status?ticker=SBER&period=bogus")
+        assert resp.status == 200
+        assert (await resp.json())["count"] == 0
+    finally:
+        await client.close()
 

@@ -7,7 +7,7 @@
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import config
 
@@ -60,6 +60,21 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS watchlist (
                 ticker TEXT PRIMARY KEY,
                 added_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS candles (
+                ticker TEXT NOT NULL,
+                period TEXT NOT NULL,
+                begin TEXT NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                PRIMARY KEY (ticker, period, begin)
             )
             """
         )
@@ -165,3 +180,93 @@ def add_watchlist(ticker: str) -> None:
 def remove_watchlist(ticker: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
+
+
+# ── База данных свечей ───────────────────────────────────────────────────────
+
+def save_candles(ticker: str, period: str, df) -> int:
+    """Upsert свечей в таблицу ``candles`` (первичный ключ ticker,period,begin).
+
+    ``df`` — DataFrame с колонками begin, open, high, low, close, volume.
+    Возвращает количество записанных строк.
+    """
+    import pandas as pd
+
+    rows = []
+    for _, r in df.iterrows():
+        begin = r["begin"]
+        if isinstance(begin, pd.Timestamp):
+            begin = begin.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            begin = str(begin)
+        rows.append(
+            (
+                ticker,
+                period,
+                begin,
+                float(r["open"]),
+                float(r["high"]),
+                float(r["low"]),
+                float(r["close"]),
+                float(r["volume"]),
+            )
+        )
+    if not rows:
+        return 0
+    with _connect() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO candles (ticker, period, begin, open, high, low, close, volume)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+    return len(rows)
+
+
+def get_candles(ticker: str, period: str, start: date | None = None, end: date | None = None):
+    """Свечи из базы в полуинтервале [start, end), отсортированные по begin.
+
+    ``end`` трактуется включительно как дата — запрос включает весь день ``end``.
+    """
+    import pandas as pd
+
+    query = "SELECT begin, open, high, low, close, volume FROM candles WHERE ticker = ? AND period = ?"
+    params: list = [ticker, period]
+    if start is not None:
+        query += " AND begin >= ?"
+        params.append(start.isoformat())
+    if end is not None:
+        query += " AND begin < ?"
+        params.append((end + timedelta(days=1)).isoformat())
+    query += " ORDER BY begin"
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=["begin", "open", "high", "low", "close", "volume"])
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+def last_candle_time(ticker: str, period: str) -> str | None:
+    """Метка (begin) последней сохранённой свечи или None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT MAX(begin) AS v FROM candles WHERE ticker = ? AND period = ?", (ticker, period)
+        ).fetchone()
+    return row["v"] if row else None
+
+
+def first_candle_time(ticker: str, period: str) -> str | None:
+    """Метка (begin) первой сохранённой свечи или None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT MIN(begin) AS v FROM candles WHERE ticker = ? AND period = ?", (ticker, period)
+        ).fetchone()
+    return row["v"] if row else None
+
+
+def candle_count(ticker: str, period: str) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM candles WHERE ticker = ? AND period = ?", (ticker, period)
+        ).fetchone()
+    return int(row["n"]) if row else 0

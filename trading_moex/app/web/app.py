@@ -245,10 +245,10 @@ async def index(request: web.Request) -> web.Response:
 
 
 async def data_download(request: web.Request) -> web.Response:
-    """Скачать свечи тикера с MOEX в CSV (общий кэш с бэктестом, 24 ч)."""
+    """Скачать свечи тикера с MOEX в CSV (общая база данных свечей с бэктестом)."""
     form = await request.post()
     ticker = form.get("ticker", "").strip().upper()
-    period = form.get("period", "1day")
+    period = form.get("period", "1min")
     start = _parse_date(form.get("start", ""), date.today() - timedelta(days=365))
     end = _parse_date(form.get("end", ""), date.today())
 
@@ -275,6 +275,22 @@ async def data_download(request: web.Request) -> web.Response:
         content_type="text/csv",
         charset="utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+async def data_status(request: web.Request) -> web.Response:
+    """Статус базы данных свечей для тикера/таймфрейма."""
+    ticker = request.query.get("ticker", "").strip().upper()
+    period = request.query.get("period", "1day")
+    if not ticker or period not in data.PERIODS:
+        return web.json_response({"ticker": ticker, "period": period, "last": None, "count": 0})
+    return web.json_response(
+        {
+            "ticker": ticker,
+            "period": period,
+            "last": storage.last_candle_time(ticker, period),
+            "count": storage.candle_count(ticker, period),
+        }
     )
 
 
@@ -426,6 +442,7 @@ def create_app() -> web.Application:
     app.router.add_post("/backtest/run", backtest_run)
     app.router.add_get("/backtest/{run_id}", backtest_detail)
     app.router.add_post("/data/download", data_download)
+    app.router.add_get("/data/status", data_status)
     app.router.add_get("/live", live_page)
     app.router.add_get("/live/data", live_data)
     app.router.add_post("/live/start", live_start)

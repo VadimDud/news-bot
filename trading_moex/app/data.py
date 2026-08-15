@@ -1,14 +1,18 @@
-"""Загрузка исторических данных с MOEX (AlgoPack) с кэшированием в CSV."""
+"""Загрузка исторических данных с MOEX (AlgoPack) с синхронизацией в базу.
+
+Свечи хранятся в SQLite (таблица ``candles``, ключ ticker+period+begin).
+При запросе докачивается только недостающая информация:
+- хвост — новые свечи после последней сохранённой;
+- бэкфилл — более ранний диапазон, чем первая сохранённая свеча.
+"""
 
 import logging
-import time
-from datetime import date, timedelta
-from pathlib import Path
+from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 
-from . import config
 from . import settings
+from . import storage
 
 logger = logging.getLogger("moex_trader.data")
 
@@ -17,6 +21,7 @@ PERIODS = {
     "1min": "1min",
     "5min": "5min",
     "15min": "15min",
+    "30min": "30min",
     "60min": "1h",
     "1day": "1D",
     "1week": "1W",
@@ -25,14 +30,12 @@ PERIODS = {
 
 CANDLE_COLUMNS = ["open", "close", "high", "low", "value", "volume"]
 
-CACHE_TTL_SECONDS = 24 * 3600
-
 _MAX_BATCH = 5000
 
 # Таймфреймы без нативного интервала на MOEX: moexalgo качает 1-минутные свечи
 # и ресэмплит сам, но его resample падает с AttributeError на пустых данных.
 # Поэтому для них запрашиваем нативные 1min и ресэмплим сами через pandas.
-RESAMPLE_FROM_1MIN = {"5min": "5min", "15min": "15min"}
+RESAMPLE_FROM_1MIN = {"5min": "5min", "15min": "15min", "30min": "30min"}
 
 
 def _resample_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -84,9 +87,37 @@ def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
     return out[~out.index.duplicated(keep="last")]
 
 
-def _cache_path(ticker: str, period: str, start: date, end: date) -> Path:
-    config.CANDLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return config.CANDLE_CACHE_DIR / f"{ticker}_{period}_{start.isoformat()}_{end.isoformat()}.csv"
+def _fetch_ranges(
+    start: date, end: date, period: str, last: str | None, first: str | None, use_cache: bool
+) -> list[tuple[datetime, datetime]]:
+    """Окна загрузки в полуинтервалах [start_dt, end_dt).
+
+    Если ``use_cache`` и в базе уже есть данные, качаются только недостающие
+    куски: хвост (после последней свечи) и бэкфилл (до первой свечи).
+    Для ресэмплируемых периодов хвост начинается с начала последнего бакета,
+    чтобы он пересобрался из полных минутных свечей.
+    """
+    start_dt = datetime.combine(start, time.min)
+    end_dt = datetime.combine(end + timedelta(days=1), time.min)
+
+    if not use_cache or last is None:
+        return [(start_dt, end_dt)]
+
+    ranges: list[tuple[datetime, datetime]] = []
+    last_ts = pd.Timestamp(last)
+    if period in RESAMPLE_FROM_1MIN:
+        tail_start = last_ts.to_pydatetime()
+    else:
+        tail_start = (last_ts + pd.Timedelta(seconds=1)).to_pydatetime()
+    if tail_start < end_dt:
+        ranges.append((max(start_dt, tail_start), end_dt))
+
+    if first is not None:
+        first_ts = pd.Timestamp(first).to_pydatetime()
+        if start_dt < first_ts:
+            ranges.append((start_dt, min(end_dt, first_ts)))
+
+    return ranges
 
 
 def _fetch_raw(ticker: str, period: str, start: date, end: date) -> list[dict]:
@@ -109,40 +140,42 @@ def _fetch_raw(ticker: str, period: str, start: date, end: date) -> list[dict]:
 
 
 def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: bool = True) -> pd.DataFrame:
-    """Исторические свечи с MOEX. Кэш действителен 24 часа.
+    """Исторические свечи с MOEX, синхронизированные с базой.
 
-    ``ticker`` — код инструмента на MOEX (SBER, LKOH, GMKN, ...).
+    Докачиваются только недостающие куски (хвост после последней сохранённой
+    свечи и бэкфилл до первой); результат возвращается из базы за [start, end].
     """
     if period not in PERIODS:
         raise ValueError(f"Неизвестный период {period!r}; доступно: {', '.join(PERIODS)}")
     if start >= end:
         raise ValueError("Дата начала должна быть раньше даты окончания")
-    moex_period = PERIODS[period]
-    request_period = "1min" if period in RESAMPLE_FROM_1MIN else moex_period
+    request_period = "1min" if period in RESAMPLE_FROM_1MIN else PERIODS[period]
 
-    cache_path = _cache_path(ticker, period, start, end)
-    if use_cache and cache_path.exists():
-        age = time.time() - cache_path.stat().st_mtime
-        if age < CACHE_TTL_SECONDS:
-            df = pd.read_csv(cache_path, parse_dates=["begin"])
-            logger.info("Данные из кэша: %s", cache_path.name)
-            return normalize_history(df)
+    last = storage.last_candle_time(ticker, period)
+    first = storage.first_candle_time(ticker, period)
+    ranges = _fetch_ranges(start, end, period, last, first, use_cache)
 
-    _ensure_login()
-    logger.info("Загрузка %s %s [%s .. %s] с MOEX", ticker, period, start, end)
-    df = pd.DataFrame(_fetch_raw(ticker, request_period, start, end))
-    if df.empty:
+    new_rows: list[dict] = []
+    for rng_start, rng_end in ranges:
+        _ensure_login()
+        rows = _fetch_raw(ticker, request_period, rng_start, rng_end)
+        logger.info("Загрузка %s %s [%s .. %s) с MOEX — %s строк", ticker, period, rng_start, rng_end, len(rows))
+        new_rows.extend(rows)
+
+    if new_rows:
+        df = pd.DataFrame(new_rows)
+        if period in RESAMPLE_FROM_1MIN:
+            df = _resample_candles(df, RESAMPLE_FROM_1MIN[period])
+        added = storage.save_candles(ticker, period, df)
+        logger.info("Синхронизировано: добавлено %s свечей %s %s", added, ticker, period)
+
+    out = storage.get_candles(ticker, period, start=start, end=end)
+    if out.empty:
         raise ValueError(
             f"MOEX не вернул данных по {ticker} за {start.isoformat()}..{end.isoformat()}. "
             "Проверьте тикер и даты — возможно, бумага делистингована или не торговалась в этот период."
         )
-
-    if period in RESAMPLE_FROM_1MIN:
-        df = _resample_candles(df, RESAMPLE_FROM_1MIN[period])
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(cache_path, index=False)
-    return normalize_history(df)
+    return normalize_history(out)
 
 
 def to_csv(df: pd.DataFrame) -> str:

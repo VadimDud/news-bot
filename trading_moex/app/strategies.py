@@ -33,11 +33,20 @@ class TradeRecordingStrategy(bt.Strategy):
 
 # Общие параметры риск-менеджмента: кортеж для backtrader и список для веб-формы
 _RISK_PARAMS_TUPLE = (
-    ("risk_pct", 1.0),        # % риска на сделку (1.0 = 1%)
+    ("risk_pct", 1.0),
     ("atr_period", 14),
     ("atr_stop_mult", 1.5),
     ("rr_ratio", 2.0),
-    ("trend_period", 0),      # 0 — трендовый фильтр выключен
+    ("trend_period", 0),
+)
+
+# bt-параметры Поглощения — дефолты совпадают с подобранными на YDEX
+_ENGULFING_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("atr_stop_mult", 4.0),
+    ("rr_ratio", 3.0),
+    ("trend_period", 100),
 )
 
 _RISK_PARAMS = [
@@ -46,6 +55,17 @@ _RISK_PARAMS = [
     {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
     {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
     {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 0},
+]
+
+# Дефолты Поглощения подобраны перебором на YDEX (2025-10..2026-02, бычий период,
+# дивиденды 80 руб./год, последняя выплата 28.04.2025 вне окна): широкий стоп 4 ATR,
+# тейк 1:3, вход только выше EMA(100). 30min: PF 1.16 / +1.55%, 60min: ~PF 1.05.
+_ENGULFING_PARAMS = [
+    {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+    {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+    {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 4.0},
+    {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 3.0},
+    {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 100},
 ]
 
 
@@ -239,7 +259,7 @@ class PinbarStrategy(RiskAwareStrategy):
 class EngulfingStrategy(RiskAwareStrategy):
     """Бычье/медвежье поглощение. Вход на бычьем, выход — по SL/TP или медвежьему."""
 
-    params = _RISK_PARAMS_TUPLE
+    params = _ENGULFING_PARAMS_TUPLE
 
     def _bull(self) -> bool:
         return sig.is_bullish_engulfing(
@@ -300,7 +320,7 @@ STRATEGIES = {
     "engulfing": {
         "name": "Поглощение (Engulfing)",
         "cls": EngulfingStrategy,
-        "params": _RISK_PARAMS,
+        "params": _ENGULFING_PARAMS,
     },
 }
 

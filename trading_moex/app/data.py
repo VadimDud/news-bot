@@ -105,6 +105,13 @@ def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: b
     return normalize_history(df)
 
 
+def to_csv(df: pd.DataFrame) -> str:
+    """Экспорт нормализованных свечей в CSV-строку (datetime,open,high,low,close,volume)."""
+    out = df.reset_index().copy()
+    out.rename(columns={out.columns[0]: "datetime"}, inplace=True)
+    return out.to_csv(index=False)
+
+
 def today() -> date:
     return date.today()
 

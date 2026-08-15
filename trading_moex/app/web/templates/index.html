@@ -73,6 +73,36 @@ showParams();
 </script>
 
 <div class="card">
+  <h2>Скачать данные тикера с MOEX</h2>
+  <p class="hint">Экспорт свечей в CSV: <code>datetime,open,high,low,close,volume</code>. Используется общий с бэктестом кэш (24 ч).</p>
+  <form method="post" action="/data/download">
+    <div class="grid">
+      <div>
+        <label for="dl_ticker">Тикер (MOEX)</label>
+        <input type="text" id="dl_ticker" name="ticker" value="SBER" placeholder="SBER, LKOH, GMKN..." required>
+      </div>
+      <div>
+        <label for="dl_period">Таймфрейм</label>
+        <select id="dl_period" name="period">
+          {% for key in periods %}
+          <option value="{{ key }}" {{ 'selected' if key == '1day' }}>{{ key }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="dl_start">С даты</label>
+        <input type="date" id="dl_start" name="start" value="{{ year_ago }}">
+      </div>
+      <div>
+        <label for="dl_end">По дату</label>
+        <input type="date" id="dl_end" name="end" value="{{ today }}">
+      </div>
+    </div>
+    <button type="submit">Скачать CSV</button>
+  </form>
+</div>
+
+<div class="card">
   <h2>История бэктестов</h2>
   {% if runs %}
   <table>

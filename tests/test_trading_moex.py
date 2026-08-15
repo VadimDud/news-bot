@@ -406,3 +406,75 @@ async def test_live_signals_nan_atr_fallback():
     assert info["stop"] is not None and info["stop"] == info["stop"]
     assert info["stop"] < df["close"].iloc[-1] < info["target"]
 
+
+# ── Скачивание данных тикера с MOEX ──────────────────────────────────────────
+
+def test_data_to_csv():
+    from trading_moex.app.data import to_csv
+
+    idx = pd.date_range("2025-01-01", periods=3, freq="D", name="datetime")
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 2.0, 3.0],
+            "high": [1.5, 2.5, 3.5],
+            "low": [0.9, 1.9, 2.9],
+            "close": [1.2, 2.2, 3.2],
+            "volume": [10, 20, 30],
+        },
+        index=idx,
+    )
+    csv_text = to_csv(df)
+    assert csv_text.splitlines()[0] == "datetime,open,high,low,close,volume"
+    assert "2025-01-01" in csv_text
+    assert "3.5" in csv_text
+
+
+async def test_data_download_route(tmp_path, monkeypatch):
+    """POST /data/download отдаёт CSV и требует авторизации."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from trading_moex.app import config, data as moex_data, settings, storage
+    from trading_moex.app.web.app import create_app
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    settings.set("TRADER_WEB_PASSWORD", "testpass")
+
+    idx = pd.date_range("2025-06-01", periods=5, freq="D")
+    close = np.linspace(100, 110, 5)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1000.0},
+        index=idx,
+    )
+    df.index.name = "datetime"
+    monkeypatch.setattr(moex_data, "fetch_history", lambda *a, **k: df)
+
+    app = create_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        # без авторизации — редирект на логин
+        resp = await client.post("/data/download", data={"ticker": "SBER"}, allow_redirects=False)
+        assert resp.status == 302
+
+        resp = await client.post("/login", data={"password": "testpass"}, allow_redirects=False)
+        assert resp.status == 302
+
+        resp = await client.post(
+            "/data/download",
+            data={
+                "ticker": "SBER", "period": "1day",
+                "start": "2025-06-01", "end": "2025-06-10",
+            },
+        )
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/csv")
+        assert "SBER_1day_2025-06-01_2025-06-10.csv" in resp.headers["Content-Disposition"]
+        body = await resp.text()
+        assert body.splitlines()[0] == "datetime,open,high,low,close,volume"
+        assert "2025-06-01" in body
+    finally:
+        await client.close()
+

@@ -244,6 +244,40 @@ async def index(request: web.Request) -> web.Response:
     return aiohttp_jinja2.render_template("index.html", request, ctx)
 
 
+async def data_download(request: web.Request) -> web.Response:
+    """Скачать свечи тикера с MOEX в CSV (общий кэш с бэктестом, 24 ч)."""
+    form = await request.post()
+    ticker = form.get("ticker", "").strip().upper()
+    period = form.get("period", "1day")
+    start = _parse_date(form.get("start", ""), date.today() - timedelta(days=365))
+    end = _parse_date(form.get("end", ""), date.today())
+
+    errors = []
+    if not ticker:
+        errors.append("Укажите тикер (например SBER).")
+    if period not in data.PERIODS:
+        errors.append("Неизвестный таймфрейм.")
+    if start >= end:
+        errors.append("Дата начала должна быть раньше даты окончания.")
+    if errors:
+        return _error_page(request, " ".join(errors))
+
+    loop = asyncio.get_running_loop()
+    try:
+        df = await loop.run_in_executor(None, data.fetch_history, ticker, period, start, end, True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Скачивание %s %s не удалось: %s", ticker, period, exc)
+        return _error_page(request, f"Ошибка загрузки данных: {exc}")
+
+    filename = f"{ticker}_{period}_{start.isoformat()}_{end.isoformat()}.csv"
+    return web.Response(
+        body=data.to_csv(df),
+        content_type="text/csv",
+        charset="utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 async def backtest_run(request: web.Request) -> web.Response:
     form = await request.post()
     ticker = form.get("ticker", "").strip().upper()
@@ -391,6 +425,7 @@ def create_app() -> web.Application:
     app.router.add_get("/", index)
     app.router.add_post("/backtest/run", backtest_run)
     app.router.add_get("/backtest/{run_id}", backtest_detail)
+    app.router.add_post("/data/download", data_download)
     app.router.add_get("/live", live_page)
     app.router.add_get("/live/data", live_data)
     app.router.add_post("/live/start", live_start)

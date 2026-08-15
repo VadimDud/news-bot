@@ -55,6 +55,14 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist (
+                ticker TEXT PRIMARY KEY,
+                added_at TEXT
+            )
+            """
+        )
 
 
 def create_run(ticker: str, period: str, strategy: str, params: dict, start_date: str, end_date: str) -> int:
@@ -137,3 +145,23 @@ def set_setting(key: str, value: str) -> None:
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             (key, value, datetime.now(timezone.utc).isoformat()),
         )
+
+
+def list_watchlist() -> list[str]:
+    """Тикеры для live-торговли, отсортированные по времени добавления."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT ticker FROM watchlist ORDER BY added_at").fetchall()
+    return [r["ticker"] for r in rows]
+
+
+def add_watchlist(ticker: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist (ticker, added_at) VALUES (?, ?)",
+            (ticker, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def remove_watchlist(ticker: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))

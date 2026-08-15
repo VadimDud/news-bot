@@ -140,3 +140,46 @@ def test_list_runs_empty_db(tmp_path, monkeypatch):
     storage.init_db()
 
     assert storage.list_runs() == []
+
+
+# ── Watchlist ────────────────────────────────────────────────────────────────
+
+def test_watchlist_add_remove(tmp_path, monkeypatch):
+    from trading_moex.app import config, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+
+    assert storage.list_watchlist() == []
+
+    storage.add_watchlist("SBER")
+    storage.add_watchlist("SBER")  # дубликат игнорируется
+    storage.add_watchlist("LKOH")
+    assert storage.list_watchlist() == ["SBER", "LKOH"]
+
+    storage.remove_watchlist("SBER")
+    storage.remove_watchlist("MISSING")  # не падает
+    assert storage.list_watchlist() == ["LKOH"]
+
+
+def test_watchlist_live_priority(tmp_path, monkeypatch):
+    from trading_moex.app import config, live, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    monkeypatch.setattr(config, "WATCH_TICKERS", ["GAZP"])
+
+    assert live._watchlist() == ["GAZP"]  # фолбэк на env
+
+    storage.add_watchlist("SBER")
+    assert live._watchlist() == ["SBER"]  # приоритет у БД
+
+
+def test_catalog_find():
+    from trading_moex.app.catalog import AVAILABLE_TICKER_KEYS, find
+
+    assert "SBER" in AVAILABLE_TICKER_KEYS
+    assert find("sber")["ticker"] == "SBER"
+    assert find("NOT_EXIST") is None

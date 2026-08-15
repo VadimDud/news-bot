@@ -139,6 +139,7 @@ th { color: var(--muted); font-weight: 600; }
   <span class="logo">🤖 MOEX Trader</span>
   <nav>
     <a href="/" class="{{ 'active' if request.path == '/' }}">Бэктест</a>
+    <a href="/watchlist" class="{{ 'active' if request.path == '/watchlist' }}">Тикеры</a>
     <a href="/live" class="{{ 'active' if request.path == '/live' }}">Live</a>
     <a href="/settings" class="{{ 'active' if request.path == '/settings' }}">Настройки</a>
   </nav>

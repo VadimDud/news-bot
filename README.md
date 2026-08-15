@@ -129,6 +129,10 @@ T-Bank Invest API (`tinkoff-invest`).
 - **Live**: цикл опроса котировок T-Bank, сигнал по выбранной стратегии, ордера
   через `OrdersService`. По умолчанию **dry-run** (`TRADER_DRY_RUN=true`) — реальные
   ордера выставляются только при явном отключении.
+- **Список тикеров**: раздел «Тикеры» в дашборде — выбирайте инструменты из
+  каталога популярных акций MOEX (`trading_moex/app/catalog.py`) или вводите код
+  вручную. Список хранится в SQLite и применяется live-циклом без перезапуска;
+  пока список пуст, используется `TRADER_WATCH_TICKERS` из `.env`.
 - **Веб-дашборд**: `http://<host>:8081` (порт настраивается `TRADER_WEB_PORT`),
   вход по паролю `TRADER_WEB_PASSWORD`.
 
@@ -137,6 +141,66 @@ T-Bank Invest API (`tinkoff-invest`).
 `TRADER_WATCH_TICKERS`, `TRADER_QUANTITY`, `TRADER_LIVE_INTERVAL`,
 `TRADER_WEB_HOST/PORT/PASSWORD`, `MOEX_LOGIN/MOEX_PASSWORD` (только для
 Super Candles, обычные свечи доступны без авторизации).
+
+### Как создать свою стратегию
+
+Каждая стратегия состоит из **двух частей**, зарегистрированных под одним ключом:
+
+1. **pandas-функция сигнала** в `trading_moex/app/signals.py` — используется
+   live-циклом и покрыта юнит-тестами. Принимает DataFrame с колонками
+   `open/high/low/close/volume`, возвращает `pd.Series` позиции `0/1`
+   (0 — вне рынка, 1 — в позиции). Регистрируется в `SIGNAL_FUNCS`.
+2. **Backtrader-класс** в `trading_moex/app/strategies.py` — для бэктеста.
+   Наследуется от `TradeRecordingStrategy`, реализует `__init__` (индикаторы)
+   и `next` (покупка/закрытие по сигналу). Регистрируется в `STRATEGIES`
+   вместе с описанием параметров для веб-формы.
+
+Ключ в `SIGNAL_FUNCS` и ключ в `STRATEGIES` должны совпадать — по нему веб
+связывает live-сигнал и бэктест. Шаблон новой стратегии:
+
+```python
+# ── signals.py ──────────────────────────────────────────────────────────
+def my_strategy_position(df, period: int = 20) -> pd.Series:
+    close = df["close"]
+    base = close.rolling(period).mean()
+    return (close > base).astype(int)
+
+# ...и в SIGNAL_FUNCS внизу файла:
+SIGNAL_FUNCS = {
+    "sma_cross": sma_cross_position,
+    "rsi": rsi_position,
+    "donchian": donchian_position,
+    "my_strategy": my_strategy_position,
+}
+
+# ── strategies.py ───────────────────────────────────────────────────────
+class MyStrategy(TradeRecordingStrategy):
+    params = (("period", 20),)
+
+    def __init__(self):
+        super().__init__()
+        self.sma = bt.indicators.SMA(self.data.close, period=self.p.period)
+
+    def next(self):
+        if not self.position:
+            if self.data.close[0] > self.sma[0]:
+                self.buy()
+        elif self.data.close[0] < self.sma[0]:
+            self.close()
+
+# ...и в STRATEGIES внизу файла:
+STRATEGIES["my_strategy"] = {
+    "name": "Моя стратегия",
+    "cls": MyStrategy,
+    "params": [
+        {"key": "period", "label": "Период SMA", "type": "int", "default": 20},
+    ],
+}
+```
+
+После этого стратегия появится в формах бэктеста и live без изменений в
+`app.py`: параметры подтянутся из `params` реестра, а сигналы — из `SIGNAL_FUNCS`.
+Добавьте юнит-тест сигнала в `tests/test_trading_moex.py` по образцу существующих.
 
 ## Тесты
 

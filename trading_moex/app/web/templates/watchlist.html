@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Тикеры — MOEX Trader{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Список тикеров для live-торговли</h2>
+  <p class="hint">Тикеры из этого списка опрашиваются live-циклом через T-Bank. Изменения применяются без перезапуска контейнера.</p>
+  <form method="post" action="/watchlist/add">
+    <label for="ticker">Добавить из каталога</label>
+    <select id="ticker" name="ticker">
+      {% for t in available %}
+      <option value="{{ t.ticker }}">{{ t.ticker }} — {{ t.name }}</option>
+      {% endfor %}
+    </select>
+    <label for="manual">Или ввести код вручную</label>
+    <input type="text" id="manual" name="manual" placeholder="SBER" maxlength="12">
+    <button type="submit">Добавить</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Текущий список</h2>
+  {% if current %}
+  <table>
+    <thead>
+      <tr><th>Тикер</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for t in current %}
+      <tr>
+        <td><strong>{{ t }}</strong></td>
+        <td style="text-align:right">
+          <form method="post" action="/watchlist/remove" style="margin:0">
+            <input type="hidden" name="ticker" value="{{ t }}">
+            <button type="submit" class="btn secondary" style="margin:0">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Список пуст — live-цикл использует тикеры из .env (TRADER_WATCH_TICKERS).</div>
+  {% endif %}
+  {% if env_defaults %}
+  <p class="hint">По умолчанию из .env: {{ env_defaults | join(', ') }}. Добавьте их в список, чтобы управлять отсюда.</p>
+  {% endif %}
+</div>
+{% endblock %}

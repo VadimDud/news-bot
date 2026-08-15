@@ -18,6 +18,7 @@ from aiohttp import web
 
 from .. import config, data, settings, storage
 from ..backtest import run_backtest
+from ..catalog import AVAILABLE_TICKERS
 from ..live import live_trader
 from ..strategies import STRATEGIES
 
@@ -138,6 +139,36 @@ async def logout(request: web.Request) -> web.Response:
     resp = web.HTTPFound("/login")
     resp.del_cookie(config.COOKIE_NAME)
     raise resp
+
+
+async def watchlist_page(request: web.Request) -> web.Response:
+    current = storage.list_watchlist()
+    current_set = set(current)
+    return aiohttp_jinja2.render_template(
+        "watchlist.html",
+        request,
+        {
+            "available": [t for t in AVAILABLE_TICKERS if t["ticker"] not in current_set],
+            "current": current,
+            "env_defaults": [t for t in config.WATCH_TICKERS if t not in current_set],
+        },
+    )
+
+
+async def watchlist_add(request: web.Request) -> web.Response:
+    form = await request.post()
+    ticker = (form.get("manual", "") or form.get("ticker", "")).strip().upper()
+    if ticker:
+        storage.add_watchlist(ticker)
+    raise web.HTTPFound("/watchlist")
+
+
+async def watchlist_remove(request: web.Request) -> web.Response:
+    form = await request.post()
+    ticker = form.get("ticker", "").strip().upper()
+    if ticker:
+        storage.remove_watchlist(ticker)
+    raise web.HTTPFound("/watchlist")
 
 
 async def settings_page(request: web.Request) -> web.Response:
@@ -352,6 +383,9 @@ def create_app() -> web.Application:
     app.router.add_get("/login", login_page)
     app.router.add_post("/login", login_post)
     app.router.add_post("/logout", logout)
+    app.router.add_get("/watchlist", watchlist_page)
+    app.router.add_post("/watchlist/add", watchlist_add)
+    app.router.add_post("/watchlist/remove", watchlist_remove)
     app.router.add_get("/settings", settings_page)
     app.router.add_post("/settings", settings_save)
     app.router.add_get("/", index)

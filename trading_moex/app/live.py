@@ -31,6 +31,16 @@ TICKER_LIVE_INTERVALS = {
 _LIVE_BARS = 200
 
 
+def _watchlist() -> list[str]:
+    """Тикеры для live: приоритет у watchlist из БД, иначе из .env."""
+    from . import storage
+
+    stored = storage.list_watchlist()
+    if stored:
+        return stored
+    return list(config.WATCH_TICKERS)
+
+
 def _money_to_float(value) -> float:
     if value is None:
         return 0.0
@@ -143,6 +153,7 @@ class LiveTrader:
     async def _cycle(self) -> None:
         from tinkoff.invest import AsyncClient
 
+        self.tickers = _watchlist()
         async with AsyncClient(token=app_settings.tinkoff_token(), app_name="moex-trader") as client:
             accounts = await client.users.get_accounts()
             if not accounts.accounts:

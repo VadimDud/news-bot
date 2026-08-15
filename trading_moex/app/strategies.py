@@ -685,6 +685,227 @@ class MATrendStrategy(RiskAwareStrategy):
             self._exit()
 
 
+# Параметры медвежьей стратегии Vol Profile Breakdown (пробой зоны высокого
+# объёма HVN вниз + ретест + вход в шорт до следующей зоны B). Логика по
+# методике Bearish Volume Profile Breakdown (Auction Market Theory):
+# баланс в HVN A -> импульс вниз -> ретест нижней границы -> шорт до HVN B.
+# Стоп за верх зоны A, тейк перед верхом зоны B, RR-фильтр отсекает плохие.
+# Параметры подбираются перебором на YDEX 30m/60m (defaults могут быть
+# перекрыты per-ticker оверрайдами TICKER_OVERRIDES).
+_VOL_BREAKDOWN_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 14),
+    ("atr_stop_mult", 0.5),
+    ("take_atr_mult", 0.25),
+    ("min_rr", 1.5),
+    ("profile_bins", 20),
+    ("profile_period", 100),
+    ("profile_mult", 1.5),
+    ("retest_bars", 3),
+    ("candle_confirm", 0),
+    ("pin_shadow", 0.6),
+    ("vol_period", 20),
+    ("vol_mult", 1.5),
+)
+
+
+class VolProfileBreakdownStrategy(TradeRecordingStrategy):
+    """Медвежий пробой зоны высокого объёма (HVN) с ретестом.
+
+    Методика Bearish Volume Profile Breakdown: рынок балансируется в зоне
+    HVN A (аккумуляция), затем продавец продавливает цену вниз (импульс),
+    цена откатывается к нижней границе A (ретест) и входит в шорт; тейк —
+    перед следующей нижестоящей зоной высокого объёма (HVN B), стоп — за
+    верхнюю границу A с запасом ATR.
+
+    Этапы (конечный автомат в ``next``):
+      SCAN           — ищем свежий пробой низа зоны A;
+      SEARCH_RETEST  — ждём отката: High заходит в зону A снизу;
+      (вход)         — шорт на закрытии свечи ретеста (+свечной фильтр);
+      IN_POSITION    — обычный брекет: стоп и тейк на зонах.
+    ``candle_confirm=0`` — вход по касанию, без свечного фильтра; ``1`` —
+    требуется пинарь-шорт/медвежье поглощение + всплеск объёма.
+    """
+
+    params = _VOL_BREAKDOWN_PARAMS_TUPLE
+
+    def __init__(self):
+        super().__init__()
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        if int(self.p.vol_period) > 0:
+            self.vol_sma = bt.indicators.SMA(self.data.volume, period=int(self.p.vol_period))
+        else:
+            self.vol_sma = None
+        self._state = "SCAN"
+        self._zone_a: tuple[float, float] | None = None
+        self._zone_b: tuple[float, float] | None = None
+        self._wait = 0
+        self._sl_order = None
+        self._tp_order = None
+
+    def _atv(self) -> float:
+        v = float(self.atr_ind[0])
+        return 0.0 if v != v or v <= 0 else v
+
+    def _zones(self) -> list[tuple[float, float]]:
+        period = max(int(self.p.profile_period), 2)
+        bins = max(int(self.p.profile_bins), 5)
+        mult = float(self.p.profile_mult)
+        return sig.volume_profile_zones(
+            self.data.high.get(ago=-period, size=period),
+            self.data.low.get(ago=-period, size=period),
+            self.data.close.get(ago=-period, size=period),
+            self.data.volume.get(ago=-period, size=period),
+            bins, mult,
+        )
+
+    def _reset(self) -> None:
+        self._state = "SCAN"
+        self._zone_a = None
+        self._zone_b = None
+        self._wait = 0
+
+    # ── ШАГ 1-2: пробой низа зоны A ─────────────────────────────────────────
+    def _scan(self) -> bool:
+        zones = self._zones()
+        c0 = float(self.data.close[0])
+        c1 = float(self.data.close[-1])
+        for z in zones:  # по возрастанию цены
+            if z[1] <= c0:
+                continue  # зона целиком ниже текущей цены
+            if c0 < z[0] and c1 >= z[0]:
+                # свежий пробой низа зоны (пред. свеча была >= низа)
+                self._zone_a = z
+                break
+        if self._zone_a is None:
+            return False
+        # B = ближайшая зона строго ниже A
+        b = None
+        for z in zones:
+            if z[1] < self._zone_a[0]:
+                b = z
+            else:
+                break
+        self._zone_b = b
+        self._state = "SEARCH_RETEST"
+        self._wait = 0
+        return True
+
+    # ── ШАГ 3: ретест + свечной фильтр ──────────────────────────────────────
+    def _in_retest_zone(self) -> bool:
+        a = self._zone_a
+        h = float(self.data.high[0])
+        return a[0] <= h <= a[1]
+
+    def _candle_ok(self) -> bool:
+        if not int(self.p.candle_confirm):
+            return True
+        o, h, l, c = map(float, (self.data.open[0], self.data.high[0],
+                                 self.data.low[0], self.data.close[0]))
+        rng = h - l
+        shooting = rng > 0 and (h - c) / rng > float(self.p.pin_shadow)
+        engulf = c < o and c < float(self.data.close[-1])
+        vol_ok = True
+        if self.vol_sma is not None:
+            avg = float(self.vol_sma[0])
+            vol_ok = (avg != avg or avg <= 0) or float(self.data.volume[0]) >= float(self.p.vol_mult) * avg
+        return (shooting or engulf) and vol_ok
+
+    def _search_retest(self) -> bool:
+        if self._in_retest_zone() and self._candle_ok():
+            self._enter_short()
+            return True
+        self._wait += 1
+        if self._wait > int(self.p.retest_bars):
+            self._reset()
+        return False
+
+    # ── ШАГ 4: ордер + риск-менеджмент ──────────────────────────────────────
+    def _enter_short(self) -> None:
+        a = self._zone_a
+        b = self._zone_b
+        atr = self._atv()
+        if atr <= 0:
+            self._reset()
+            return
+        entry = float(self.data.close[0])
+        sl = a[1] + float(self.p.atr_stop_mult) * atr
+        tp = (b[1] + float(self.p.take_atr_mult) * atr) if b else entry - (sl - entry)
+        risk = sl - entry
+        reward = entry - tp
+        if risk <= 0 or reward <= 0:
+            self._reset()
+            return
+        if reward / risk < float(self.p.min_rr):
+            self._reset()  # низкий Risk/Reward — отмена
+            return
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, risk, entry
+        )
+        if size <= 0:
+            self._reset()
+            return
+        # Ограничитель маржи: в бэктест-брокере backtrader закрывающий брекет
+        # (buy-stop + buy-limit) отклоняется, когда номинал шорта >= капитала
+        # (broker margin-reject). Держим номинал шорта строго ниже капитала,
+        # чтобы стоп и тейк могли исполниться.
+        equity = float(self.broker.getvalue())
+        max_size = int(equity / entry * 0.9) if entry > 0 else size
+        size = min(size, max_size)
+        if size <= 0:
+            self._reset()
+            return
+        self._sl_price = sl
+        self._tp_price = tp
+        self.sell(size=size)
+        self._state = "IN_POSITION"
+
+    def _place_bracket(self) -> None:
+        if self.position.size >= 0 or self._sl_order is not None:
+            return
+        self._sl_order = self.buy(exectype=bt.Order.Stop, price=self._sl_price,
+                                  size=-self.position.size)
+        self._tp_order = self.buy(exectype=bt.Order.Limit, price=self._tp_price,
+                                  size=-self.position.size)
+
+    def _cancel_pending_bracket(self, keep) -> None:
+        for pending in (self._sl_order, self._tp_order):
+            if pending is not None and pending is not keep and pending.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(pending)
+
+    def _on_flat(self) -> None:
+        self._state = "SCAN"
+        self._zone_a = None
+        self._zone_b = None
+        self._wait = 0
+
+    def notify_order(self, order):
+        if order.status == bt.Order.Completed:
+            # сняли позицию шорта целиком либо частично
+            if self.position.size == 0:
+                self._cancel_pending_bracket(keep=order)
+                self._on_flat()
+                self._sl_order = self._tp_order = None
+        elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin):
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+
+    def next(self):
+        if self.position.size < 0:
+            self._place_bracket()
+            return
+        if not self.position.size and self._state == "IN_POSITION":
+            self._on_flat()
+        if self._state == "SCAN":
+            self._scan()
+        elif self._state == "SEARCH_RETEST":
+            self._search_retest()
+
+
 STRATEGIES = {
     "sma_cross": {
         "name": "SMA Crossover",
@@ -762,6 +983,25 @@ STRATEGIES = {
         "name": "Поглощение (Engulfing)",
         "cls": EngulfingStrategy,
         "params": _ENGULFING_PARAMS,
+    },
+    "vol_breakdown": {
+        "name": "Медвежий пробой HVN (Vol Profile Breakdown)",
+        "cls": VolProfileBreakdownStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 14},
+            {"key": "atr_stop_mult", "label": "Стоп: за верх зоны A, x ATR", "type": "float", "default": 0.5},
+            {"key": "take_atr_mult", "label": "Тейк: перед верхом зоны B, x ATR", "type": "float", "default": 0.25},
+            {"key": "min_rr", "label": "Мин. коэффициент риск/доход (RR)", "type": "float", "default": 1.5},
+            {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 20},
+            {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 100},
+            {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.5},
+            {"key": "retest_bars", "label": "Окно ретеста, баров", "type": "int", "default": 3},
+            {"key": "candle_confirm", "label": "Свечное подтверждение входа (1 = да)", "type": "int", "default": 0},
+            {"key": "pin_shadow", "label": "Пин-бар шорт: доля верхней тени", "type": "float", "default": 0.6},
+            {"key": "vol_period", "label": "Подтверждение объёма: период (0 = выкл)", "type": "int", "default": 20},
+            {"key": "vol_mult", "label": "Подтверждение объёма: множитель", "type": "float", "default": 1.5},
+        ],
     },
 }
 

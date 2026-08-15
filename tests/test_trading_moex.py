@@ -419,6 +419,29 @@ def test_strategy_defaults_per_ticker():
     assert sber["risk_pct"] == base["risk_pct"]
 
 
+def test_volume_profile_zones():
+    from trading_moex.app.signals import volume_profile_zones
+
+    # высокий объём в верхнем кластере -> одна зона вверху
+    highs = [102, 102, 92, 92, 82, 82] + [102, 92, 82] * 3
+    lows = [100, 100, 90, 90, 80, 80] + [100, 90, 80] * 3
+    closes = [101, 101, 91, 91, 81, 81] + [101, 91, 81] * 3
+    vols = [1000, 900, 200, 200, 200, 200] + [100, 100, 100] * 3
+    zones = volume_profile_zones(highs, lows, closes, vols, bins=10, mult=1.3)
+    # зоны идут по возрастанию цены, у каждой (bottom, top)
+    assert zones == sorted(zones)
+    for b, t in zones:
+        assert b < t
+    # верхний (самый дорогой) кластер должен быть зоной с самым большим боком
+    assert zones[-1][1] > 100.0
+
+    # NaN-бары (тёплый период) — пустой список, без исключения
+    assert volume_profile_zones(
+        [float("nan")] * 3, [float("nan")] * 3, [float("nan")] * 3, [float("nan")] * 3,
+        bins=10, mult=1.3,
+    ) == []
+
+
 def test_scale_plan():
     from trading_moex.app.signals import scale_plan
 

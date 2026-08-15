@@ -199,6 +199,61 @@ def volume_profile_levels(
     return support, resistance
 
 
+def volume_profile_zones(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+    vols: Sequence[float], bins: int = 40, mult: float = 1.5,
+) -> list[tuple[float, float]]:
+    """Зоны высокого объёма (HVN) как диапазоны цен, отсортированные по цене.
+
+    Тот же объёмный профиль, что и ``volume_profile_levels``, но высокообъёмные
+    бины группируются в соседние кластеры (зоны) с границами (bottom, top), а не
+    отдаются единичными центрами. Зоны возвращаются по возрастанию цены —
+    удобно для медвежьего пробоя: выбрать зону A (баланс/накопление) и ближайшую
+    нижестоящую зону B (следующий объём), к которой движется цена. NaN-бары
+    (тёплый период) пропускаются.
+    """
+    lo, hi, cl, v = [], [], [], []
+    for h, l, c, vol in zip(highs, lows, closes, vols):
+        if not (h == h and l == l and c == c and vol == vol and vol > 0):
+            continue
+        lo.append(l)
+        hi.append(h)
+        cl.append(c)
+        v.append(vol)
+    if not lo:
+        return []
+    pricemin = min(lo)
+    pricemax = max(hi)
+    if pricemax <= pricemin:
+        return []
+    binw = (pricemax - pricemin) / bins
+    hist = [0.0] * bins
+    for l, h, c, vol in zip(lo, hi, cl, v):
+        b = int(((h + l + c) / 3.0 - pricemin) / binw)
+        b = min(b, bins - 1)
+        hist[b] += vol
+    avg = sum(hist) / bins
+    threshold = avg * mult
+    zones = []
+    in_zone = False
+    zb = 0.0
+    zt = 0.0
+    for b in range(bins):
+        if hist[b] >= threshold and not in_zone:
+            in_zone = True
+            zb = pricemin + b * binw
+            zt = pricemin + (b + 1) * binw
+        elif in_zone:
+            if hist[b] >= threshold:
+                zt = pricemin + (b + 1) * binw
+            else:
+                zones.append((zb, zt))
+                in_zone = False
+    if in_zone:
+        zones.append((zb, zt))
+    return zones
+
+
 def ma_stacked(fast: float, mid: float, slow: float) -> bool:
     """Стекинг MA: быстрая выше средней, средняя выше медленной (тренд выстроен)."""
     return fast > mid > slow

@@ -400,6 +400,25 @@ def test_ma_helpers():
     assert ma_spread(102, 100, 98, atr=0, min_spread=0.1) is False   # нет ATR — нельзя судить
 
 
+def test_strategy_defaults_per_ticker():
+    from trading_moex.app.strategies import strategy_defaults
+
+    base = strategy_defaults("pinbar", None)
+    # per-ticker оверрайд применяется только к SBER
+    sber = strategy_defaults("pinbar", "SBER")
+    assert sber["wick_ratio"] == 3.5
+    assert sber["atr_stop_mult"] == 5.0
+    assert sber["rr_ratio"] == 2.5
+    assert sber["bull_frac"] == 0.5
+    assert sber["profile_bins"] == 50
+    # глобальные и остальные тикеры не меняются
+    assert strategy_defaults("pinbar", "YDEX") == base
+    assert strategy_defaults("pinbar", "LKOH") == base
+    # оверрайд частичный: остальные ключи берутся из глобальных дефолтов
+    assert sber["atr_period"] == base["atr_period"]
+    assert sber["risk_pct"] == base["risk_pct"]
+
+
 def test_scale_plan():
     from trading_moex.app.signals import scale_plan
 

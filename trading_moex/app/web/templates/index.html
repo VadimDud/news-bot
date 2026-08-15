@@ -72,12 +72,39 @@
 
 <script>
 const sel = document.getElementById("strategy");
+const tickerInput = document.getElementById("ticker");
+
+function currentParamsBlock() {
+  return document.querySelector(`[data-strategy-params="${sel.value}"]`);
+}
+
 function showParams() {
   document.querySelectorAll("[data-strategy-params]").forEach(el => {
     el.style.display = (el.dataset.strategyParams === sel.value) ? "grid" : "none";
   });
 }
-sel.addEventListener("change", showParams);
+
+async function reloadDefaults() {
+  const strat = sel.value;
+  const ticker = tickerInput.value.trim().toUpperCase();
+  try {
+    const resp = await fetch(`/strategy/defaults?strategy=${encodeURIComponent(strat)}&ticker=${encodeURIComponent(ticker)}`);
+    const data = await resp.json();
+    if (data.error || !data.params) return;
+    const block = currentParamsBlock();
+    if (!block) return;
+    for (const [key, value] of Object.entries(data.params)) {
+      const el = block.querySelector(`[name="${key}"]`);
+      if (el) el.value = value;
+    }
+  } catch (e) { /* временно недоступно — оставляем текущие значения */ }
+}
+
+sel.addEventListener("change", () => {
+  showParams();
+  reloadDefaults();
+});
+tickerInput.addEventListener("change", reloadDefaults);
 showParams();
 
 const btForm = document.getElementById("bt-form");

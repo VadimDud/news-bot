@@ -766,7 +766,43 @@ STRATEGIES = {
 }
 
 
+# Дефолты параметров под конкретный тикер (per-ticker overrides).
+# Ключ — (strategy_key, ticker); значения — полный набор параметров стратегии.
+# Заполняются бэктестовым перебором: каждая стратегия имеет свой «рецепт» под
+# тикер, и единый глобальный дефолт, угаданный под YDEX, на других тикерах
+# (напр. SBER) уходит в минус. TICKER_OVERRIDES применяются поверх глобальных
+# дефолтов в веб-форме и при выборе стратегии.
+# SBER Pinbar — перебор (wick 3.5, стоп 5 ATR, R:R 2.5, объём 40/2.0, быки 0.5,
+# HVN bins 50): полн. год 30m +2.9% PF 2.7, 60m +1.7% PF 2.7 (против −5.0%/−1.2%
+# глобальных). Глобальные (YDEX) дефолты эти параметры не заменяют.
+TICKER_OVERRIDES: dict[tuple[str, str], dict] = {
+    ("pinbar", "SBER"): {
+        "wick_ratio": 3.5,
+        "atr_stop_mult": 5.0,
+        "rr_ratio": 2.5,
+        "trend_period": 150,
+        "vol_period": 40,
+        "vol_mult": 2.0,
+        "bull_frac": 0.5,
+        "vol_profile": 1,
+        "profile_bins": 50,
+        "profile_period": 100,
+        "profile_mult": 1.2,
+    },
+}
+
+
 def strategy_params_schema(strategy_key: str) -> list[dict]:
     info = STRATEGIES[strategy_key]
     defaults = {p["key"]: p["default"] for p in info["params"]}
+    return defaults
+
+
+def strategy_defaults(strategy_key: str, ticker: str | None = None) -> dict:
+    """Дефолтные параметры стратегии, при наличии — с per-ticker переопределением."""
+    defaults = strategy_params_schema(strategy_key)
+    if ticker:
+        override = TICKER_OVERRIDES.get((strategy_key, ticker.upper()))
+        if override:
+            defaults = {**defaults, **override}
     return defaults

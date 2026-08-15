@@ -22,7 +22,7 @@ from .. import config, data, settings, storage
 from ..backtest import run_backtest
 from ..catalog import AVAILABLE_TICKERS
 from ..live import live_trader
-from ..strategies import STRATEGIES
+from ..strategies import STRATEGIES, strategy_defaults
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,8 +116,8 @@ def _error_page(request: web.Request, message: str) -> web.Response:
 
 # ── Стратегия / параметры ────────────────────────────────────────────────────
 
-def _default_params(strategy_key: str) -> dict:
-    return {p["key"]: p["default"] for p in STRATEGIES[strategy_key]["params"]}
+def _default_params(strategy_key: str, ticker: str | None = None) -> dict:
+    return strategies.strategy_defaults(strategy_key, ticker)
 
 
 def _parse_params(strategy_key: str, form: dict) -> dict:
@@ -129,6 +129,17 @@ def _parse_params(strategy_key: str, form: dict) -> dict:
         except (TypeError, ValueError):
             params[spec["key"]] = spec["default"]
     return params
+
+
+def _strategies_for_ticker(ticker: str) -> dict:
+    """Копия реестра STRATEGIES, где дефолты параметров разрешены под тикер."""
+    ticker = ticker.upper()
+    view = {}
+    for key, info in STRATEGIES.items():
+        defaults = strategy_defaults(key, ticker)
+        params = [{**spec, "default": defaults[spec["key"]]} for spec in info["params"]]
+        view[key] = {"name": info["name"], "params": params}
+    return view
 
 
 def _parse_date(raw: str, fallback: date) -> date:
@@ -279,15 +290,26 @@ async def settings_save(request: web.Request) -> web.Response:
 
 async def index(request: web.Request) -> web.Response:
     runs = storage.list_runs(20)
+    default_ticker = "SBER"
     ctx = {
         "periods": data.PERIODS,
-        "strategies": STRATEGIES,
+        "strategies": _strategies_for_ticker(default_ticker),
         "runs": runs,
         "today": date.today().isoformat(),
         "year_ago": (date.today() - timedelta(days=365)).isoformat(),
         "ticker_suggestions": _ticker_suggestions(),
     }
     return aiohttp_jinja2.render_template("index.html", request, ctx)
+
+
+async def strategy_defaults_api(request: web.Request) -> web.Response:
+    """Дефолты параметров стратегии, разрешённые под ticker (per-ticker оверрайды)."""
+    strat = request.query.get("strategy", "")
+    ticker = (request.query.get("ticker", "") or "").strip().upper()
+    if strat not in STRATEGIES:
+        return web.json_response({"error": "unknown strategy"}, status=400)
+    defaults = strategy_defaults(strat, ticker or None)
+    return web.json_response({"strategy": strat, "ticker": ticker, "params": defaults})
 
 
 async def data_download(request: web.Request) -> web.Response:
@@ -626,6 +648,7 @@ def create_app() -> web.Application:
     app.router.add_get("/settings", settings_page)
     app.router.add_post("/settings", settings_save)
     app.router.add_get("/", index)
+    app.router.add_get("/strategy/defaults", strategy_defaults_api)
     app.router.add_post("/backtest/run", backtest_run)
     app.router.add_get("/backtest/status", backtest_status)
     app.router.add_get("/backtest/result", backtest_result)

@@ -107,3 +107,36 @@ def test_settings_env_fallback(tmp_path, monkeypatch):
     assert settings.mask("1234567890") == "1234•••"
     assert settings.mask("") == ""
     assert settings.mask("ab") == "••••"
+
+
+# ── Список бэктестов / JSON ──────────────────────────────────────────────────
+
+def test_list_runs_parses_result_json(tmp_path, monkeypatch):
+    """list_runs() должен распарсить result/params, иначе index.html падает с 500."""
+    from trading_moex.app import config, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+
+    run_id = storage.create_run(
+        "SBER", "1day", "sma_cross", {"fast": 10, "slow": 30},
+        "2025-01-01", "2026-01-01",
+    )
+    storage.finish_run(run_id, {"total_return_pct": 5.5, "n_bars": 100, "trades": []})
+
+    runs = storage.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "done"
+    assert runs[0]["params"] == {"fast": 10, "slow": 30}
+    assert runs[0]["result"]["total_return_pct"] == 5.5
+
+
+def test_list_runs_empty_db(tmp_path, monkeypatch):
+    from trading_moex.app import config, storage
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+
+    assert storage.list_runs() == []

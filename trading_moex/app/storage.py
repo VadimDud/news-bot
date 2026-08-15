@@ -100,7 +100,13 @@ def list_runs(limit: int = 50) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM backtest_runs ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["params"] = json.loads(item["params"]) if item["params"] else {}
+        item["result"] = json.loads(item["result"]) if item["result"] else None
+        items.append(item)
+    return items
 
 
 def get_live_value(key: str) -> str | None:

@@ -92,7 +92,7 @@ showParams();
           {% else %}<span class="chip warn">выполняется</span>{% endif %}
         </td>
         <td>
-          {% if r.result %}
+          {% if r.result and r.result.total_return_pct is not none %}
             {% set tr = r.result.total_return_pct %}
             <span class="{{ 'pos' if tr >= 0 else 'neg' }}">{{ '%+.2f' % tr }}%</span>
           {% else %}—{% endif %}

@@ -147,6 +147,28 @@ th { color: var(--muted); font-weight: 600; }
   border-radius: 999px;
   transition: width .3s ease;
 }
+.autocomplete-wrap { position: relative; }
+.autocomplete-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-top: 4px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.4);
+}
+.autocomplete-list div {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.autocomplete-list div:hover,
+.autocomplete-list div.active { background: rgba(79,140,255,.15); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -165,5 +187,71 @@ th { color: var(--muted); font-weight: 600; }
 <main>
 {% block content %}{% endblock %}
 </main>
+<script>
+(function () {
+  // Нативный <datalist> не работает стабильно (особенно iOS Safari/Chrome),
+  // поэтому строим свой выпадающий список из тех же опций.
+  function setupAutocomplete(input) {
+    const list = input.list;
+    if (!list) return;
+    const options = Array.from(list.querySelectorAll("option")).map(o => o.value.trim()).filter(Boolean);
+    input.removeAttribute("list");
+    // datalist остаётся в DOM — на странице может быть несколько полей с одним списком
+    if (!options.length) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "autocomplete-wrap";
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+
+    const box = document.createElement("div");
+    box.className = "autocomplete-list";
+    box.style.display = "none";
+    wrap.appendChild(box);
+
+    let selected = -1;
+
+    function render() {
+      const q = input.value.trim().toUpperCase();
+      const items = options.filter(v => !q || v.includes(q));
+      box.innerHTML = "";
+      if (!items.length) { box.style.display = "none"; return; }
+      items.forEach(v => {
+        const d = document.createElement("div");
+        d.textContent = v;
+        d.addEventListener("mousedown", e => { e.preventDefault(); choose(v); });
+        d.addEventListener("touchstart", e => { e.preventDefault(); choose(v); });
+        box.appendChild(d);
+      });
+      selected = -1;
+      box.style.display = "block";
+    }
+
+    function choose(v) {
+      input.value = v;
+      box.style.display = "none";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    function highlight() {
+      Array.from(box.children).forEach((d, i) => d.classList.toggle("active", i === selected));
+    }
+
+    input.addEventListener("focus", render);
+    input.addEventListener("input", render);
+    input.addEventListener("keydown", e => {
+      const n = box.children.length;
+      if (!n) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); selected = (selected + 1) % n; highlight(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); selected = (selected - 1 + n) % n; highlight(); }
+      else if (e.key === "Enter" && selected >= 0) { e.preventDefault(); choose(box.children[selected].textContent); }
+      else if (e.key === "Escape") { box.style.display = "none"; }
+    });
+    input.addEventListener("blur", () => setTimeout(() => { box.style.display = "none"; }, 120));
+  }
+
+  document.querySelectorAll("input[list]").forEach(setupAutocomplete);
+})();
+</script>
 </body>
 </html>

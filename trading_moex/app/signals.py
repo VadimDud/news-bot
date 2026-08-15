@@ -199,6 +199,24 @@ def volume_profile_levels(
     return support, resistance
 
 
+def scale_plan(
+    ref: float, atr: float, parts: int, dist: float, stop_dist: float, rr: float,
+) -> tuple[list[float], float, float, float]:
+    """Усреднение входа из ``parts`` сделок: уровни, средний вход, стоп, тейк.
+
+    Первая часть входит рынком по ``ref``, следующие — лимитками ниже через
+    ``dist * ATR``. Средний вход усреднённой позиции — на (parts-1)/2 шага
+    ниже ``ref``; стоп — на ``stop_dist`` ниже последней лимитки; тейк —
+    ``stop_dist * rr`` от среднего входа. Риск на акцию (средний вход - стоп)
+    равен ``stop_dist``, как и при обычном ATR-входе.
+    """
+    levels = [ref - dist * k * atr for k in range(1, parts)]
+    avg_entry = ref - dist * (parts - 1) / 2.0 * atr
+    stop = ref - dist * (parts - 1) * atr - stop_dist
+    target = avg_entry + stop_dist * rr
+    return levels, avg_entry, stop, target
+
+
 def pinbar_position(df: pd.DataFrame, wick_ratio: float = 2.0) -> pd.Series:
     """Вход на бычьем пин-баре (молот), выход на медвежьем (падающая звезда)."""
     o, h, l, c = df["open"].values, df["high"].values, df["low"].values, df["close"].values

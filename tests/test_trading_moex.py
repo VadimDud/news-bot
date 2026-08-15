@@ -371,6 +371,18 @@ def test_trend_filter_disabled():
 
 # ── Бэктест с риск-стратегиями ──────────────────────────────────────────────
 
+def test_scale_plan():
+    from trading_moex.app.signals import scale_plan
+
+    levels, avg, stop, target = scale_plan(ref=100.0, atr=2.0, parts=3, dist=1.0, stop_dist=4.0, rr=3.0)
+    assert levels == [98.0, 96.0]              # 100 - 1*2, 100 - 2*2
+    assert abs(avg - 98.0) < 1e-9              # 100 - 1*2 = 98
+    assert abs(stop - 92.0) < 1e-9             # 100 - 2*2 - 4 = 92
+    assert abs(target - 110.0) < 1e-9          # 98 + 4*3 = 110
+    # риск на акцию = стоп-дистанция + (parts-1)/2 шагов ATR
+    assert abs((avg - stop) - (4.0 + 1.0 * 2.0)) < 1e-9
+
+
 def test_backtest_smoke_with_risk_strategies():
     import numpy as np
     import pandas as pd
@@ -392,6 +404,29 @@ def test_backtest_smoke_with_risk_strategies():
         assert "expectancy" in res
         assert "longest_win_streak" in res
         assert "n_bars" in res
+
+
+def test_backtest_smoke_with_scale_in_out():
+    import numpy as np
+    import pandas as pd
+
+    from trading_moex.app.backtest import run_backtest
+    from trading_moex.app.strategies import STRATEGIES
+
+    n = 400
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    close = np.linspace(100, 130, n) + np.sin(np.arange(n) / 7) * 3
+    df = pd.DataFrame(
+        {"open": close, "high": close * 1.01, "low": close * 0.99, "close": close, "volume": 1000.0},
+        index=idx,
+    )
+    for key in ("pinbar", "engulfing"):
+        params = {p["key"]: p["default"] for p in STRATEGIES[key]["params"]}
+        params["scale_in"] = 1
+        params["scale_out"] = 1
+        res = run_backtest(df, STRATEGIES[key]["cls"], params, cash=100_000, commission=0.0005)
+        assert "profit_factor" in res
+        assert "trades_total" in res
 
 
 # ── Live: уровни SL/TP в сигналах ────────────────────────────────────────────

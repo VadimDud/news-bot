@@ -62,6 +62,11 @@ _ENGULFING_PARAMS_TUPLE = (
     ("profile_bins", 20),
     ("profile_period", 400),
     ("profile_mult", 1.2),
+    ("scale_in", 0),
+    ("scale_out", 0),
+    ("scale_parts", 3),
+    ("scale_dist", 1.0),
+    ("scale_out_interval", 1),
 )
 
 _RISK_PARAMS = [
@@ -77,6 +82,13 @@ _RISK_PARAMS = [
 # тейк 1:3, вход только выше EMA(150), подтверждение объёмом MOEX.
 # На 30min: бычье окно +4.6% PF 3.1; за весь год +1.5% PF 1.2 (единственный
 # положительный вариант из trend 0/50/100/150/200).
+_SCALE_PARAMS = [
+    {"key": "scale_in", "label": "Усреднение входа: N сделок (1 = да)", "type": "int", "default": 0},
+    {"key": "scale_out", "label": "Выход частями: N продаж (1 = да)", "type": "int", "default": 0},
+    {"key": "scale_parts", "label": "Усреднение: число сделок", "type": "int", "default": 3},
+    {"key": "scale_dist", "label": "Усреднение: шаг лимиток, ATR", "type": "float", "default": 1.0},
+    {"key": "scale_out_interval", "label": "Выход: интервал продаж, свечей", "type": "int", "default": 1},
+]
 _ENGULFING_PARAMS = [
     {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
     {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
@@ -91,6 +103,7 @@ _ENGULFING_PARAMS = [
     {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 20},
     {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 400},
     {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.2},
+    *_SCALE_PARAMS,
 ]
 
 
@@ -123,6 +136,15 @@ class RiskAwareStrategy(TradeRecordingStrategy):
             self.vol_avg = bt.indicators.SMA(self.data.volume, period=int(self.p.vol_period))
         else:
             self.vol_avg = None
+        # состояние усреднения входа (усреднение) и выхода (выход частями)
+        self._avg_orders: list = []
+        self._scale_active = False
+        self._scale_ref = 0.0
+        self._scale_stop = 0.0
+        self._scale_target = 0.0
+        self._scale_out_left = 0
+        self._scale_out_tranche = 0
+        self._scale_out_pending = 0
 
     # ── риск / тренд ─────────────────────────────────────────────────────────
 
@@ -181,10 +203,21 @@ class RiskAwareStrategy(TradeRecordingStrategy):
             float(self.data.close[0]), bins, mult,
         )
 
+    def _scaled_stop_distance(self) -> float:
+        """Дистанция риска при усреднении входа: стоп ниже среднего входа.
+
+        Средний вход усреднённой позиции на (parts-1)/2 шага ниже первой
+        сделки, поэтому дистанция риска больше ATR-стопа на эту величину.
+        """
+        parts = max(int(getattr(self.p, "scale_parts", 3)), 1)
+        dist = float(getattr(self.p, "scale_dist", 1.0))
+        return self._stop_distance() + dist * (parts - 1) / 2.0 * self._atr_value()
+
     def _risk_size(self) -> int:
         price = float(self.data.close[0])
+        stop_dist = self._scaled_stop_distance() if self._use_scale_in() else self._stop_distance()
         size = risk_module.position_size(
-            float(self.broker.getvalue()), self._risk_fraction(), self._stop_distance(), price
+            float(self.broker.getvalue()), self._risk_fraction(), stop_dist, price
         )
         # Не превышать ~95% свободного кэша (защита от гигантских лотов при узком стопе)
         max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
@@ -196,7 +229,13 @@ class RiskAwareStrategy(TradeRecordingStrategy):
         size = self._risk_size()
         if size <= 0:
             return
-        self.buy(size=size)  # SL/TP выставляются в notify_order после исполнения
+        if self._use_scale_in():
+            # усреднение входа: первая часть рынком, остальные — лимитками
+            parts = max(int(getattr(self.p, "scale_parts", 3)), 1)
+            per = max(int(size / parts), 1)
+            self.buy(size=per)
+        else:
+            self.buy(size=size)  # SL/TP выставляются в notify_order после исполнения
 
     def _place_bracket(self) -> None:
         """Выставить стоп-лосс и тейк-профит по открытой позиции.
@@ -227,25 +266,34 @@ class RiskAwareStrategy(TradeRecordingStrategy):
 
     def notify_order(self, order):
         if order.status == bt.Order.Completed:
-            if order.isbuy() and self.position.size > 0:
-                # вход исполнился — ставим стоп и тейк
-                self._sl_order = None
-                self._tp_order = None
-                self._place_bracket()
+            if order.isbuy():
+                if self._scale_active and order in self._avg_orders:
+                    # лимитка усреднения исполнилась — перевыставить брекет на новый размер
+                    self._avg_orders = [o for o in self._avg_orders if o is not order]
+                    self._place_scaled_bracket()
+                elif self._use_scale_in() and not self._scale_active:
+                    self._start_scale_plan(order)
+                else:
+                    self._sl_order = None
+                    self._tp_order = None
+                    self._place_bracket()
             else:
-                # позиция закрыта (стоп/тейк/сигнальный выход) — снять вторую ногу
+                # позиция закрыта (стоп/тейк/выход частями) — снять всё лишнее
+                self._cancel_avg()
                 for pending in (self._sl_order, self._tp_order):
                     if pending is not None and pending is not order:
                         self.cancel(pending)
                 self._sl_order = None
                 self._tp_order = None
+                self._scale_active = False
         elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin, bt.Order.Expired):
+            self._avg_orders = [o for o in self._avg_orders if o is not order]
             if order is self._sl_order:
                 self._sl_order = None
             if order is self._tp_order:
                 self._tp_order = None
 
-    def _exit(self) -> None:
+    def _cancel_bracket(self) -> None:
         for order in (self._sl_order, self._tp_order):
             if order is not None and order.status in (
                 bt.Order.Submitted,
@@ -255,7 +303,79 @@ class RiskAwareStrategy(TradeRecordingStrategy):
                 self.cancel(order)
         self._sl_order = None
         self._tp_order = None
-        if self.position:
+
+    def _cancel_avg(self) -> None:
+        for order in self._avg_orders:
+            if order.status in (bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial):
+                self.cancel(order)
+        self._avg_orders = []
+
+    def _start_scale_plan(self, order) -> None:
+        """Разложить вход на N сделок: рынок + лимитки ниже через scale_dist*ATR."""
+        parts = max(int(getattr(self.p, "scale_parts", 3)), 1)
+        dist = float(getattr(self.p, "scale_dist", 1.0))
+        ref = float(order.executed.price)
+        atr = self._atr_value()
+        stop_dist = self._stop_distance()
+        levels, _avg, stop, target = sig.scale_plan(
+            ref, atr, parts, dist, stop_dist, float(self.p.rr_ratio),
+        )
+        self._scale_ref = ref
+        self._scale_stop = stop
+        self._scale_target = target
+        self._avg_orders = []
+        for k, level in enumerate(levels):
+            if level < ref * 0.85:  # предохранитель от абсурдно низких уровней
+                break
+            self._avg_orders.append(
+                self.buy(exectype=bt.Order.Limit, price=level, size=order.executed.size)
+            )
+        self._scale_active = True
+        self._place_scaled_bracket()
+
+    def _place_scaled_bracket(self) -> None:
+        """Стоп на scale_stop, тейк на scale_target, покрывающие всю позицию."""
+        if self.position.size <= 0 or not self._scale_active:
+            return
+        self._cancel_bracket()
+        self._sl_order = self.sell(exectype=bt.Order.Stop, price=self._scale_stop, size=self.position.size)
+        self._tp_order = self.sell(exectype=bt.Order.Limit, price=self._scale_target, size=self.position.size)
+
+    def _use_scale_in(self) -> bool:
+        return int(getattr(self.p, "scale_in", 0)) > 0
+
+    def _use_scale_out(self) -> bool:
+        return int(getattr(self.p, "scale_out", 0)) > 0
+
+    def _step_scale_out(self) -> None:
+        """Выход частями: продажа следующей доли по барам (вызывается из next)."""
+        if self._scale_out_left <= 0:
+            return
+        if self._scale_out_pending > 0:
+            self._scale_out_pending -= 1
+            return
+        size = min(self._scale_out_tranche, self.position.size)
+        if size > 0:
+            self.sell(size=size)
+            self._scale_out_left -= 1
+        if self._scale_out_left <= 0 or self.position.size <= 0:
+            self._scale_out_left = 0
+
+    def _exit(self) -> None:
+        if self._scale_out_left > 0:
+            return  # уже выходим частями
+        self._cancel_bracket()
+        self._cancel_avg()
+        if not self.position:
+            return
+        if self._use_scale_out() and self.position.size > 1:
+            # выход частями: первая продажа рынком, остальные — по барам
+            parts = max(int(getattr(self.p, "scale_parts", 3)), 1)
+            self._scale_out_tranche = max(int(self.position.size / parts), 1)
+            self._scale_out_left = parts - 1
+            self._scale_out_pending = max(int(getattr(self.p, "scale_out_interval", 1)), 1) - 1
+            self.sell(size=self._scale_out_tranche)
+        else:
             self.close()
 
     def _trend_exit(self) -> bool:
@@ -276,6 +396,7 @@ class SmaCross(RiskAwareStrategy):
         self.crossover = bt.indicators.CrossOver(sma_fast, sma_slow)
 
     def next(self):
+        self._step_scale_out()
         if self._trend_exit():
             return
         if not self.position:
@@ -293,6 +414,7 @@ class RSIStrategy(RiskAwareStrategy):
         self.rsi = bt.indicators.RSI(self.data.close, period=int(self.p.period), safediv=True)
 
     def next(self):
+        self._step_scale_out()
         if self._trend_exit():
             return
         if not self.position:
@@ -311,6 +433,7 @@ class DonchianBreakout(RiskAwareStrategy):
         self.lowest = bt.indicators.Lowest(self.data.low, period=int(self.p.period))
 
     def next(self):
+        self._step_scale_out()
         if self._trend_exit():
             return
         if not self.position:
@@ -342,6 +465,11 @@ _PINBAR_PARAMS_TUPLE = (
     ("profile_bins", 50),
     ("profile_period", 100),
     ("profile_mult", 1.2),
+    ("scale_in", 0),
+    ("scale_out", 0),
+    ("scale_parts", 3),
+    ("scale_dist", 1.0),
+    ("scale_out_interval", 1),
 )
 
 
@@ -371,6 +499,7 @@ class PinbarStrategy(RiskAwareStrategy):
         )
 
     def next(self):
+        self._step_scale_out()
         if self._trend_exit():
             return
         if not self.position:
@@ -412,6 +541,7 @@ class EngulfingStrategy(RiskAwareStrategy):
         )
 
     def next(self):
+        self._step_scale_out()
         if self._trend_exit():
             return
         if not self.position:
@@ -464,6 +594,7 @@ STRATEGIES = {
             {"key": "profile_bins", "label": "Профиль: число бинов цен", "type": "int", "default": 50},
             {"key": "profile_period", "label": "Профиль: окно свечей", "type": "int", "default": 100},
             {"key": "profile_mult", "label": "Профиль: порог объёма (x среднего)", "type": "float", "default": 1.2},
+            *_SCALE_PARAMS,
         ],
     },
     "engulfing": {

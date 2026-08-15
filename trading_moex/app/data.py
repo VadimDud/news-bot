@@ -8,6 +8,7 @@
 
 import logging
 from datetime import date, datetime, time, timedelta
+from typing import Callable
 
 import pandas as pd
 
@@ -42,6 +43,23 @@ RESAMPLE_FROM_1MIN = {"5min": "5min", "15min": "15min", "30min": "30min"}
 DELISTED_HINTS = {
     "YNDX": "Актуальный тикер — YDEX (МКПАО «Яндекс»).",
 }
+
+# Дробление окон загрузки на куски для плавного прогресса (веб-скачивание).
+# Каждый кусок — один запрос к MOEX, поэтому прогресс идёт равными шагами,
+# а кусок помещается в один батч (< _MAX_BATCH).
+DOWNLOAD_CHUNK_DAYS = {
+    "1min": 7, "5min": 7, "15min": 7, "30min": 7,
+    "60min": 31, "1day": 183, "1week": 365, "1month": 365,
+}
+
+
+def _iter_windows(start: datetime, end: datetime, chunk_days: int):
+    """Разбить полуинтервал [start, end) на куски не длиннее chunk_days дней."""
+    cur = start
+    while cur < end:
+        nxt = min(cur + timedelta(days=chunk_days), end)
+        yield cur, nxt
+        cur = nxt
 
 
 def _resample_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -145,14 +163,25 @@ def _fetch_raw(ticker: str, period: str, start: date, end: date) -> list[dict]:
     return rows
 
 
-def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: bool = True) -> pd.DataFrame:
+def fetch_history(
+    ticker: str,
+    period: str,
+    start: date,
+    end: date,
+    use_cache: bool = True,
+    progress: Callable[[int], None] | None = None,
+) -> pd.DataFrame:
     """Исторические свечи с MOEX, синхронизированные с базой.
 
     Докачиваются только недостающие куски (хвост после последней сохранённой
     свечи и бэкфилл до первой); результат возвращается из базы за [start, end].
+
+    ``progress`` — необязательный колбэк, получает процент выполнения (0..100).
+    Если передан, окна загрузки дробятся на куски по ``DOWNLOAD_CHUNK_DAYS``,
+    чтобы прогресс обновлялся равными шагами.
     """
     if period not in PERIODS:
-        raise ValueError(f"Неизвестный период {period!r}; доступно: {', '.join(PERIODS)}")
+        raise ValueError(f"Неизвестный таймфрейм: {period}")
     if start >= end:
         raise ValueError("Дата начала должна быть раньше даты окончания")
     request_period = "1min" if period in RESAMPLE_FROM_1MIN else PERIODS[period]
@@ -161,12 +190,25 @@ def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: b
     first = storage.first_candle_time(ticker, period)
     ranges = _fetch_ranges(start, end, period, last, first, use_cache)
 
+    if progress is not None:
+        chunk_days = DOWNLOAD_CHUNK_DAYS.get(period, 31)
+        windows = [w for rng in ranges for w in _iter_windows(*rng, chunk_days)]
+    else:
+        windows = ranges
+
     new_rows: list[dict] = []
-    for rng_start, rng_end in ranges:
+    total = len(windows)
+    last_pct = -1
+    for i, (win_start, win_end) in enumerate(windows, start=1):
         _ensure_login()
-        rows = _fetch_raw(ticker, request_period, rng_start, rng_end)
-        logger.info("Загрузка %s %s [%s .. %s) с MOEX — %s строк", ticker, period, rng_start, rng_end, len(rows))
+        rows = _fetch_raw(ticker, request_period, win_start, win_end)
+        logger.info("Загрузка %s %s [%s .. %s) с MOEX — %s строк", ticker, period, win_start, win_end, len(rows))
         new_rows.extend(rows)
+        if progress is not None and total:
+            pct = round(i * 100 / total)
+            if pct != last_pct:
+                progress(pct)
+                last_pct = pct
 
     if new_rows:
         df = pd.DataFrame(new_rows)
@@ -185,6 +227,8 @@ def fetch_history(ticker: str, period: str, start: date, end: date, use_cache: b
         if hint:
             msg += f"\n{hint}"
         raise ValueError(msg)
+    if progress is not None and last_pct != 100:
+        progress(100)
     return normalize_history(out)
 
 

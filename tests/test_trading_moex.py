@@ -1,5 +1,7 @@
 """Юнит-тесты торгового модуля: сигналы на синтетических данных."""
 
+import asyncio
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -815,6 +817,39 @@ def test_fetch_history_use_cache_false_reloads_full_range(tmp_path, monkeypatch)
     assert df["open"].iloc[0] == 200  # перезаписано свежими данными
 
 
+def test_fetch_history_progress_callback(tmp_path, monkeypatch):
+    """С колбэком прогресса окна дробятся на чанки и процент идёт равными шагами."""
+    from datetime import date as d
+
+    from trading_moex.app import data as moex_data
+
+    _mock_trader_config(tmp_path, monkeypatch)
+
+    calls = []
+
+    def fake_fetch_raw(ticker, period, start, end):
+        calls.append(start)
+        return [
+            {
+                "begin": start.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": start.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+                "volume": 10, "value": 1000.0,
+            }
+        ]
+
+    monkeypatch.setattr(moex_data, "_fetch_raw", fake_fetch_raw)
+
+    progress = []
+    df = moex_data.fetch_history(
+        "SBER", "1min", d(2026, 6, 1), d(2026, 6, 22), use_cache=False,
+        progress=progress.append,
+    )
+    assert progress == [25, 50, 75, 100]  # 4 окна по 7 дней, монотонно до 100
+    assert len(calls) == 4
+    assert len(df) == 4
+
+
 async def test_data_status_endpoint(tmp_path, monkeypatch):
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -850,6 +885,135 @@ async def test_data_status_endpoint(tmp_path, monkeypatch):
         resp = await client.get("/data/status?ticker=SBER&period=bogus")
         assert resp.status == 200
         assert (await resp.json())["count"] == 0
+    finally:
+        await client.close()
+
+
+async def test_data_download_job_flow(tmp_path, monkeypatch):
+    """Job-поток скачивания: start -> status(done) -> result отдаёт CSV один раз."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from trading_moex.app import config, data as moex_data, settings, storage
+    from trading_moex.app.web.app import create_app
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    settings.set("TRADER_WEB_PASSWORD", "testpass")
+
+    idx = pd.date_range("2025-06-01", periods=5, freq="D")
+    close = np.linspace(100, 110, 5)
+    df = pd.DataFrame(
+        {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1000.0},
+        index=idx,
+    )
+    df.index.name = "datetime"
+
+    progress_reported = []
+
+    def fake_fetch_history(ticker, period, start, end, use_cache=True, progress=None):
+        if progress:
+            progress(50)
+        return df
+
+    monkeypatch.setattr(moex_data, "fetch_history", fake_fetch_history)
+
+    app = create_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        # без авторизации — редирект на логин
+        resp = await client.post("/data/download/start", data={"ticker": "SBER"}, allow_redirects=False)
+        assert resp.status == 302
+
+        await client.post("/login", data={"password": "testpass"}, allow_redirects=False)
+
+        resp = await client.post(
+            "/data/download/start",
+            data={"ticker": "SBER", "period": "1day", "start": "2025-06-01", "end": "2025-06-10"},
+        )
+        assert resp.status == 200
+        job_id = (await resp.json())["job_id"]
+        assert job_id
+
+        for _ in range(100):
+            status = await client.get(f"/data/download/status?job_id={job_id}")
+            data = await status.json()
+            if data["state"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert data["state"] == "done"
+        assert data["percent"] == 100
+
+        resp = await client.get(f"/data/download/result?job_id={job_id}")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/csv")
+        assert "SBER_1day_2025-06-01_2025-06-10.csv" in resp.headers["Content-Disposition"]
+        body = await resp.text()
+        assert body.splitlines()[0] == "datetime,open,high,low,close,volume"
+
+        # результат отдаётся один раз
+        resp = await client.get(f"/data/download/result?job_id={job_id}")
+        assert resp.status == 404
+    finally:
+        await client.close()
+
+
+async def test_data_download_job_error_and_validation(tmp_path, monkeypatch):
+    """Ошибка скачивания -> state=error и страница ошибки; невалидные даты -> 400."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from trading_moex.app import config, data as moex_data, settings, storage
+    from trading_moex.app.web.app import create_app
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "trader.db")
+    storage.init_db()
+    settings.set("TRADER_WEB_PASSWORD", "testpass")
+
+    def fake_fetch_history(ticker, period, start, end, use_cache=True, progress=None):
+        raise ValueError("MOEX не вернул данных по TEST")
+
+    monkeypatch.setattr(moex_data, "fetch_history", fake_fetch_history)
+
+    app = create_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        await client.post("/login", data={"password": "testpass"}, allow_redirects=False)
+
+        # старт раньше конца — валидация
+        resp = await client.post(
+            "/data/download/start",
+            data={"ticker": "SBER", "start": "2025-06-10", "end": "2025-06-01"},
+        )
+        assert resp.status == 400
+
+        resp = await client.post(
+            "/data/download/start",
+            data={"ticker": "SBER", "period": "1day", "start": "2025-06-01", "end": "2025-06-10"},
+        )
+        assert resp.status == 200
+        job_id = (await resp.json())["job_id"]
+
+        for _ in range(100):
+            status = await client.get(f"/data/download/status?job_id={job_id}")
+            data = await status.json()
+            if data["state"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert data["state"] == "error"
+        assert "MOEX не вернул данных" in (data["error"] or "")
+
+        resp = await client.get(f"/data/download/result?job_id={job_id}")
+        assert resp.status == 200
+        assert "Ошибка загрузки данных" in await resp.text()
+
+        # неизвестный job
+        resp = await client.get("/data/download/status?job_id=nope")
+        assert resp.status == 404
     finally:
         await client.close()
 

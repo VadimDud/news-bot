@@ -8,7 +8,9 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -31,6 +33,17 @@ logger = logging.getLogger("moex_trader.web")
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _PUBLIC_PATHS = {"/login", "/static"}
+
+# ── Фоновые задачи скачивания (прогресс в UI) ────────────────────────────────
+
+_DL_TTL_SECONDS = 15 * 60
+_DL_JOBS: dict[str, dict] = {}
+
+
+def _prune_dl_jobs() -> None:
+    now = time.monotonic()
+    for jid in [j for j, job in _DL_JOBS.items() if now - job["created"] > _DL_TTL_SECONDS]:
+        _DL_JOBS.pop(jid, None)
 
 
 def _effective_password() -> str:
@@ -151,6 +164,9 @@ async def watchlist_page(request: web.Request) -> web.Response:
             "available": [t for t in AVAILABLE_TICKERS if t["ticker"] not in current_set],
             "current": current,
             "env_defaults": [t for t in config.WATCH_TICKERS if t not in current_set],
+            "periods": data.PERIODS,
+            "today": date.today().isoformat(),
+            "year_ago": (date.today() - timedelta(days=365)).isoformat(),
         },
     )
 
@@ -291,6 +307,88 @@ async def data_status(request: web.Request) -> web.Response:
             "last": storage.last_candle_time(ticker, period),
             "count": storage.candle_count(ticker, period),
         }
+    )
+
+
+async def data_download_start(request: web.Request) -> web.Response:
+    """Запустить фоновое скачивание свечей; вернуть job_id для опроса прогресса."""
+    form = await request.post()
+    ticker = form.get("ticker", "").strip().upper()
+    period = form.get("period", "1min")
+    start = _parse_date(form.get("start", ""), date.today() - timedelta(days=365))
+    end = _parse_date(form.get("end", ""), date.today())
+
+    errors = []
+    if not ticker:
+        errors.append("Укажите тикер (например SBER).")
+    if period not in data.PERIODS:
+        errors.append("Неизвестный таймфрейм.")
+    if start >= end:
+        errors.append("Дата начала должна быть раньше даты окончания.")
+    if errors:
+        return web.json_response({"error": " ".join(errors)}, status=400)
+
+    _prune_dl_jobs()
+    job_id = secrets.token_hex(8)
+    _DL_JOBS[job_id] = {
+        "state": "running",
+        "percent": 0,
+        "error": None,
+        "csv": None,
+        "filename": None,
+        "created": time.monotonic(),
+    }
+    asyncio.get_running_loop().create_task(_run_download_job(job_id, ticker, period, start, end))
+    return web.json_response({"job_id": job_id})
+
+
+async def _run_download_job(job_id: str, ticker: str, period: str, start: date, end: date) -> None:
+    job = _DL_JOBS[job_id]
+    loop = asyncio.get_running_loop()
+
+    def set_progress(pct: int) -> None:
+        job["percent"] = pct
+
+    try:
+        df = await loop.run_in_executor(
+            None, data.fetch_history, ticker, period, start, end, True, set_progress
+        )
+        job["csv"] = data.to_csv(df)
+        job["filename"] = f"{ticker}_{period}_{start.isoformat()}_{end.isoformat()}.csv"
+        job["percent"] = 100
+        job["state"] = "done"
+    except Exception as exc:  # noqa: BLE001
+        job["state"] = "error"
+        job["error"] = str(exc)
+        logger.warning("Скачивание %s %s не удалось: %s", ticker, period, exc)
+
+
+async def data_download_status(request: web.Request) -> web.Response:
+    """Прогресс фонового скачивания."""
+    job = _DL_JOBS.get(request.query.get("job_id", ""))
+    if job is None:
+        return web.json_response({"state": "not_found"}, status=404)
+    return web.json_response({"state": job["state"], "percent": job["percent"], "error": job["error"]})
+
+
+async def data_download_result(request: web.Request) -> web.Response:
+    """Отдать готовый CSV (однократно) или ошибку/промежуточный статус."""
+    job_id = request.query.get("job_id", "")
+    job = _DL_JOBS.get(job_id)
+    if job is None:
+        return web.json_response({"error": "Задача не найдена"}, status=404)
+    if job["state"] == "running":
+        return web.json_response({"error": "Скачивание ещё выполняется"}, status=425)
+    if job["state"] == "error":
+        return _error_page(request, f"Ошибка загрузки данных: {job['error']}")
+    csv_data = job.pop("csv")
+    filename = job.pop("filename")
+    _DL_JOBS.pop(job_id, None)
+    return web.Response(
+        body=csv_data,
+        content_type="text/csv",
+        charset="utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -443,6 +541,9 @@ def create_app() -> web.Application:
     app.router.add_get("/backtest/{run_id}", backtest_detail)
     app.router.add_post("/data/download", data_download)
     app.router.add_get("/data/status", data_status)
+    app.router.add_post("/data/download/start", data_download_start)
+    app.router.add_get("/data/download/status", data_download_status)
+    app.router.add_get("/data/download/result", data_download_result)
     app.router.add_get("/live", live_page)
     app.router.add_get("/live/data", live_data)
     app.router.add_post("/live/start", live_start)

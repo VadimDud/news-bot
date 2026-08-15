@@ -45,4 +45,120 @@
   <p class="hint">По умолчанию из .env: {{ env_defaults | join(', ') }}. Добавьте их в список, чтобы управлять отсюда.</p>
   {% endif %}
 </div>
+
+<div class="card">
+  <h2>Скачать данные тикера с MOEX</h2>
+  <p class="hint">Экспорт свечей в CSV: <code>datetime,open,high,low,close,volume</code>. Свечи хранятся в базе — докачивается только новая информация, общий кэш с бэктестом.</p>
+  <form id="dl-form" method="post" action="/data/download">
+    <div class="grid">
+      <div>
+        <label for="dl_ticker">Тикер (MOEX)</label>
+        <input type="text" id="dl_ticker" name="ticker" value="SBER" placeholder="SBER, LKOH, GMKN..." required>
+      </div>
+      <div>
+        <label for="dl_period">Таймфрейм</label>
+        <select id="dl_period" name="period">
+          {% for key in periods %}
+          <option value="{{ key }}" {{ 'selected' if key == '1min' }}>{{ key }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="dl_start">С даты</label>
+        <input type="date" id="dl_start" name="start" value="{{ year_ago }}">
+      </div>
+      <div>
+        <label for="dl_end">По дату</label>
+        <input type="date" id="dl_end" name="end" value="{{ today }}">
+      </div>
+    </div>
+    <button type="submit" id="dl-btn">Скачать CSV</button>
+  </form>
+  <div id="dl-progress" style="display:none">
+    <div class="progress-track"><div class="progress-bar" id="dl-progress-bar"></div></div>
+    <p class="hint" id="dl-progress-text"></p>
+  </div>
+  <p class="hint" id="dl-status">База данных свечей: —</p>
+</div>
+
+<script>
+async function updateDbStatus() {
+  const ticker = document.getElementById("dl_ticker").value.trim().toUpperCase();
+  const period = document.getElementById("dl_period").value;
+  const el = document.getElementById("dl-status");
+  if (!ticker) { el.textContent = "База данных свечей: —"; return; }
+  try {
+    const resp = await fetch(`/data/status?ticker=${encodeURIComponent(ticker)}&period=${encodeURIComponent(period)}`);
+    const d = await resp.json();
+    el.textContent = d.count
+      ? `База данных свечей: ${d.count} шт., последняя — ${d.last}`
+      : "База данных свечей: пусто — при скачивании загрузится целиком";
+  } catch {
+    el.textContent = "База данных свечей: —";
+  }
+}
+
+const dlForm = document.getElementById("dl-form");
+const dlBtn = document.getElementById("dl-btn");
+const dlProgress = document.getElementById("dl-progress");
+const dlProgressBar = document.getElementById("dl-progress-bar");
+const dlProgressText = document.getElementById("dl-progress-text");
+let dlPollTimer = null;
+
+dlForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  dlBtn.disabled = true;
+  dlProgress.style.display = "block";
+  dlProgressBar.style.width = "0%";
+  dlProgressText.textContent = "Запуск скачивания…";
+
+  let jobId = null;
+  try {
+    const startResp = await fetch("/data/download/start", { method: "POST", body: new FormData(dlForm) });
+    const startData = await startResp.json().catch(() => ({}));
+    if (!startResp.ok) {
+      dlProgressText.textContent = "Ошибка: " + (startData.error || "не удалось запустить");
+      dlBtn.disabled = false;
+      return;
+    }
+    jobId = startData.job_id;
+  } catch (err) {
+    dlProgressText.textContent = "Ошибка запуска: " + err;
+    dlBtn.disabled = false;
+    return;
+  }
+
+  const poll = async () => {
+    let data;
+    try {
+      const resp = await fetch(`/data/download/status?job_id=${encodeURIComponent(jobId)}`);
+      data = await resp.json();
+    } catch {
+      dlPollTimer = setTimeout(poll, 500);
+      return;
+    }
+    if (data.state === "error") {
+      clearTimeout(dlPollTimer);
+      dlProgressText.textContent = "Ошибка: " + (data.error || "неизвестная");
+      dlBtn.disabled = false;
+      return;
+    }
+    dlProgressBar.style.width = (data.percent || 0) + "%";
+    dlProgressText.textContent = `Скачивание с MOEX… ${data.percent || 0}%`;
+    if (data.state === "done") {
+      clearTimeout(dlPollTimer);
+      dlProgressText.textContent = "Готово — начинается загрузка CSV…";
+      window.location.href = `/data/download/result?job_id=${encodeURIComponent(jobId)}`;
+      setTimeout(() => { dlBtn.disabled = false; }, 4000);
+      return;
+    }
+    dlPollTimer = setTimeout(poll, 500);
+  };
+  poll();
+});
+
+document.getElementById("dl_ticker").addEventListener("input", updateDbStatus);
+document.getElementById("dl_period").addEventListener("change", updateDbStatus);
+updateDbStatus();
+</script>
 {% endblock %}

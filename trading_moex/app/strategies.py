@@ -107,6 +107,10 @@ class RiskAwareStrategy(TradeRecordingStrategy):
                 self.ema_ind = bt.indicators.EMA(self.data.close, period=int(self.p.trend_period))
         else:
             self.ema_ind = None
+        if int(getattr(self.p, "vol_period", 0)) > 0:
+            self.vol_avg = bt.indicators.SMA(self.data.volume, period=int(self.p.vol_period))
+        else:
+            self.vol_avg = None
 
     # ── риск / тренд ─────────────────────────────────────────────────────────
 
@@ -126,6 +130,22 @@ class RiskAwareStrategy(TradeRecordingStrategy):
         if self.ema_ind is None:
             return True
         return float(self.data.close[0]) > float(self.ema_ind[0])
+
+    def _volume_confirms(self) -> bool:
+        """Объём свечи паттерна не ниже среднего с множителем (подтверждение сигнала)."""
+        if self.vol_avg is None:
+            return True
+        return sig.volume_confirms(
+            float(self.data.volume[0]), float(self.vol_avg[0]),
+            float(getattr(self.p, "vol_mult", 0.0)), int(getattr(self.p, "vol_period", 0)),
+        )
+
+    def _bulls_dominate(self) -> bool:
+        """Доля покупок на свече: close ближе к high, чем к low (быки двигают цену)."""
+        return sig.bulls_dominate(
+            float(self.data.high[0]), float(self.data.low[0]),
+            float(self.data.close[0]), float(getattr(self.p, "bull_frac", 0.0)),
+        )
 
     def _risk_size(self) -> int:
         price = float(self.data.close[0])
@@ -250,15 +270,42 @@ class DonchianBreakout(RiskAwareStrategy):
             self._exit()
 
 
-class PinbarStrategy(RiskAwareStrategy):
-    """Молот / падающая звезда. Вход на бычьем пин-баре, выход — по SL/TP или медвежьему."""
+# bt-параметры Pinbar — подобраны перебором на YDEX (2025-08..2026-08, 30min):
+# объёмные фильтры (vol 40/1.5, bull 0.7) как у Поглощения + тень/тело 2.5,
+# широкий стоп 4.5 ATR, тейк 1:3, вход выше EMA(250). Без фильтров стратегия
+# убыточна (-45%/год); с ними: бычье окно +8.4% PF 5.9, полный год +3.7% PF 1.5
+# (лучше Поглощения на обоих окнах). Стоп 5.0/5.5 ATR хуже — 4.5 оптимален.
+_PINBAR_PARAMS_TUPLE = (
+    ("wick_ratio", 2.5),
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("atr_stop_mult", 4.5),
+    ("rr_ratio", 3.0),
+    ("trend_period", 250),
+    ("trend_vwap", 0),
+    ("vol_period", 40),
+    ("vol_mult", 1.5),
+    ("bull_frac", 0.7),
+)
 
-    params = (("wick_ratio", 2.0),) + _RISK_PARAMS_TUPLE
+
+class PinbarStrategy(RiskAwareStrategy):
+    """Молот / падающая звезда. Вход на бычьем пин-баре, выход — по SL/TP или медвежьему.
+
+    Подтверждение как у Поглощения: ``vol_period``/``vol_mult`` — объём свечи
+    не ниже среднего с множителем; ``bull_frac`` — доля «бычьей» силы свечи.
+    """
+
+    params = _PINBAR_PARAMS_TUPLE
 
     def _bull(self) -> bool:
-        return sig.is_bullish_pinbar(
-            float(self.data.open[0]), float(self.data.high[0]),
-            float(self.data.low[0]), float(self.data.close[0]), float(self.p.wick_ratio),
+        return (
+            sig.is_bullish_pinbar(
+                float(self.data.open[0]), float(self.data.high[0]),
+                float(self.data.low[0]), float(self.data.close[0]), float(self.p.wick_ratio),
+            )
+            and self._volume_confirms()
+            and self._bulls_dominate()
         )
 
     def _bear(self) -> bool:
@@ -289,29 +336,6 @@ class EngulfingStrategy(RiskAwareStrategy):
     """
 
     params = _ENGULFING_PARAMS_TUPLE
-
-    def __init__(self):
-        super().__init__()
-        if int(self.p.vol_period) > 0:
-            self.vol_avg = bt.indicators.SMA(self.data.volume, period=int(self.p.vol_period))
-        else:
-            self.vol_avg = None
-
-    def _volume_confirms(self) -> bool:
-        """Объём свечи паттерна не ниже среднего с множителем (подтверждение сигнала)."""
-        if self.vol_avg is None:
-            return True
-        return sig.volume_confirms(
-            float(self.data.volume[0]), float(self.vol_avg[0]),
-            float(self.p.vol_mult), int(self.p.vol_period),
-        )
-
-    def _bulls_dominate(self) -> bool:
-        """Доля покупок на свече: close ближе к high, чем к low (быки двигают цену)."""
-        return sig.bulls_dominate(
-            float(self.data.high[0]), float(self.data.low[0]),
-            float(self.data.close[0]), float(self.p.bull_frac),
-        )
 
     def _bull(self) -> bool:
         return (
@@ -370,8 +394,17 @@ STRATEGIES = {
         "name": "Pinbar (молот / падающая звезда)",
         "cls": PinbarStrategy,
         "params": [
-            {"key": "wick_ratio", "label": "Тень / тело", "type": "float", "default": 2.0},
-        ] + _RISK_PARAMS,
+            {"key": "wick_ratio", "label": "Тень / тело", "type": "float", "default": 2.5},
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 4.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 3.0},
+            {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 250},
+            {"key": "trend_vwap", "label": "Трендовый по объёму VWMA (1 = да, 0 = нет)", "type": "int", "default": 0},
+            {"key": "vol_period", "label": "Объём: период среднего (0 = выкл)", "type": "int", "default": 40},
+            {"key": "vol_mult", "label": "Объём: мин. кратность среднего", "type": "float", "default": 1.5},
+            {"key": "bull_frac", "label": "Доля быков на свече входа (0 = выкл)", "type": "float", "default": 0.7},
+        ],
     },
     "engulfing": {
         "name": "Поглощение (Engulfing)",

@@ -50,6 +50,7 @@ _ENGULFING_PARAMS_TUPLE = (
     ("atr_stop_mult", 4.0),
     ("rr_ratio", 3.0),
     ("trend_period", 150),
+    ("trend_vwap", 0),
     ("vol_period", 40),
     ("vol_mult", 1.5),
     ("bull_frac", 0.7),
@@ -74,6 +75,7 @@ _ENGULFING_PARAMS = [
     {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 4.0},
     {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 3.0},
     {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 150},
+    {"key": "trend_vwap", "label": "Трендовый по объёму VWMA (1 = да, 0 = нет)", "type": "int", "default": 0},
     {"key": "vol_period", "label": "Объём: период среднего (0 = выкл)", "type": "int", "default": 40},
     {"key": "vol_mult", "label": "Объём: мин. кратность среднего", "type": "float", "default": 1.5},
     {"key": "bull_frac", "label": "Доля быков на свече входа (0 = выкл)", "type": "float", "default": 0.7},
@@ -94,7 +96,15 @@ class RiskAwareStrategy(TradeRecordingStrategy):
         self._sl_order = None
         self._tp_order = None
         if int(self.p.trend_period) > 0:
-            self.ema_ind = bt.indicators.EMA(self.data.close, period=int(self.p.trend_period))
+            if getattr(self.p, "trend_vwap", 0):
+                # трендовый индикатор по объёму (VWMA): SUM(price*vol)/SUM(vol)
+                vsum = bt.indicators.SumN(
+                    self.data.close * self.data.volume, period=int(self.p.trend_period)
+                )
+                vvol = bt.indicators.SumN(self.data.volume, period=int(self.p.trend_period))
+                self.ema_ind = vsum / vvol
+            else:
+                self.ema_ind = bt.indicators.EMA(self.data.close, period=int(self.p.trend_period))
         else:
             self.ema_ind = None
 

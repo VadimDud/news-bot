@@ -7,7 +7,6 @@
 - лот = риск-сумма / дистанция стопа.
 """
 
-import numpy as np
 import pandas as pd
 
 DEFAULT_ATR_PERIOD = 14
@@ -43,28 +42,6 @@ def stop_distance(
     return atr(df, period) * atr_mult
 
 
-def stop_price(df: pd.DataFrame, period: int, atr_mult: float, side: str = "long") -> pd.Series:
-    """Цена стоп-лосса: для лонга ниже текущего close."""
-    dist = stop_distance(df, period, atr_mult)
-    if side == "long":
-        return df["close"] - dist
-    return df["close"] + dist
-
-
-def target_price(
-    df: pd.DataFrame,
-    period: int = DEFAULT_ATR_PERIOD,
-    atr_mult: float = DEFAULT_ATR_STOP_MULT,
-    rr_ratio: float = DEFAULT_RR_RATIO,
-    side: str = "long",
-) -> pd.Series:
-    """Цена тейк-профита: дистанция стопа, умноженная на R:R."""
-    dist = stop_distance(df, period, atr_mult) * rr_ratio
-    if side == "long":
-        return df["close"] + dist
-    return df["close"] - dist
-
-
 def position_size(equity: float, risk_pct: float, stop_distance_value: float, price: float) -> int:
     """Размер позиции (лот) так, чтобы риск по сделке = ``risk_pct`` от капитала.
 
@@ -76,7 +53,3 @@ def position_size(equity: float, risk_pct: float, stop_distance_value: float, pr
     risk_amount = equity * risk_pct
     size = int(risk_amount / stop_distance_value)
     return max(size, 1)
-
-
-def fmt_pct(value: float) -> str:
-    return f"{value * 100:.2f}%"

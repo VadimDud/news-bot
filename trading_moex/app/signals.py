@@ -8,8 +8,6 @@ import numpy as np
 import pandas as pd
 from typing import Sequence
 
-POSITION_KEY = "position"
-
 
 def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(period).mean()
@@ -152,6 +150,37 @@ def bulls_dominate(high: float, low: float, close: float, bull_frac: float) -> b
     return (close - low) / rng >= bull_frac
 
 
+def _volume_hist(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+    vols: Sequence[float], bins: int,
+) -> tuple[list[float], float, float] | None:
+    """Объёмный профиль: типичная цена (h+l+c)/3 распределяется по ``bins``
+    бинам диапазона цен свечей. Возвращает (hist, pricemin, binw) или None,
+    если нет валидных баров. NaN-бары (тёплый период) пропускаются.
+    """
+    lo, hi, cl, v = [], [], [], []
+    for h, l, c, vol in zip(highs, lows, closes, vols):
+        if not (h == h and l == l and c == c and vol == vol and vol > 0):
+            continue
+        lo.append(l)
+        hi.append(h)
+        cl.append(c)
+        v.append(vol)
+    if not lo:
+        return None
+    pricemin = min(lo)
+    pricemax = max(hi)
+    if pricemax <= pricemin:
+        return None
+    binw = (pricemax - pricemin) / bins
+    hist = [0.0] * bins
+    for l, h, c, vol in zip(lo, hi, cl, v):
+        b = int(((h + l + c) / 3.0 - pricemin) / binw)
+        b = min(b, bins - 1)
+        hist[b] += vol
+    return hist, pricemin, binw
+
+
 def volume_profile_levels(
     highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
     vols: Sequence[float], price: float, bins: int = 40, mult: float = 1.5,
@@ -164,26 +193,10 @@ def volume_profile_levels(
     сопротивление) — центры ближайших HVN с нужной стороны от цены, либо
     None, если такого уровня нет. NaN-бары (тёплый период) пропускаются.
     """
-    lo, hi, cl, v = [], [], [], []
-    for h, l, c, vol in zip(highs, lows, closes, vols):
-        if not (h == h and l == l and c == c and vol == vol and vol > 0):
-            continue
-        lo.append(l)
-        hi.append(h)
-        cl.append(c)
-        v.append(vol)
-    if not lo:
+    built = _volume_hist(highs, lows, closes, vols, bins)
+    if built is None:
         return None, None
-    pricemin = min(lo)
-    pricemax = max(hi)
-    if pricemax <= pricemin:
-        return None, None
-    binw = (pricemax - pricemin) / bins
-    hist = [0.0] * bins
-    for l, h, c, vol in zip(lo, hi, cl, v):
-        b = int(((h + l + c) / 3.0 - pricemin) / binw)
-        b = min(b, bins - 1)
-        hist[b] += vol
+    hist, pricemin, binw = built
     avg = sum(hist) / bins
     threshold = avg * mult
     support = None
@@ -212,26 +225,10 @@ def volume_profile_zones(
     нижестоящую зону B (следующий объём), к которой движется цена. NaN-бары
     (тёплый период) пропускаются.
     """
-    lo, hi, cl, v = [], [], [], []
-    for h, l, c, vol in zip(highs, lows, closes, vols):
-        if not (h == h and l == l and c == c and vol == vol and vol > 0):
-            continue
-        lo.append(l)
-        hi.append(h)
-        cl.append(c)
-        v.append(vol)
-    if not lo:
+    built = _volume_hist(highs, lows, closes, vols, bins)
+    if built is None:
         return []
-    pricemin = min(lo)
-    pricemax = max(hi)
-    if pricemax <= pricemin:
-        return []
-    binw = (pricemax - pricemin) / bins
-    hist = [0.0] * bins
-    for l, h, c, vol in zip(lo, hi, cl, v):
-        b = int(((h + l + c) / 3.0 - pricemin) / binw)
-        b = min(b, bins - 1)
-        hist[b] += vol
+    hist, pricemin, binw = built
     avg = sum(hist) / bins
     threshold = avg * mult
     zones = []

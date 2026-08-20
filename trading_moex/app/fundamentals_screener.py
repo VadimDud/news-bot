@@ -30,7 +30,7 @@ def _row_for(ticker: str, years: int = 10) -> dict:
         "name": fundamentals_catalog_name(ticker),
         "avg_roe": avg_roe,
         "min_roe": min_roe,
-        "roe_latest": _float(latest.get("roe")),
+        "roe_latest": storage.to_float(latest.get("roe")),
         "bvps": _round2(bvps),
         "price": price,
         "pb": pb,
@@ -40,17 +40,8 @@ def _row_for(ticker: str, years: int = 10) -> dict:
     }
 
 
-def _float(value) -> float | None:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _round2(value) -> float | None:
-    f = _float(value)
+    f = storage.to_float(value)
     return round(f, 2) if f is not None else None
 
 

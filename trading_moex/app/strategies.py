@@ -141,7 +141,6 @@ class RiskAwareStrategy(TradeRecordingStrategy):
         # состояние усреднения входа (усреднение) и выхода (выход частями)
         self._avg_orders: list = []
         self._scale_active = False
-        self._scale_ref = 0.0
         self._scale_stop = 0.0
         self._scale_target = 0.0
         self._scale_out_left = 0
@@ -322,7 +321,6 @@ class RiskAwareStrategy(TradeRecordingStrategy):
         levels, _avg, stop, target = sig.scale_plan(
             ref, atr, parts, dist, stop_dist, float(self.p.rr_ratio),
         )
-        self._scale_ref = ref
         self._scale_stop = stop
         self._scale_target = target
         self._avg_orders = []
@@ -387,6 +385,24 @@ class RiskAwareStrategy(TradeRecordingStrategy):
             return True
         return False
 
+    # Общий шаблон длинной стратегии: каждый бар степаем выход, проверяем тренд,
+    # входим по _buy_signal() без позиции, выходим по _sell_signal() в позиции.
+    def next(self):
+        self._step_scale_out()
+        if self._trend_exit():
+            return
+        if not self.position:
+            if self._buy_signal():
+                self._open_long()
+        elif self._sell_signal():
+            self._exit()
+
+    def _buy_signal(self) -> bool:
+        return False
+
+    def _sell_signal(self) -> bool:
+        return False
+
 
 class SmaCross(RiskAwareStrategy):
     params = (("fast", 10), ("slow", 30)) + _RISK_PARAMS_TUPLE
@@ -397,15 +413,11 @@ class SmaCross(RiskAwareStrategy):
         sma_slow = bt.indicators.SMA(self.data.close, period=int(self.p.slow))
         self.crossover = bt.indicators.CrossOver(sma_fast, sma_slow)
 
-    def next(self):
-        self._step_scale_out()
-        if self._trend_exit():
-            return
-        if not self.position:
-            if self.crossover[0] > 0:
-                self._open_long()
-        elif self.crossover[0] < 0:
-            self._exit()
+    def _buy_signal(self) -> bool:
+        return self.crossover[0] > 0
+
+    def _sell_signal(self) -> bool:
+        return self.crossover[0] < 0
 
 
 class RSIStrategy(RiskAwareStrategy):
@@ -415,15 +427,11 @@ class RSIStrategy(RiskAwareStrategy):
         super().__init__()
         self.rsi = bt.indicators.RSI(self.data.close, period=int(self.p.period), safediv=True)
 
-    def next(self):
-        self._step_scale_out()
-        if self._trend_exit():
-            return
-        if not self.position:
-            if self.rsi[0] < self.p.buy_threshold:
-                self._open_long()
-        elif self.rsi[0] > self.p.sell_threshold:
-            self._exit()
+    def _buy_signal(self) -> bool:
+        return self.rsi[0] < self.p.buy_threshold
+
+    def _sell_signal(self) -> bool:
+        return self.rsi[0] > self.p.sell_threshold
 
 
 class DonchianBreakout(RiskAwareStrategy):
@@ -434,15 +442,11 @@ class DonchianBreakout(RiskAwareStrategy):
         self.highest = bt.indicators.Highest(self.data.high, period=int(self.p.period))
         self.lowest = bt.indicators.Lowest(self.data.low, period=int(self.p.period))
 
-    def next(self):
-        self._step_scale_out()
-        if self._trend_exit():
-            return
-        if not self.position:
-            if self.data.close[0] > self.highest[-1]:
-                self._open_long()
-        elif self.data.close[0] < self.lowest[-1]:
-            self._exit()
+    def _buy_signal(self) -> bool:
+        return self.data.close[0] > self.highest[-1]
+
+    def _sell_signal(self) -> bool:
+        return self.data.close[0] < self.lowest[-1]
 
 
 # bt-параметры Pinbar — подобраны перебором на YDEX (2025-08..2026-08, 30min):
@@ -500,15 +504,11 @@ class PinbarStrategy(RiskAwareStrategy):
             float(self.data.low[0]), float(self.data.close[0]), float(self.p.wick_ratio),
         )
 
-    def next(self):
-        self._step_scale_out()
-        if self._trend_exit():
-            return
-        if not self.position:
-            if self._bull():
-                self._open_long()
-        elif self._bear():
-            self._exit()
+    def _buy_signal(self) -> bool:
+        return self._bull()
+
+    def _sell_signal(self) -> bool:
+        return self._bear()
 
 
 class EngulfingStrategy(RiskAwareStrategy):
@@ -542,15 +542,11 @@ class EngulfingStrategy(RiskAwareStrategy):
             float(self.data.open[-1]), float(self.data.close[-1]),
         )
 
-    def next(self):
-        self._step_scale_out()
-        if self._trend_exit():
-            return
-        if not self.position:
-            if self._bull():
-                self._open_long()
-        elif self._bear():
-            self._exit()
+    def _buy_signal(self) -> bool:
+        return self._bull()
+
+    def _sell_signal(self) -> bool:
+        return self._bear()
 
 
 # Параметры MA-трендовой стратегии. Подобраны перебором на YDEX 30min
@@ -676,15 +672,11 @@ class MATrendStrategy(RiskAwareStrategy):
         s = float(self.sma_s[0])
         return s == s and float(self.data.close[0]) < s
 
-    def next(self):
-        self._step_scale_out()
-        if self._trend_exit():
-            return
-        if not self.position:
-            if self._long_signal():
-                self._open_long()
-        elif self._long_exit():
-            self._exit()
+    def _buy_signal(self) -> bool:
+        return self._long_signal()
+
+    def _sell_signal(self) -> bool:
+        return self._long_exit()
 
 
 # Параметры медвежьей стратегии Vol Profile Breakdown (пробой зоны высокого
@@ -745,7 +737,7 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
         self._sl_order = None
         self._tp_order = None
 
-    def _atv(self) -> float:
+    def _atr_value(self) -> float:
         v = float(self.atr_ind[0])
         return 0.0 if v != v or v <= 0 else v
 
@@ -826,7 +818,7 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
     def _enter_short(self) -> None:
         a = self._zone_a
         b = self._zone_b
-        atr = self._atv()
+        atr = self._atr_value()
         if atr <= 0:
             self._reset()
             return
@@ -877,18 +869,12 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
             ):
                 self.cancel(pending)
 
-    def _on_flat(self) -> None:
-        self._state = "SCAN"
-        self._zone_a = None
-        self._zone_b = None
-        self._wait = 0
-
     def notify_order(self, order):
         if order.status == bt.Order.Completed:
             # сняли позицию шорта целиком либо частично
             if self.position.size == 0:
                 self._cancel_pending_bracket(keep=order)
-                self._on_flat()
+                self._reset()
                 self._sl_order = self._tp_order = None
         elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin):
             if order is self._sl_order:
@@ -901,7 +887,7 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
             self._place_bracket()
             return
         if not self.position.size and self._state == "IN_POSITION":
-            self._on_flat()
+            self._reset()
         if self._state == "SCAN":
             self._scan()
         elif self._state == "SEARCH_RETEST":
@@ -970,8 +956,6 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         купить бумагу не позже ``buy_before`` (T-1 от отсечки). Стратегия
         проверяет, что позиция была открыта на buy_before.
         """
-        import pandas as pd
-
         out = df.copy()
         out["_dt"] = pd.to_datetime(out["date"])
         out["_bb"] = pd.to_datetime(out["buy_before"])
@@ -1007,8 +991,6 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         return 0.0
 
     def _index_by_date(self, df):
-        import pandas as pd
-
         out = df.copy()
         out["_dt"] = pd.to_datetime(out["date"])
         out = out.set_index("_dt").sort_index()
@@ -1030,32 +1012,23 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         cache[key] = row
         return row
 
-    def _avg_roe_value(self, row):
-        avg = row.get("avg_roe")
-        if avg is None:
+    def _float_col(self, row, key):
+        val = row.get(key)
+        if val is None:
             return None
         try:
-            return float(avg)
+            return float(val)
         except (TypeError, ValueError):
             return None
+
+    def _avg_roe_value(self, row):
+        return self._float_col(row, "avg_roe")
 
     def _roe_value(self, row):
-        roe = row.get("roe")
-        if roe is None:
-            return None
-        try:
-            return float(roe)
-        except (TypeError, ValueError):
-            return None
+        return self._float_col(row, "roe")
 
     def _bvps_value(self, row):
-        bv = row.get("book_value_per_share")
-        if bv is None:
-            return None
-        try:
-            return float(bv)
-        except (TypeError, ValueError):
-            return None
+        return self._float_col(row, "book_value_per_share")
 
     def next(self):
         self._bar += 1

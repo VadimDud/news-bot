@@ -122,21 +122,21 @@ def fetch_moex_iss_securities(board: str = "TQBR") -> list[dict]:
     out = []
     for sec in securities.values():
         md = marketdata.get(sec.get("SECID", ""), {})
-        price = _num(md.get("LAST")) or _num(md.get("CLOSEPRICE")) or _num(sec.get("PREVPRICE"))
+        price = storage.to_float(md.get("LAST")) or storage.to_float(md.get("CLOSEPRICE")) or storage.to_float(sec.get("PREVPRICE"))
         out.append(
             {
                 "ticker": sec.get("SECID"),
                 "name": sec.get("SECNAME"),
                 "shortname": sec.get("SHORTNAME"),
                 "price": price,
-                "prevprice": _num(sec.get("PREVPRICE")),
-                "market_cap": _num(md.get("ISSUECAPITALIZATION")),
-                "value_today": _num(md.get("VALTODAY")),
-                "num_trades": _num(md.get("NUMTRADES")),
+                "prevprice": storage.to_float(sec.get("PREVPRICE")),
+                "market_cap": storage.to_float(md.get("ISSUECAPITALIZATION")),
+                "value_today": storage.to_float(md.get("VALTODAY")),
+                "num_trades": storage.to_float(md.get("NUMTRADES")),
                 "sectype": sec.get("SECTYPE"),
                 "listlevel": sec.get("LISTLEVEL"),
                 "status": sec.get("STATUS"),
-                "issuesize": _num(sec.get("ISSUESIZE")),
+                "issuesize": storage.to_float(sec.get("ISSUESIZE")),
             }
         )
     return out
@@ -155,15 +155,6 @@ def _block_rows(block: dict) -> dict[str, dict]:
         if key:
             result[key] = row
     return result
-
-
-def _num(value) -> float | None:
-    try:
-        if value is None or value == "":
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def scan_high_cap(
@@ -201,113 +192,6 @@ def get_current_price_iss(ticker: str) -> float | None:
     return None
 
 
-# ── Дивиденды SmartLab ──────────────────────────────────────────────────────
-
-SMARTLAB_DIVIDEND_URL = "https://smart-lab.ru/q/{ticker}/dividend/"
-
-# Скрипт/URL SmartLab отдаёт таблицу «Выплаченные дивиденды»: Тикер, дата T-1,
-# дата отсечки, Период, дивиденд, Цена акции, Див. доходность. Достаточно
-# полей Тикер/дата отсечки/Период/дивиденд.
-_SL_DIV_CELLS = {"SBERP": "SBER", "GAZPRAP": "GAZP"}  # префы дублируют ао — игнорируем
-
-
-def _fetch_smartlab_dividends(ticker: str) -> list[dict]:
-    """Скрейп истории дивидендных выплат тикера со smart-lab.ru/q/{t}/dividend/.
-
-    Возвращает [{date (отсечки), dividend (₽/акцию), period}] или пустой список.
-    """
-    import re
-
-    url = SMARTLAB_DIVIDEND_URL.format(ticker=ticker)
-    resp = requests.get(url, timeout=ISS_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
-    if resp.status_code != 200:
-        logger.warning("SmartLab дивиденды %s: HTTP %s", ticker, resp.status_code)
-        return []
-
-    text = resp.text
-    # секция «Выплаченные дивиденды …»: строки <tr><td>SBER</td><td>T-1</td>
-    # <td>отсечка</td><td>Период</td><td>дивиденд₽</td>...
-    out: list[dict] = []
-    in_paid = False
-    seen = set()
-    for tr in re.findall(r"<tr\b[^>]*>(.*?)</tr>", text, re.S):
-        cells = [
-            re.sub(r"<[^>]*>", "", c).replace("&nbsp;", " ").replace("\xa0", " ").replace("₽", "").strip()
-            for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)
-        ]
-        if not cells:
-            continue
-        if cells[0] and "Выплаченные дивиденды" in " ".join(cells):
-            in_paid = True
-            continue
-        if not in_paid:
-            continue
-        # stop after this block: next header row after paid table ends
-        if cells[0] in ("Тикер",) or (cells[0] and cells[0] == cells[0].title() and len(cells) == 1):
-            if cells[0] == "Тикер":
-                continue
-            in_paid = False
-            break
-        if len(cells) < 5 or not cells[0]:
-            break
-        sl_ticker = cells[0]
-        sl_ticker = _SL_DIV_CELLS.get(sl_ticker, sl_ticker)
-        if sl_ticker != ticker:
-            continue
-        buy_before = _parse_sl_russian_date(cells[1])  # дата T-1 — последний день покупки
-        cutoff = _parse_sl_russian_date(cells[2])      # дата отсечки (реестр)
-        div = _parse_rub(cells[4])
-        if buy_before is None or cutoff is None or div is None:
-            continue
-        key = (cutoff.isoformat(), div, cells[3])
-        if key in seen:  # префы SBERP/GAZPRAP дублируют ао — берём одну
-            continue
-        seen.add(key)
-        out.append(
-            {
-                "date": cutoff.isoformat(),
-                "buy_before": buy_before.isoformat(),
-                "dividend": div,
-                "period": key[2],
-            }
-        )
-    return out
-
-
-def _parse_sl_russian_date(value: str) -> date | None:
-    """Парсит даты SmartLab вида DD.MM.YYYY."""
-    from datetime import datetime
-
-    value = (value or "").strip()
-    try:
-        return datetime.strptime(value, "%d.%m.%Y").date()
-    except ValueError:
-        return None
-
-
-def _parse_rub(value: str) -> float | None:
-    """Парсит сумму вида '37,64' или '37,64 ₽' (запятая как разделитель)."""
-    value = (value or "").replace("%", "").strip()
-    try:
-        return float(value.replace(",", "."))
-    except ValueError:
-        return None
-
-
-def load_dividends_smartlab(ticker: str) -> tuple[int, list[dict]]:
-    """Загрузить дивиденды со SmartLab в базу (upsert), вернуть (count, rows)."""
-    rows = _fetch_smartlab_dividends(ticker)
-    if rows:
-        import pandas as pd
-
-        df = pd.DataFrame(rows)[["date", "buy_before", "dividend", "period"]].rename(
-            columns={"date": "cutoff_date", "dividend": "dividend_per_share"}
-        )
-
-        storage.save_dividends(ticker, df)
-    return len(rows), rows
-
-
 # ── Расчёт показателей по загруженной отчётности ───────────────────────────
 
 def _annual_roe_rows(ticker: str) -> list[tuple[str, float | None]]:
@@ -321,17 +205,8 @@ def _annual_roe_rows(ticker: str) -> list[tuple[str, float | None]]:
     for year, group in df.groupby("year"):
         latest = group.sort_values("date").iloc[-1]
         roe = latest.get("roe")
-        out.append((year, _float_or_none(roe)))
+        out.append((year, storage.to_float(roe)))
     return out
-
-
-def _float_or_none(value) -> float | None:
-    try:
-        if value is None or (isinstance(value, float) and value != value):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def get_avg_roe(ticker: str, years: int = 10) -> float | None:
@@ -364,42 +239,6 @@ def get_latest_fundamentals(ticker: str) -> dict | None:
     return df.iloc[-1].to_dict()
 
 
-def get_pb_ratio(ticker: str) -> float | None:
-    """P/B = текущая цена (ISS) / последняя book_value_per_share."""
-    latest = get_latest_fundamentals(ticker)
-    if latest is None or not latest.get("book_value_per_share"):
-        return None
-    bvps = float(latest["book_value_per_share"])
-    price = get_current_price_iss(ticker)
-    if not price or bvps <= 0:
-        return None
-    return round(price / bvps, 3)
-
-
-def get_fundamentals_timeseries(ticker: str, start: date, end: date) -> pd.DataFrame:
-    """Временной ряд ROE/BV на каждый календарный день в [start, end].
-
-    Квартальные данные расширяются вперёд (forward-fill): до следующей строки
-    отчётности действует последнее известное значение. Используются все строки
-    отчётности (включая более ранние, чем start), чтобы начало интервала было
-    заполнено корректно.
-    """
-    df = storage.load_fundamentals(ticker)
-    if df.empty:
-        return df
-    df = df[df["date"] <= end.isoformat()]
-    ds = pd.date_range(start=start, end=end, freq="D")
-    out = pd.DataFrame(index=ds)
-    out["roe"] = pd.NA
-    out["book_value_per_share"] = pd.NA
-    for _, row in df.iterrows():
-        out.loc[row["date"]:, "roe"] = row["roe"]
-        out.loc[row["date"]:, "book_value_per_share"] = row["book_value_per_share"]
-    if not df.empty:
-        out.loc[ds[0], ["roe", "book_value_per_share"]] = df.iloc[0][["roe", "book_value_per_share"]].to_dict()
-    return out.ffill().reset_index().rename(columns={"index": "date"})
-
-
 def prepare_fundamentals_series(ticker: str, start: date, end: date, years: int = 10) -> pd.DataFrame:
     """Ежедневный ряд для бэктеста: roe, book_value_per_share, avg_roe, min_roe.
 
@@ -415,7 +254,7 @@ def prepare_fundamentals_series(ticker: str, start: date, end: date, years: int 
     yearly: dict[str, float | None] = {}
     for year, group in df.groupby(df["date"].str[:4]):
         latest = group.sort_values("date").iloc[-1]["roe"]
-        yearly[year] = _float_or_none(latest)
+        yearly[year] = storage.to_float(latest)
 
     ds = pd.date_range(start=start, end=end, freq="D")
     out = pd.DataFrame(index=ds)

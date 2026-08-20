@@ -169,21 +169,6 @@ def list_runs(limit: int = 50) -> list[dict]:
     return items
 
 
-def get_live_value(key: str) -> str | None:
-    with _connect() as conn:
-        row = conn.execute("SELECT value FROM live_state WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else None
-
-
-def set_live_value(key: str, value: str) -> None:
-    with _connect() as conn:
-        conn.execute(
-            "INSERT INTO live_state (key, value) VALUES (?, ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-
-
 def get_setting(key: str) -> str | None:
     with _connect() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -331,13 +316,13 @@ def save_fundamentals(ticker: str, df) -> int:
             (
                 ticker,
                 date_val,
-                _maybe_float(r.get("roe")),
-                _maybe_float(r.get("roa")),
-                _maybe_float(r.get("book_value_per_share")),
-                _maybe_float(r.get("eps")),
-                _maybe_float(r.get("equity")),
-                _maybe_float(r.get("net_profit")),
-                _maybe_float(r.get("revenue")),
+                to_float(r.get("roe")),
+                to_float(r.get("roa")),
+                to_float(r.get("book_value_per_share")),
+                to_float(r.get("eps")),
+                to_float(r.get("equity")),
+                to_float(r.get("net_profit")),
+                to_float(r.get("revenue")),
             )
         )
     if not rows:
@@ -409,54 +394,18 @@ def delete_fundamentals(ticker: str) -> int:
     return cur.rowcount
 
 
-def _maybe_float(value) -> float | None:
+def to_float(value) -> float | None:
+    """Строгое приведение к float: None/""/NaN и нечисла дают None."""
+    if value is None or value == "":
+        return None
     try:
-        if value is None or value != value:  # None или NaN
-            return None
-        return float(value)
+        f = float(value)
     except (TypeError, ValueError):
         return None
+    return None if f != f else f  # NaN
 
 
 # ── Дивиденды ───────────────────────────────────────────────────────────────
-
-def save_dividends(ticker: str, df) -> int:
-    """Upsert дивидендных выплат в таблицу ``dividends``.
-
-    ``df`` — DataFrame с колонками ``cutoff_date`` (YYYY-MM-DD), ``dividend_per_share``
-    и опциональными ``buy_before``, ``period``. Возвращает количество записанных строк.
-    """
-    import pandas as pd
-
-    rows = []
-    for _, r in df.iterrows():
-        cd = r["cutoff_date"]
-        if isinstance(cd, pd.Timestamp):
-            cd = cd.strftime("%Y-%m-%d")
-        else:
-            cd = str(cd)
-        bb = r.get("buy_before")
-        if bb is not None:
-            bb = bb.strftime("%Y-%m-%d") if isinstance(bb, pd.Timestamp) else str(bb)
-        rows.append(
-            (
-                ticker,
-                cd,
-                bb,
-                str(r.get("period")) if r.get("period") is not None else None,
-                _maybe_float(r.get("dividend_per_share")),
-            )
-        )
-    if not rows:
-        return 0
-    with _connect() as conn:
-        conn.executemany(
-            "INSERT OR REPLACE INTO dividends (ticker, cutoff_date, buy_before, period, dividend_per_share)"
-            " VALUES (?, ?, ?, ?, ?)",
-            rows,
-        )
-    return len(rows)
-
 
 def load_dividends(ticker: str, start: date | None = None, end: date | None = None):
     """Дивиденды тикера в [start, end), отсортированные по cutoff_date.
@@ -481,17 +430,3 @@ def load_dividends(ticker: str, start: date | None = None, end: date | None = No
         return pd.DataFrame(columns=["date", "buy_before", "period", "dividend"])
     df = pd.DataFrame([dict(r) for r in rows])
     return df.rename(columns={"cutoff_date": "date", "dividend_per_share": "dividend"})
-
-
-def list_tickers_with_dividends() -> list[str]:
-    """Тикеры, для которых в базе есть хотя бы одна выплата."""
-    with _connect() as conn:
-        rows = conn.execute("SELECT DISTINCT ticker FROM dividends ORDER BY ticker").fetchall()
-    return [r["ticker"] for r in rows]
-
-
-def delete_dividends(ticker: str) -> int:
-    """Удалить все выплаты по тикеру. Возвращает число удалённых строк."""
-    with _connect() as conn:
-        cur = conn.execute("DELETE FROM dividends WHERE ticker = ?", (ticker,))
-    return cur.rowcount

@@ -367,12 +367,22 @@ def roe_pb_signal(
     - выход: цена >= pb_exit * book_value_per_share ИЛИ годовой ROE < roe_exit.
     """
     ff = _forward_fill_fundamentals(prices, fundamentals)
-    avg_roe = _rolling_avg_roe_series(ff)
+
+    avg_roe_col = fundamentals["avg_roe"] if "avg_roe" in fundamentals.columns else None
+    if avg_roe_col is not None:
+        avg_roe = (
+            pd.to_numeric(avg_roe_col, errors="coerce")
+            .set_axis(pd.to_datetime(fundamentals["date"]), axis=0)
+            .reindex(prices.index)
+            .values
+        )
+    else:
+        avg_roe = _rolling_avg_roe_series(ff, fundamentals).values
 
     close = prices.values
     roe = ff["roe"].values
     bvps = ff["book_value_per_share"].values
-    avg_roe_arr = avg_roe.values
+    avg_roe_arr = avg_roe
 
     pos = np.zeros(len(prices), dtype=int)
     cur = 0
@@ -435,32 +445,39 @@ def _forward_fill_fundamentals(prices: pd.Series, fundamentals: pd.DataFrame) ->
     for _, row in fund.sort_values("date").iterrows():
         ff.loc[row["date"]:, "roe"] = row["roe"]
         ff.loc[row["date"]:, "book_value_per_share"] = row["book_value_per_share"]
-    if not fund.empty:
-        first = fund.iloc[0]
-        ff.loc[prices.index[0], ["roe", "book_value_per_share"]] = [
-            first["roe"], first["book_value_per_share"],
-        ]
     return ff.ffill()
 
 
-def _rolling_avg_roe_series(ff: pd.DataFrame, years: int = 10) -> pd.Series:
-    """Средний ROE за ``years`` календарных лет по последнему значению года."""
-    year_fill = ff.copy()
-    year_fill["year"] = year_fill.index.year
-    col = "roe"
+def _rolling_avg_roe_series(
+    ff: pd.DataFrame, fundamentals: pd.DataFrame | None = None, years: int = 10
+) -> pd.Series:
+    """Средний ROE за ``years`` отчётных лет, уже опубликованных к бару.
 
-    vals = {}
-    for year, group in year_fill.groupby("year"):
-        vals[year] = group[col].iloc[-1]
-    series = [np.nan] * len(year_fill)
-    prev = {}
-    for i, ts in enumerate(year_fill.index):
-        y = ts.year
-        prev[y] = vals[y]
-        window = [prev.get(y - k, np.nan) for k in range(years)]
-        valid = [v for v in window if not np.isnan(v)]
-        series[i] = np.mean(valid) if valid else np.nan
-    return pd.Series(series, index=year_fill.index)
+    Берём последнее значение ROE по каждому отчётному году из ``fundamentals``
+    (дата отчёта определяет год) и усредняем за последние ``years`` лет,
+    чей отчёт уже вышел (дата отчёта <= дата бара). Без ``fundamentals`` —
+    по последним значениям года из дневного ряда ``ff``. Это исключает
+    look-ahead: отчёт за 2024 не виден в начале 2024.
+    """
+    if fundamentals is not None and not fundamentals.empty:
+        fund = fundamentals.copy()
+        fund["date"] = pd.to_datetime(fund["date"])
+        fund = fund.sort_values("date")
+        annual = fund.groupby(fund["date"].dt.year)["roe"].last()
+    else:
+        annual = ff.groupby(ff.index.year)["roe"].last()
+
+    series = [np.nan] * len(ff)
+    for i, ts in enumerate(ff.index):
+        # года, чей отчётный год закончился к бару: date(y-12-31) <= ts
+        eligible_ts = ts - pd.Timedelta(days=1)
+        eligible_years = [y for y in annual.index if pd.Timestamp(f"{y}-12-31") <= eligible_ts][-years:]
+        if not eligible_years:
+            continue
+        valid = [float(annual.loc[y]) for y in eligible_years if not np.isnan(annual.loc[y])]
+        if valid:
+            series[i] = float(np.mean(valid))
+    return pd.Series(series, index=ff.index)
 
 
 def signal_from_position(pos: pd.Series) -> str:

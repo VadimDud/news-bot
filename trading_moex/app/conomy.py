@@ -283,6 +283,8 @@ def build_fundamentals(ticker: str, range_years: int = 10) -> pd.DataFrame:
 
     ROE = чистая прибыль года / собственный капитал на конец года * 100.
     book_value_per_share = собственный капитал / число акций.
+    Отчётность conomy.ru приведена в тысячах рублей — переводим в рубли
+    (умножаем на 1000), чтобы BVPS был сопоставим с цены акций в рублях.
     """
     income = fetch_statements(ticker, "income", range_years)
     balance = fetch_statements(ticker, "balance", range_years)
@@ -323,6 +325,10 @@ def build_fundamentals(ticker: str, range_years: int = 10) -> pd.DataFrame:
         equity = _clean_num(equity_series[k])
         if net_profit is None or equity is None or equity <= 0:
             continue
+        # Источник в тысячах рублей; BVPS/equity/net_profit храним в рублях.
+        net_profit_thousands = net_profit
+        equity = equity * 1000.0
+        net_profit = net_profit_thousands * 1000.0
         roe = net_profit / equity * 100.0
         bvps = equity / shares if shares else None
         if bvps is None or bvps <= 0:

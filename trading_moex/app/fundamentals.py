@@ -267,7 +267,11 @@ def prepare_fundamentals_series(ticker: str, start: date, end: date, years: int 
 
     avg, mn = [], []
     for ts in ds:
-        window = [yearly.get(str(y)) for y in range(ts.year - years + 1, ts.year + 1)]
+        # году y отчёт «доступен» только после его публикации (дата отчёта y-12-31);
+        # иначе наблюдаем «средний ROE текущего года» до его выпуска (look-ahead)
+        window_years = [y for y in range(ts.year - years + 1, ts.year + 1)
+                        if pd.Timestamp(f"{y}-12-31") <= ts]
+        window = [yearly.get(str(y)) for y in window_years]
         valid = [v for v in window if v is not None]
         avg.append(round(sum(valid) / len(valid), 2) if valid else None)
         mn.append(min(valid) if valid else None)

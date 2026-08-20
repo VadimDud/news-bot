@@ -207,3 +207,26 @@ def test_portfolio_partial_sell_at_pb_partial_then_rest_at_pb_exit():
     assert 0.15 * max_invested < min(mid) < 0.9 * max_invested
     # Полный выход в конце (P/B 1.6 ≥ 1.5) → позиция закрыта.
     assert invested[-1] == 0
+
+
+def test_avg_roe_no_lookahead_into_current_year():
+    """Прошлый баг: ``_rolling_avg_roe_series`` брал последнее значение ROE по
+    году *индекса цен*, поэтому на 2015-01-02 уже «видел» годовой отчёт за 2015.
+    Теперь отчёт года считается доступным только после его публикации (31-12):
+    на 2015-01-02 доступен лишь отчёт за 2014."""
+    fund = pd.DataFrame(
+        [
+            {"date": f"{year}-12-31", "roe": roe, "book_value_per_share": 100.0}
+            for year, roe in [(2014, 12.0), (2015, 13.0), (2016, 14.0), (2017, 15.0), (2018, 16.0)]
+        ]
+    )
+    dates = pd.date_range("2014-06-01", periods=365 * 5, freq="D")
+    prices = pd.Series(np.full(len(dates), 100.0), index=dates)
+    ff = signals._forward_fill_fundamentals(prices, fund)
+    avg = signals._rolling_avg_roe_series(ff, fund, years=5)
+    # на 2015-01-01 известен только отчёт за 2014 → среднее без look-ahead
+    assert avg.loc["2015-01-02"] == pytest.approx(12.0)
+    # на 2018-01-02 известны отчёты 2014..2017
+    assert avg.loc["2018-01-02"] == pytest.approx((12.0 + 13.0 + 14.0 + 15.0) / 4)
+    # а вот последнее значение — уже со всеми пятью годами
+    assert avg.dropna().iloc[-1] == pytest.approx(14.0)

@@ -21,6 +21,7 @@ from aiohttp import web
 from .. import config, data, fundamentals, settings, storage
 from ..backtest import run_backtest, run_portfolio_backtest
 from ..catalog import AVAILABLE_TICKERS
+from ..conomy import ConomyError, build_fundamentals
 from ..fundamentals_screener import screen_catalog, scan_moex_candidates
 from ..live import LIVE_STRATEGIES, live_trader
 from ..strategies import STRATEGIES, strategy_defaults
@@ -38,7 +39,6 @@ _PUBLIC_PATHS = {"/login", "/static"}
 # ── Фоновые задачи (прогресс в UI) ───────────────────────────────────────────
 
 _TTL_SECONDS = 15 * 60
-_DL_JOBS: dict[str, dict] = {}
 _BT_JOBS: dict[str, dict] = {}
 
 
@@ -46,10 +46,6 @@ def _prune_jobs(jobs: dict[str, dict]) -> None:
     now = time.monotonic()
     for jid in [j for j, job in jobs.items() if now - job["created"] > _TTL_SECONDS]:
         jobs.pop(jid, None)
-
-
-def _prune_dl_jobs() -> None:
-    _prune_jobs(_DL_JOBS)
 
 
 def _prune_bt_jobs() -> None:
@@ -364,6 +360,43 @@ async def fundamentals_delete(request: web.Request) -> web.Response:
     raise web.HTTPFound("/fundamentals")
 
 
+async def fundamentals_conomy(request: web.Request) -> web.Response:
+    """Авто-загрузка отчётности ROE/BVPS с conomy.ru по тикеру."""
+    form = await request.post()
+    ticker = (form.get("ticker") or "").strip().upper()
+    errors = []
+    if not ticker:
+        errors.append("Укажите тикер.")
+    else:
+        try:
+            df = build_fundamentals(ticker)
+            if df.empty:
+                errors.append("Conomy вернул пустую отчётность — ничего не сохранено.")
+            else:
+                n = storage.save_fundamentals(ticker, df)
+                if n == 0:
+                    errors.append("Из Conomy не удалось извлечь ни одного года отчётности.")
+                else:
+                    return web.HTTPFound("/fundamentals")
+        except ConomyError as exc:
+            errors.append(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Импорт Conomy %s не удался: %s", ticker, exc)
+            errors.append(f"Ошибка загрузки из Conomy: {exc}")
+
+    return aiohttp_jinja2.render_template(
+        "fundamentals.html",
+        request,
+        {
+            "rows": [],
+            "catalog": AVAILABLE_TICKERS,
+            "ticker_suggestions": _ticker_suggestions(),
+            "error": " ".join(errors),
+            "ticker": ticker,
+        },
+    )
+
+
 async def screener_page(request: web.Request) -> web.Response:
     """Скринер ROE + P/B: форма фильтров + таблица кандидатов.
 
@@ -464,138 +497,6 @@ async def strategy_defaults_api(request: web.Request) -> web.Response:
         return web.json_response({"error": "unknown strategy"}, status=400)
     defaults = strategy_defaults(strat, ticker or None)
     return web.json_response({"strategy": strat, "ticker": ticker, "params": defaults})
-
-
-async def data_download(request: web.Request) -> web.Response:
-    """Скачать свечи тикера с MOEX в CSV (общая база данных свечей с бэктестом)."""
-    form = await request.post()
-    ticker = form.get("ticker", "").strip().upper()
-    period = form.get("period", "1min")
-    start = _parse_date(form.get("start", ""), date.today() - timedelta(days=365))
-    end = _parse_date(form.get("end", ""), date.today())
-
-    errors = []
-    if not ticker:
-        errors.append("Укажите тикер (например SBER).")
-    if period not in data.PERIODS:
-        errors.append("Неизвестный таймфрейм.")
-    if start >= end:
-        errors.append("Дата начала должна быть раньше даты окончания.")
-    if errors:
-        return _error_page(request, " ".join(errors))
-
-    loop = asyncio.get_running_loop()
-    try:
-        df = await loop.run_in_executor(None, data.fetch_history, ticker, period, start, end, True)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Скачивание %s %s не удалось: %s", ticker, period, exc)
-        return _error_page(request, f"Ошибка загрузки данных: {exc}")
-
-    filename = f"{ticker}_{period}_{start.isoformat()}_{end.isoformat()}.csv"
-    return web.Response(
-        body=data.to_csv(df),
-        content_type="text/csv",
-        charset="utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-async def data_status(request: web.Request) -> web.Response:
-    """Статус базы данных свечей для тикера/таймфрейма."""
-    ticker = request.query.get("ticker", "").strip().upper()
-    period = request.query.get("period", "1day")
-    if not ticker or period not in data.PERIODS:
-        return web.json_response({"ticker": ticker, "period": period, "last": None, "count": 0})
-    return web.json_response(
-        {
-            "ticker": ticker,
-            "period": period,
-            "last": storage.last_candle_time(ticker, period),
-            "count": storage.candle_count(ticker, period),
-        }
-    )
-
-
-async def data_download_start(request: web.Request) -> web.Response:
-    """Запустить фоновое скачивание свечей; вернуть job_id для опроса прогресса."""
-    form = await request.post()
-    ticker = form.get("ticker", "").strip().upper()
-    period = form.get("period", "1min")
-    start = _parse_date(form.get("start", ""), date.today() - timedelta(days=365))
-    end = _parse_date(form.get("end", ""), date.today())
-
-    errors = []
-    if not ticker:
-        errors.append("Укажите тикер (например SBER).")
-    if period not in data.PERIODS:
-        errors.append("Неизвестный таймфрейм.")
-    if start >= end:
-        errors.append("Дата начала должна быть раньше даты окончания.")
-    if errors:
-        return web.json_response({"error": " ".join(errors)}, status=400)
-
-    _prune_dl_jobs()
-    job_id = secrets.token_hex(8)
-    _DL_JOBS[job_id] = {
-        "state": "running",
-        "percent": 0,
-        "error": None,
-        "csv": None,
-        "filename": None,
-        "created": time.monotonic(),
-    }
-    asyncio.get_running_loop().create_task(_run_download_job(job_id, ticker, period, start, end))
-    return web.json_response({"job_id": job_id})
-
-
-async def _run_download_job(job_id: str, ticker: str, period: str, start: date, end: date) -> None:
-    job = _DL_JOBS[job_id]
-    loop = asyncio.get_running_loop()
-
-    def set_progress(pct: int) -> None:
-        job["percent"] = pct
-
-    try:
-        df = await loop.run_in_executor(
-            None, data.fetch_history, ticker, period, start, end, True, set_progress
-        )
-        job["csv"] = data.to_csv(df)
-        job["filename"] = f"{ticker}_{period}_{start.isoformat()}_{end.isoformat()}.csv"
-        job["percent"] = 100
-        job["state"] = "done"
-    except Exception as exc:  # noqa: BLE001
-        job["state"] = "error"
-        job["error"] = str(exc)
-        logger.warning("Скачивание %s %s не удалось: %s", ticker, period, exc)
-
-
-async def data_download_status(request: web.Request) -> web.Response:
-    """Прогресс фонового скачивания."""
-    job = _DL_JOBS.get(request.query.get("job_id", ""))
-    if job is None:
-        return web.json_response({"state": "not_found"}, status=404)
-    return web.json_response({"state": job["state"], "percent": job["percent"], "error": job["error"]})
-
-
-async def data_download_result(request: web.Request) -> web.Response:
-    """Отдать готовый CSV (однократно) или ошибку/промежуточный статус."""
-    job_id = request.query.get("job_id", "")
-    job = _DL_JOBS.get(job_id)
-    if job is None:
-        return web.json_response({"error": "Задача не найдена"}, status=404)
-    if job["state"] == "running":
-        return web.json_response({"error": "Скачивание ещё выполняется"}, status=425)
-    if job["state"] == "error":
-        return _error_page(request, f"Ошибка загрузки данных: {job['error']}")
-    csv_data = job.pop("csv")
-    filename = job.pop("filename")
-    _DL_JOBS.pop(job_id, None)
-    return web.Response(
-        body=csv_data,
-        content_type="text/csv",
-        charset="utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
 
 
 async def backtest_run(request: web.Request) -> web.Response:
@@ -845,6 +746,7 @@ def create_app() -> web.Application:
     app.router.add_get("/fundamentals", fundamentals_page)
     app.router.add_post("/fundamentals/upload", fundamentals_upload)
     app.router.add_post("/fundamentals/delete", fundamentals_delete)
+    app.router.add_post("/fundamentals/conomy", fundamentals_conomy)
     app.router.add_get("/screener", screener_page)
     app.router.add_post("/screener", screener_page)
     app.router.add_post("/screener/save", screener_save)
@@ -856,11 +758,6 @@ def create_app() -> web.Application:
     app.router.add_get("/backtest/status", backtest_status)
     app.router.add_get("/backtest/result", backtest_result)
     app.router.add_get("/backtest/{run_id}", backtest_detail)
-    app.router.add_post("/data/download", data_download)
-    app.router.add_get("/data/status", data_status)
-    app.router.add_post("/data/download/start", data_download_start)
-    app.router.add_get("/data/download/status", data_download_status)
-    app.router.add_get("/data/download/result", data_download_result)
     app.router.add_get("/live", live_page)
     app.router.add_get("/live/data", live_data)
     app.router.add_post("/live/start", live_start)

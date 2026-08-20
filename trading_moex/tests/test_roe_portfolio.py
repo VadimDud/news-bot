@@ -117,6 +117,44 @@ def test_portfolio_backtest_accrues_dividends():
     assert result_with["final_value"] > result_without["final_value"]
 
 
+def test_cash_yield_not_multiplied_by_bars():
+    """Баг: на мелких таймфреймах денежный кэш-доход (cash_yield) начислялся
+    каждый бар, поэтому при 0 сделок возврат зависел от таймфрейма. Теперь
+    доход начисляется на календарный день — 1min и 5min дают одинаковый итог."""
+    start = pd.Timestamp("2021-01-04 10:00")
+    end = pd.Timestamp("2022-12-30 18:45")
+    fund_df = pd.DataFrame(
+        [{"date": f"{y}-12-31", "roe": 100.0, "book_value_per_share": 10000.0}
+         for y in range(2015, 2026)]
+    )
+    params = {
+        "min_avg_roe": 15.0, "min_single_roe": 12.0, "pb_entry": 0.8,
+        "pb_exit": 1.0, "roe_exit": 12.0, "max_positions": 10,
+        "rebalance_days": 5, "cash_yield": 8.0,
+    }
+
+    def mk(bars: int) -> pd.DataFrame:
+        idx = pd.date_range(start=start, end=end, periods=bars)
+        close = np.full(bars, 100.0)
+        df = pd.DataFrame(
+            {"open": close - 0.5, "high": close + 1, "low": close - 1,
+             "close": close, "volume": 1000},
+            index=idx,
+        )
+        df.index.name = "datetime"
+        return df
+
+    finals = {}
+    for name, bars in (("1min", 60000), ("5min", 12000)):
+        res = run_portfolio_backtest(
+            {"AA": mk(bars)}, ROEPortfolioStrategy, params,
+            {t: fund_df for t in ("AA",)}, cash=100000,
+        )
+        assert res["trades_total"] == 0
+        finals[name] = res["final_value"]
+    assert finals["1min"] == finals["5min"]
+
+
 def test_portfolio_partial_sell_at_pb_partial_then_rest_at_pb_exit():
     """При цене >= pb_exit_partial*BVPS продаётся ровно доля partial_frac,
     а полный выход происходит только при цене >= pb_exit*BVPS."""

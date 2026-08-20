@@ -358,20 +358,28 @@ class LiveTrader:
             entry: dict = {"action": "hold", "stop": None, "target": None}
             df = await self._candles_df(client, figi)
             if not df.empty and len(df) >= 2:
-                position = func(df, **_signal_kwargs(func, self.strategy_params))
-                if trend_period:
-                    position = sig.apply_trend_filter(position, df["close"], trend_period)
-                entry["action"] = sig.signal_from_position(position)
-                if bool(position.iloc[-1]):
-                    # позиция удерживается — считаем уровни SL/TP, чтобы
-                    # отслеживать их на каждом цикле (а не только на входе)
-                    last = df.iloc[-1]
-                    atr_val = float(risk_module.atr(df, atr_period).iloc[-1])
-                    if atr_val != atr_val or atr_val <= 0:  # NaN / вырожденные данные
-                        atr_val = 0.0
-                    stop_dist = max(atr_val * atr_mult, float(last["close"]) * 0.005)
-                    entry["stop"] = round(float(last["close"]) - stop_dist, 4)
-                    entry["target"] = round(float(last["close"]) + stop_dist * rr_ratio, 4)
+                kwargs = _signal_kwargs(func, self.strategy_params)
+                if self.strategy == "roe_portfolio":
+                    from . import storage
+
+                    kwargs["fundamentals"] = storage.load_fundamentals(ticker)
+                position = func(df, **kwargs)
+                if position.empty:
+                    entry["action"] = "hold"
+                else:
+                    if trend_period:
+                        position = sig.apply_trend_filter(position, df["close"], trend_period)
+                    entry["action"] = sig.signal_from_position(position)
+                    if bool(position.iloc[-1]):
+                        # позиция удерживается — считаем уровни SL/TP, чтобы
+                        # отслеживать их на каждом цикле (а не только на входе)
+                        last = df.iloc[-1]
+                        atr_val = float(risk_module.atr(df, atr_period).iloc[-1])
+                        if atr_val != atr_val or atr_val <= 0:  # NaN / вырожденные данные
+                            atr_val = 0.0
+                        stop_dist = max(atr_val * atr_mult, float(last["close"]) * 0.005)
+                        entry["stop"] = round(float(last["close"]) - stop_dist, 4)
+                        entry["target"] = round(float(last["close"]) + stop_dist * rr_ratio, 4)
             out[ticker] = entry
         return out
 

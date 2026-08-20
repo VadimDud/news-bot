@@ -35,6 +35,24 @@
 </div>
 
 <div class="card">
+  <h2>Авто-загрузка из Conomy</h2>
+  <p class="hint">
+    Скачать историю ROE и Book Value (10 лет) с conomy.ru для любого тикера Мосбиржи
+    вместо ручного CSV. Парсинг отчётности со стороннего сайта может сломаться —
+    тогда просто импортируйте CSV вручную.
+  </p>
+  <form method="post" action="/fundamentals/conomy">
+    <div class="grid">
+      <div>
+        <label for="conomy_ticker">Тикер</label>
+        <input type="text" id="conomy_ticker" name="ticker" value="{{ ticker or '' }}" list="ticker-suggestions" required>
+      </div>
+    </div>
+    <button type="submit">Скачать из Conomy</button>
+  </form>
+</div>
+
+<div class="card">
   <h2>Загруженная отчётность</h2>
   {% if rows %}
   <table>

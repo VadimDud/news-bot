@@ -342,15 +342,6 @@ def engulfing_position(df: pd.DataFrame) -> pd.Series:
     return pd.Series(pos, index=df.index)
 
 
-SIGNAL_FUNCS = {
-    "sma_cross": sma_cross_position,
-    "rsi": rsi_position,
-    "donchian": donchian_position,
-    "pinbar": pinbar_position,
-    "engulfing": engulfing_position,
-}
-
-
 # ── Фундаментальный сигнал ROE + P/B ────────────────────────────────────────
 
 def roe_pb_signal(
@@ -385,21 +376,53 @@ def roe_pb_signal(
 
     pos = np.zeros(len(prices), dtype=int)
     cur = 0
+    last_check = None
     for i in range(len(prices)):
-        if i % rebalance_days != 0:
-            pos[i] = cur
-            continue
-        if np.isnan(roe[i]) or np.isnan(bvps[i]) or np.isnan(avg_roe_arr[i]) or bvps[i] <= 0:
-            pos[i] = cur
-            continue
-        if cur == 0:
-            if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
-                cur = 1
-        else:
-            if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
-                cur = 0
+        cur_date = prices.index[i].date()
+        if last_check is None or (cur_date - last_check).total_seconds() // 86400 >= rebalance_days:
+            last_check = cur_date
+            if np.isnan(roe[i]) or np.isnan(bvps[i]) or np.isnan(avg_roe_arr[i]) or bvps[i] <= 0:
+                pos[i] = cur
+                continue
+            if cur == 0:
+                if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
+                    cur = 1
+            else:
+                if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
+                    cur = 0
         pos[i] = cur
     return pd.Series(pos, index=prices.index)
+
+
+def roe_pb_position(
+    df: pd.DataFrame,
+    fundamentals: pd.DataFrame | None = None,
+    min_avg_roe: float = 15.0,
+    min_single_roe: float = 12.0,
+    pb_entry: float = 0.8,
+    pb_exit: float = 1.5,
+    roe_exit: float = 12.0,
+    rebalance_days: int = 5,
+) -> pd.Series:
+    """Позиция (1=long, 0=flat) по «высокий ROE + цена дешевле капитала».
+
+    Live-обёртка над ``roe_pb_signal``: принимает OHLCV-DataFrame ``df``
+    (как остальные live-сигналы), а отчётность — параметром ``fundamentals``
+    (колонки ``date``, ``roe``, ``book_value_per_share``). Если отчётности
+    нет — позиция всегда 0 (не торгуем без данных), не падаем.
+    """
+    if fundamentals is None or fundamentals.empty:
+        return pd.Series(np.zeros(len(df), dtype=int), index=df.index)
+    return roe_pb_signal(
+        df["close"],
+        fundamentals,
+        min_avg_roe=min_avg_roe,
+        min_single_roe=min_single_roe,
+        pb_entry=pb_entry,
+        pb_exit=pb_exit,
+        roe_exit=roe_exit,
+        rebalance_days=rebalance_days,
+    )
 
 
 def _forward_fill_fundamentals(prices: pd.Series, fundamentals: pd.DataFrame) -> pd.DataFrame:
@@ -449,3 +472,13 @@ def signal_from_position(pos: pd.Series) -> str:
     if pos.iloc[-1] == 0 and pos.iloc[-2] == 1:
         return "sell"
     return "hold"
+
+
+SIGNAL_FUNCS = {
+    "sma_cross": sma_cross_position,
+    "rsi": rsi_position,
+    "donchian": donchian_position,
+    "pinbar": pinbar_position,
+    "engulfing": engulfing_position,
+    "roe_portfolio": roe_pb_position,
+}

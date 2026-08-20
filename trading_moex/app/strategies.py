@@ -944,6 +944,9 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
             if div_df is not None:
                 self._dividends[ticker] = self._index_dividends(div_df)
         self._bar = 0
+        self._last_bar_date = None
+        self._first_bar = True
+        self._days_since_rebalance = 0
         self._ff_cache: dict[str, dict] = {}
         self._div_paid: set[tuple[str, object]] = set()
         self._entry_dates: dict[str, object] = {}
@@ -1031,15 +1034,26 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         return self._float_col(row, "book_value_per_share")
 
     def next(self):
+        dt = self.data.datetime.datetime(0)
         self._bar += 1
+        cur_date = dt.date()
+        # Прошедшие календарные дни с прошлого бара (для intraday обычно 0,
+        # для дневных баров — 1; в выходные/праздники на месячных фидах — больше).
+        elapsed = 0 if self._last_bar_date is None else (cur_date - self._last_bar_date).days
+        self._last_bar_date = cur_date
+        if self._first_bar:
+            self._first_bar = False
+            self._days_since_rebalance = int(self.p.rebalance_days)
         # Денежная подушка в фонде денежного рынка (TMON): свободный кэш приносит
-        # доход по ставке cash_yield (% годовых), начисляется ежедневно, пока
-        # деньги не задействованы в акциях. При покупке бумаг кэш уходит в акции
-        # (эквивалент продажи доли фонда), при продаже — возвращается в фонд.
-        cash = self.broker.getcash()
-        if cash > 0 and float(getattr(self.p, "cash_yield", 0.0) or 0.0) > 0:
-            daily = (float(self.p.cash_yield) / 100.0) / 365.0
-            self.broker.add_cash(cash * daily)
+        # доход по ставке cash_yield (% годовых), начисляется каждый календарный
+        # день (не каждЫй бар — иначе на нижних таймфреймах доходность
+        # раздувалась бы числом баров в сутках). При покупке бумаг кэш уходит
+        # в акции (эквивалент продажи доли фонда), при продаже — возвращается.
+        if elapsed > 0:
+            cash = self.broker.getcash()
+            if cash > 0 and float(getattr(self.p, "cash_yield", 0.0) or 0.0) > 0:
+                daily = (float(self.p.cash_yield) / 100.0) / 365.0
+                self.broker.add_cash(cash * daily * elapsed)
         # Дивиденды: начисляются на дату отсечки за открытую позицию (каждый бар,
         # не только в дни ребаланса).
         if self.p.dividends:
@@ -1050,13 +1064,16 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     continue
                 if len(d) < len(self.data):
                     continue  # фид не догнал текущую дату портфеля
-                amount = self._payout(ticker, d.datetime.datetime(0), pos.size)
+                amount = self._payout(ticker, dt, pos.size)
                 if amount:
                     self.broker.add_cash(amount)
                     self._dividends_income = getattr(self, "_dividends_income", 0.0) + amount
-        if self._bar % int(self.p.rebalance_days) != 0:
+        # Ребаланс по календарным дням (не по числу баров): входам/выходам
+        # достаточно одного раза в rebalance_days дней независимо от таймфрейма.
+        self._days_since_rebalance += elapsed
+        if self._days_since_rebalance < int(self.p.rebalance_days):
             return
-        dt = self.data.datetime.datetime(0)
+        self._days_since_rebalance = 0
 
         # 1) Закрытие позиций:
         #    - ROE упал ниже порога или цена >= pb_exit*BVPS → закрываем всю позицию
@@ -1237,7 +1254,7 @@ STRATEGIES = {
             {"key": "partial_frac", "label": "Частичная продажа: доля позиции", "type": "float", "default": 0.5},
             {"key": "roe_exit", "label": "Выход: годовой ROE ниже, %", "type": "float", "default": 12.0},
             {"key": "max_positions", "label": "Макс. позиций (≈ 100%/N депозита на сделку)", "type": "int", "default": 4},
-            {"key": "rebalance_days", "label": "Ребаланс, бар", "type": "int", "default": 2},
+            {"key": "rebalance_days", "label": "Ребаланс, дней", "type": "int", "default": 2},
             {"key": "cash_yield", "label": "Денежный фонд (TMON): доходность, % годовых", "type": "float", "default": 8.0},
         ],
     },

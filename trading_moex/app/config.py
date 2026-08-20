@@ -21,6 +21,9 @@ MOEX_PASSWORD = os.environ.get("MOEX_PASSWORD", "")
 
 # T-Bank Invest API (live-торговля)
 TINKOFF_API_TOKEN = os.environ.get("TINKOFF_API_TOKEN", "")
+# Отключить проверку SSL-сертификатов при подключении к T-Bank API
+# (актуально при DPI провайдера / корпоративном прокси с самоподписанным сертификатом)
+TINKOFF_SSL_NO_VERIFY = os.environ.get("TINKOFF_SSL_NO_VERIFY", "false").lower() == "true"
 
 # Live-режим
 DRY_RUN = os.environ.get("TRADER_DRY_RUN", "true").lower() == "true"

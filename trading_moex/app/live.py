@@ -33,6 +33,37 @@ TICKER_LIVE_INTERVALS = {
 
 _LIVE_BARS = 200
 
+# Максимальный период запроса свечей по интервалу (лимит T-Bank Invest API,
+# превышение даёт ошибку 30014). Дольше — API отклонит запрос.
+_MAX_LOOKBACK = {
+    "1_MIN": timedelta(days=1),
+    "2_MIN": timedelta(days=1),
+    "3_MIN": timedelta(days=7),
+    "5_MIN": timedelta(days=7),
+    "10_MIN": timedelta(days=14),
+    "15_MIN": timedelta(days=31),
+    "30_MIN": timedelta(days=90),
+    "HOUR": timedelta(days=31),
+    "DAY": timedelta(days=365),
+    "WEEK": timedelta(days=730),
+    "MONTH": timedelta(days=3650),
+}
+
+# Длительность одного бара в секундах (для расчёта периода под нужное число баров)
+_INTERVAL_SECONDS = {
+    "1_MIN": 60,
+    "2_MIN": 120,
+    "3_MIN": 180,
+    "5_MIN": 300,
+    "10_MIN": 600,
+    "15_MIN": 900,
+    "30_MIN": 1800,
+    "HOUR": 3600,
+    "DAY": 86400,
+    "WEEK": 7 * 86400,
+    "MONTH": 30 * 86400,
+}
+
 
 def _watchlist() -> list[str]:
     """Тикеры для live: приоритет у watchlist из БД, иначе из .env."""
@@ -60,7 +91,15 @@ def _money_to_float(value) -> float:
     return value.units + value.nano / 1_000_000_000
 
 
-def _candles_to_df(candles) -> pd.DataFrame:
+def _candles_from(candle_name: str, now: datetime) -> datetime:
+    """Начало периода для запроса свечей: min(нужно баров, лимит API)."""
+    span = _INTERVAL_SECONDS.get(candle_name, 3600) * _LIVE_BARS
+    needed = timedelta(seconds=span)
+    lookback = _MAX_LOOKBACK.get(candle_name, timedelta(days=31))
+    return now - min(needed, lookback)
+
+
+def _candles_to_df(candles):
     rows = []
     for c in candles:
         rows.append(
@@ -197,17 +236,32 @@ class LiveTrader:
             self.status["last_error"] = None
 
     async def _resolve_figis(self, client) -> dict[str, str]:
+        """FIGI по тикеру. Предпочитаем основную площадку MOEX.
+
+        ``find_instrument`` возвращает много дублей с разными class_code
+        (SPEQ, 37M, BEB, RDL и т.п.) — свечи есть только у TQBR/SMAL
+        (реальные площадки), остальные дают пустой список. Берём первый
+        инструмент с самым приоритетным классом.
+        """
+        priority = {"TQBR": 0, "SMAL": 1}
         figis: dict[str, str] = {}
         for ticker in self.tickers:
             try:
                 resp = await client.instruments.find_instrument(query=ticker)
-                for item in resp.instruments:
-                    if item.ticker.upper() == ticker.upper() and item.figi:
-                        figis[ticker] = item.figi
-                        break
-                else:
-                    if resp.instruments:
-                        figis[ticker] = resp.instruments[0].figi
+                matches = [
+                    item for item in resp.instruments
+                    if item.ticker.upper() == ticker.upper() and item.figi
+                ]
+                matches.sort(
+                    key=lambda item: (
+                        priority.get(getattr(item, "class_code", ""), 9),
+                        item.instrument_type != "share",
+                    )
+                )
+                if matches:
+                    figis[ticker] = matches[0].figi
+                elif resp.instruments:
+                    figis[ticker] = resp.instruments[0].figi
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Не удалось найти FIGI для %s: %s", ticker, exc)
         return figis
@@ -263,7 +317,7 @@ class LiveTrader:
 
         candle_name = TICKER_LIVE_INTERVALS.get(interval, "HOUR")
         candle_interval = getattr(CandleInterval, f"CANDLE_INTERVAL_{candle_name}")
-        from_ = now - timedelta(days=_LIVE_BARS)
+        from_ = _candles_from(candle_name, now)
         try:
             resp = await client.market_data.get_candles(
                 instrument_id=figi, from_=from_, to=now, interval=candle_interval

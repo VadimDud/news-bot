@@ -30,7 +30,7 @@
     </div>
     <div class="grid">
       <div>
-        <label><input type="checkbox" name="scan" value="1" {% if scan %}checked{% endif %}>
+        <label><input type="checkbox" name="scan" value="1" {% if scan or not candidates %}checked{% endif %}>
           Авто-скан: только высококапитализационные (MOEX ISS)</label>
         <input type="number" id="min_market_cap" name="min_market_cap" value="{{ '%.0f' % min_market_cap }}" step="1000000000">
         <div class="hint">Мин. капитализация, ₽ (по умолчанию 10 млрд)</div>
@@ -42,11 +42,16 @@
     </div>
     <button type="submit">Отобрать</button>
   </form>
+  <div class="hint" style="margin-top:8px;">
+    Авто-режим: включён по умолчанию, отбор идёт по высококапитализационным бумагам;
+    последний результат сохраняется и показывается при повторном заходе.
+  </div>
 </div>
 
 {% if candidates %}
 <div class="card">
   <h2>Результаты</h2>
+  <div id="save-msg" style="margin:6px 0;"></div>
   <table>
     <thead>
       <tr>
@@ -80,6 +85,9 @@
       {% endfor %}
     </tbody>
   </table>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
+    <button class="secondary" type="button" id="save-wl-btn">Сохранить отмеченные в watchlist (для live)</button>
+  </div>
 </div>
 
 <div class="card">
@@ -126,6 +134,16 @@ const qsBtn = document.getElementById("sq-btn");
 const qsProgress = document.getElementById("sq-progress");
 const qsBar = document.getElementById("sq-progress-bar");
 const qsText = document.getElementById("sq-progress-text");
+
+const savedMsg = document.getElementById("save-msg");
+document.getElementById("save-wl-btn").addEventListener("click", async () => {
+  const picked = Array.from(document.querySelectorAll(".pick:checked")).map(c => c.value);
+  if (!picked.length) { savedMsg.innerHTML = "<span class='chip warn'>Ничего не отмечено</span>"; return; }
+  const fd = new FormData();
+  fd.append("tickers", picked.join(","));
+  const resp = await fetch("/screener/save", { method: "POST", body: fd });
+  savedMsg.innerHTML = await resp.text();
+});
 
 document.querySelectorAll(".pick").forEach(cb => {
   cb.addEventListener("change", () => {

@@ -204,6 +204,33 @@ def remove_watchlist(ticker: str) -> None:
         conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
 
 
+def set_watchlist(tickers: list[str]) -> None:
+    """Полностью заменить watchlist списком тикеров (для сохранения отбора)."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM watchlist")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.executemany(
+            "INSERT INTO watchlist (ticker, added_at) VALUES (?, ?)",
+            [(t, now) for t in dict.fromkeys(tickers)],
+        )
+
+
+def save_screener_result(candidates: list[dict]) -> None:
+    """Сохранить последний результат скринера (для показа в авто-режиме)."""
+    set_setting("screener_result", json.dumps(candidates, ensure_ascii=False, default=str))
+
+
+def load_screener_result() -> list[dict]:
+    raw = get_setting("screener_result")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
 # ── База данных свечей ───────────────────────────────────────────────────────
 
 def save_candles(ticker: str, period: str, df) -> int:

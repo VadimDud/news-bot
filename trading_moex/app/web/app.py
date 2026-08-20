@@ -365,7 +365,12 @@ async def fundamentals_delete(request: web.Request) -> web.Response:
 
 
 async def screener_page(request: web.Request) -> web.Response:
-    """Скринер ROE + P/B: форма фильтров + таблица кандидатов."""
+    """Скринер ROE + P/B: форма фильтров + таблица кандидатов.
+
+    Авто-режим: по умолчанию включён авто-скан высококапитализационных бумаг
+    (MOEX ISS); результат кэшируется в БД и показывается при повторных
+    заходах, пока не запущен новый отбор.
+    """
     form = await request.post() if request.method == "POST" else {}
 
     def fget(key: str, default: float) -> float:
@@ -384,18 +389,26 @@ async def screener_page(request: web.Request) -> web.Response:
     min_volume_rub = fget("min_volume_rub", fundamentals.DEFAULT_MIN_VOLUME_RUB)
 
     candidates: list[dict] = []
+    fresh = False
     if form.get("tickers"):
         selected = [t.strip().upper() for t in form["tickers"].replace(";", ",").replace("\n", ",").split(",") if t.strip()]
         candidates = screen_catalog(min_avg_roe, min_single_roe, pb_entry, years, selected)
+        storage.save_screener_result(candidates)
+        fresh = True
     elif request.method == "POST":
         try:
             if scan:
                 candidates = scan_moex_candidates(min_avg_roe, min_single_roe, pb_entry, years, min_market_cap, min_volume_rub)
             else:
                 candidates = screen_catalog(min_avg_roe, min_single_roe, pb_entry, years)
+            storage.save_screener_result(candidates)
+            fresh = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Скрининг не удался: %s", exc)
             candidates = [{"ticker": "—", "error": f"Ошибка сканирования: {exc}"}]
+    else:
+        # GET без POST — показываем последний результат отбора (если был)
+        candidates = storage.load_screener_result()
 
     return aiohttp_jinja2.render_template(
         "screener.html",
@@ -411,7 +424,21 @@ async def screener_page(request: web.Request) -> web.Response:
             "min_volume_rub": min_volume_rub,
             "candidate_tickers": ",".join(c["ticker"] for c in candidates if c.get("candidate")),
             "periods": data.PERIODS,
+            "saved_to_watchlist": bool(form.get("to_watchlist")),
         },
+    )
+
+
+async def screener_save(request: web.Request) -> web.Response:
+    """Сохранить отобранные тикеры в watchlist (используется live-циклом)."""
+    form = await request.post()
+    raw = form.get("tickers", "")
+    tickers = [t.strip().upper() for t in raw.replace(";", ",").replace("\n", ",").split(",") if t.strip()]
+    if tickers:
+        storage.set_watchlist(tickers)
+    return web.Response(
+        text=f"<span class='chip ok'>Сохранено в watchlist: {', '.join(tickers) or '—'}</span>",
+        content_type="text/html",
     )
 
 
@@ -820,6 +847,7 @@ def create_app() -> web.Application:
     app.router.add_post("/fundamentals/delete", fundamentals_delete)
     app.router.add_get("/screener", screener_page)
     app.router.add_post("/screener", screener_page)
+    app.router.add_post("/screener/save", screener_save)
     app.router.add_get("/settings", settings_page)
     app.router.add_post("/settings", settings_save)
     app.router.add_get("/", index)

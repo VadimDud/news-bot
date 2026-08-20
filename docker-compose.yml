@@ -14,7 +14,7 @@ services:
       TRADER_QUANTITY: "${TRADER_QUANTITY:-1}"
       TRADER_LIVE_INTERVAL: "${TRADER_LIVE_INTERVAL:-hour}"
       TINKOFF_API_TOKEN: "${TINKOFF_API_TOKEN:-}"
-      TINKOFF_SSL_NO_VERIFY: "${TINKOFF_SSL_NO_VERIFY:-false}"
+      TINKOFF_SSL_RU_CA: "${TINKOFF_SSL_RU_CA:-true}"
       MOEX_LOGIN: "${MOEX_LOGIN:-}"
       MOEX_PASSWORD: "${MOEX_PASSWORD:-}"
       # Переопределяем HTTP_PROXY из .env: контейнер в bridge-сети, адрес

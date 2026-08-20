@@ -20,6 +20,11 @@ logger = logging.getLogger("moex_trader")
 async def main() -> None:
     storage.init_db()
 
+    from app import tinkoff_ssl
+
+    if not tinkoff_ssl.install_ru_ca():
+        logger.warning("Российские CA не установлены — T-Bank API может быть недоступен")
+
     from app.live import live_trader
     from app import settings as app_settings
 

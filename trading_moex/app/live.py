@@ -167,12 +167,11 @@ class LiveTrader:
             await asyncio.sleep(self.poll_interval)
 
     async def _cycle(self) -> None:
-        import os
-
         from tinkoff.invest import AsyncClient
 
-        if config.TINKOFF_SSL_NO_VERIFY:
-            os.environ["GRPC_SSL_REJECT_UNAUTHORIZED"] = "0"
+        from . import tinkoff_ssl
+
+        tinkoff_ssl.install_ru_ca()
 
         self.tickers = _watchlist()
         async with AsyncClient(token=app_settings.tinkoff_token(), app_name="moex-trader") as client:

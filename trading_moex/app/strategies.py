@@ -921,7 +921,7 @@ _ROE_PORTFOLIO_PARAMS_TUPLE = (
     ("partial_frac", 0.5),     # доля позиции, продаваемая при pb_exit_partial
     ("roe_exit", 12.0),
     ("max_positions", 4),      # каждая сделка ≈ 100% / max_positions депозита
-    ("rebalance_days", 5),
+    ("rebalance_days", 2),
     ("cash_yield", 8.0),  # годовая доходность денежной подушки (фонд TMON), %
     ("fundamentals", None),  # {ticker: DataFrame(date, roe, book_value_per_share)} — подаётся извне
     ("dividends", None),       # {ticker: DataFrame(date, dividend)} — дивиденды на отсечке, подаются извне
@@ -1264,7 +1264,7 @@ STRATEGIES = {
             {"key": "partial_frac", "label": "Частичная продажа: доля позиции", "type": "float", "default": 0.5},
             {"key": "roe_exit", "label": "Выход: годовой ROE ниже, %", "type": "float", "default": 12.0},
             {"key": "max_positions", "label": "Макс. позиций (≈ 100%/N депозита на сделку)", "type": "int", "default": 4},
-            {"key": "rebalance_days", "label": "Ребаланс, бар", "type": "int", "default": 5},
+            {"key": "rebalance_days", "label": "Ребаланс, бар", "type": "int", "default": 2},
             {"key": "cash_yield", "label": "Денежный фонд (TMON): доходность, % годовых", "type": "float", "default": 8.0},
         ],
     },

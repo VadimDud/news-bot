@@ -277,4 +277,11 @@ def prepare_fundamentals_series(ticker: str, start: date, end: date, years: int 
         mn.append(min(valid) if valid else None)
     out["avg_roe"] = avg
     out["min_roe"] = mn
+    stability = []
+    for a, m in zip(avg, mn):
+        if a is not None and m is not None and a > 0:
+            stability.append(round(min(m / a, 1.0), 4))
+        else:
+            stability.append(None)
+    out["roe_stability"] = stability
     return out.reset_index().rename(columns={"index": "date"})

@@ -911,6 +911,17 @@ _ROE_PORTFOLIO_PARAMS_TUPLE = (
     ("cash_yield", 8.0),  # годовая доходность денежной подушки (фонд TMON), %
     ("fundamentals", None),  # {ticker: DataFrame(date, roe, book_value_per_share)} — подаётся извне
     ("dividends", None),       # {ticker: DataFrame(date, dividend)} — дивиденды на отсечке, подаются извне
+    # Multi-factor скоринг: вместо жёстких AND-условий входа — взвешенная оценка.
+    # scoring=0 — старая AND-логика (avg_roe >= min_avg_roe и т.д.); scoring=1 —
+    # покупка top-N по composite score из факторов ROE/PB/momentum/дивиденды.
+    ("scoring", 0),
+    ("w_roe", 1.0),            # вес фактора «качество ROE» (avg_roe)
+    ("w_pb", 1.0),             # вес фактора «дешевизна» (цена / BVPS)
+    ("w_momentum", 0.5),       # вес фактора «моментум» (возврат за momentum_months)
+    ("w_dividend", 0.5),       # вес фактора «дивидендная доходность»
+    ("w_stability", 0.5),      # вес фактора «стабильность ROE» (min_roe / avg_roe)
+    ("min_score", 0.4),        # мин. composite score (0-1) для входа в scoring-режиме
+    ("momentum_months", 6),    # период моментума (месяцев) в scoring-режиме
 )
 
 
@@ -1033,6 +1044,85 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
     def _bvps_value(self, row):
         return self._float_col(row, "book_value_per_share")
 
+    def _roe_stability_value(self, row):
+        return self._float_col(row, "roe_stability")
+
+    def _dividend_trailing_yield(self, ticker: str, price: float) -> float:
+        """Дивидендная доходность за последние 12 месяцев, % от цены."""
+        if price <= 0:
+            return 0.0
+        divs = self._dividends.get(ticker) or {}
+        if not divs:
+            return 0.0
+        total = 0.0
+        cutoff_lower = pd.Timestamp(pd.Timestamp.now().date()) - pd.DateOffset(months=12)
+        for ts, (amount, _) in divs.items():
+            if cutoff_lower <= ts:
+                total += float(amount or 0.0)
+        return total * 100.0 / price if total > 0 else 0.0
+
+    def _momentum_return(self, d, months: int) -> float | None:
+        """Возврат за months месяцев, если данных на период хватает."""
+        lookback = max(1, int(months * 21))
+        if len(d) > lookback:
+            base = float(d.close[-lookback])
+            if base > 0:
+                return float(d.close[0]) / base - 1.0
+        return None
+
+    def _compute_score(self, ticker: str, dt, d) -> float:
+        """Взвешенный composite score тикера (0-1) в scoring-режиме.
+
+        Факторы: качество ROE (avg_roe/30), дешевизна (price/BVPS относительно
+        pb_entry), моментум, дивидендная доходность, стабильность ROE.
+        """
+        row = self._ff(ticker, dt)
+        if row is None:
+            return 0.0
+        price = float(d.close[0])
+        if price <= 0:
+            return 0.0
+
+        # 1) Качество ROE: avg_roe / 30 (30%+ = полный балл).
+        avg_roe = self._avg_roe_value(row)
+        s_roe = min(avg_roe / 30.0, 1.0) if avg_roe is not None else 0.0
+
+        # 2) Дешевизна: относительная к порогу входа pb_entry, чем дешевле — тем выше.
+        bvps = self._bvps_value(row)
+        if bvps and bvps > 0:
+            current_pb = price / bvps
+            s_pb = min(float(self.p.pb_entry) / current_pb, 1.5) / 1.5
+        else:
+            s_pb = 0.0
+
+        # 3) Моментум: возврат за momentum_months, нормируем ±30% → [0, 1].
+        ret = self._momentum_return(d, int(self.p.momentum_months))
+        if ret is None:
+            s_mom = 0.5  # нет данных — нейтральный балл, чтобы не отбрасывать тикер
+        else:
+            s_mom = max(min((ret + 0.30) / 0.60, 1.0), 0.0)
+
+        # 4) Дивидендная доходность: от суммы дивидендов за 12 мес / цену.
+        dy = self._dividend_trailing_yield(ticker, price)
+        s_div = min(dy / 8.0, 1.0)
+
+        # 5) Стабильность ROE: min_roe / avg_roe (0-1 из фундаментального ряда).
+        st = self._roe_stability_value(row)
+        s_stab = st if st is not None else 0.0
+
+        total_w = (
+            float(self.p.w_roe) + float(self.p.w_pb) + float(self.p.w_momentum)
+            + float(self.p.w_dividend) + float(self.p.w_stability)
+        )
+        if total_w <= 0:
+            return 0.0
+        composite = (
+            s_roe * float(self.p.w_roe) + s_pb * float(self.p.w_pb)
+            + s_mom * float(self.p.w_momentum) + s_div * float(self.p.w_dividend)
+            + s_stab * float(self.p.w_stability)
+        ) / total_w
+        return round(composite, 4)
+
     def next(self):
         dt = self.data.datetime.datetime(0)
         self._bar += 1
@@ -1115,6 +1205,40 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         if open_positions >= int(self.p.max_positions):
             return
         target_weight = 1.0 / int(self.p.max_positions)
+
+        if int(self.p.scoring) == 1:
+            # Scoring-режим: считаем composite score для всех свободных тикеров,
+            # сортируем по убыванию и берём top-N с score >= min_score.
+            candidates: list[tuple[float, object, str]] = []
+            for d in self.datas:
+                ticker = getattr(d, "_name", None) or d._dataname or ""
+                if self.getposition(d).size > 0:
+                    continue
+                score = self._compute_score(ticker, dt, d)
+                candidates.append((score, d, ticker))
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for score, d, ticker in candidates:
+                if open_positions >= int(self.p.max_positions):
+                    break
+                if score < float(self.p.min_score):
+                    break  # отсортировано по убыванию — дальше только хуже
+                price = float(d.close[0])
+                if price <= 0:
+                    continue
+                size = int(float(self.broker.getvalue()) * target_weight / price)
+                if size <= 0:
+                    continue
+                this_value = float(self.broker.getvalue()) * target_weight
+                if this_value > float(self.broker.getcash()):
+                    size = int(float(self.broker.getcash()) / price * 0.95)
+                if size > 0:
+                    if ticker not in self._entry_dates:
+                        self._entry_dates[ticker] = pd.Timestamp(dt.date())
+                    self._partial_sold.discard(ticker)
+                    self.buy(data=d, size=size)
+                    open_positions += 1
+            return
+
         for d in self.datas:
             if open_positions >= int(self.p.max_positions):
                 break
@@ -1256,6 +1380,14 @@ STRATEGIES = {
             {"key": "max_positions", "label": "Макс. позиций (≈ 100%/N депозита на сделку)", "type": "int", "default": 4},
             {"key": "rebalance_days", "label": "Ребаланс, дней", "type": "int", "default": 2},
             {"key": "cash_yield", "label": "Денежный фонд (TMON): доходность, % годовых", "type": "float", "default": 8.0},
+            {"key": "scoring", "label": "Режим: 0 = AND-логика, 1 = multi-factor скоринг", "type": "int", "default": 0},
+            {"key": "w_roe", "label": "Скоринг: вес качества ROE", "type": "float", "default": 1.0},
+            {"key": "w_pb", "label": "Скоринг: вес дешевизны (P/B)", "type": "float", "default": 1.0},
+            {"key": "w_momentum", "label": "Скоринг: вес моментума", "type": "float", "default": 0.5},
+            {"key": "w_dividend", "label": "Скоринг: вес дивидендной доходности", "type": "float", "default": 0.5},
+            {"key": "w_stability", "label": "Скоринг: вес стабильности ROE", "type": "float", "default": 0.5},
+            {"key": "min_score", "label": "Скоринг: мин. composite score для входа", "type": "float", "default": 0.4},
+            {"key": "momentum_months", "label": "Скоринг: период моментума, мес", "type": "int", "default": 6},
         ],
     },
 }

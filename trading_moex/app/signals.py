@@ -344,6 +344,52 @@ def engulfing_position(df: pd.DataFrame) -> pd.Series:
 
 # ── Фундаментальный сигнал ROE + P/B ────────────────────────────────────────
 
+def _normalize_score(val, center, span):
+    """Нормировка признака в [0, 1] вокруг center с размахом span (центр→0.5)."""
+    if val is None:
+        return 0.5
+    return max(min((val - center + span) / (2 * span), 1.0), 0.0)
+
+
+def _pb_percentile_score(pb_series, current_pb):
+    """Дешевизна: перцентиль текущего P/B в собственной истории (0=дёшево→1).
+
+    Низкий перцентиль = цена мала относительно стоимости капитала за историю
+    бумаги → высокий балл. Если истории нет — нейтральный 0.5.
+    """
+    valid = pb_series.dropna()
+    if len(valid) < 5 or current_pb is None:
+        return 0.5
+    pct = (valid <= current_pb).mean()
+    return 1.0 - float(pct)
+
+
+def _roe_score(avg_roe: float | None, max_roe: float = 30.0) -> float:
+    """Качество: avg_roe, нормированное на max_roe (30%+ = 1.0)."""
+    if avg_roe is None:
+        return 0.0
+    return max(min(avg_roe / max_roe, 1.0), 0.0)
+
+
+def _momentum_score(ret: float | None, span: float = 0.30) -> float:
+    """Моментум: возврат, нормированный на ±span вокруг 0 (центр → 0.5)."""
+    return _normalize_score(ret, 0.0, span)
+
+
+def _dividend_score(dividend_yield: float | None, max_yield: float = 8.0) -> float:
+    """Дивидендная доходность, нормированная на max_yield."""
+    if dividend_yield is None:
+        return 0.0
+    return max(min(dividend_yield / max_yield, 1.0), 0.0)
+
+
+def _roe_stability_score(stability: float | None) -> float:
+    """Стабильность ROE: min_roe / avg_roe (0-1), уже нормализовано."""
+    if stability is None or np.isnan(stability):
+        return 0.0
+    return max(min(float(stability), 1.0), 0.0)
+
+
 def roe_pb_signal(
     prices: pd.Series,
     fundamentals: pd.DataFrame,
@@ -353,6 +399,14 @@ def roe_pb_signal(
     pb_exit: float = 1.5,
     roe_exit: float = 12.0,
     rebalance_days: int = 5,
+    scoring: int = 0,
+    w_roe: float = 1.0,
+    w_pb: float = 1.0,
+    w_momentum: float = 0.5,
+    w_dividend: float = 0.5,
+    w_stability: float = 0.5,
+    min_score: float = 0.4,
+    momentum_months: int = 6,
 ) -> pd.Series:
     """Серия позиций (1=long, 0=flat) по «усреднённому ROE + P/B».
 
@@ -365,6 +419,9 @@ def roe_pb_signal(
     - вход: avg_roe >= min_avg_roe И годовой ROE >= min_single_roe
       И цена <= pb_entry * book_value_per_share;
     - выход: цена >= pb_exit * book_value_per_share ИЛИ годовой ROE < roe_exit.
+
+    При ``scoring=1`` вход определяется взвешенным composite score (факторы
+    ROE/PB/momentum/дивиденды/стабильность), а не жёсткими AND-условиями.
     """
     ff = _forward_fill_fundamentals(prices, fundamentals)
 
@@ -383,6 +440,13 @@ def roe_pb_signal(
     roe = ff["roe"].values
     bvps = ff["book_value_per_share"].values
     avg_roe_arr = avg_roe
+    stability = np.full(len(close), np.nan)
+    if "roe_stability" in ff.columns:
+        stability = pd.to_numeric(ff["roe_stability"], errors="coerce").values
+
+    # История P/B для перцентильного скоринга (скользящее окно) — в scoring=1
+    pb_history = pd.Series(close, index=prices.index) / pd.Series(bvps, index=prices.index)
+    pb_window = int(momentum_months) * 21
 
     pos = np.zeros(len(prices), dtype=int)
     cur = 0
@@ -394,11 +458,37 @@ def roe_pb_signal(
             if np.isnan(roe[i]) or np.isnan(bvps[i]) or np.isnan(avg_roe_arr[i]) or bvps[i] <= 0:
                 pos[i] = cur
                 continue
-            if cur == 0:
-                if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
-                    cur = 1
+            if scoring == 0:
+                if cur == 0:
+                    if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
+                        cur = 1
+                else:
+                    if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
+                        cur = 0
             else:
-                if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
+                # Scoring-режим: composite score выше порога → вход.
+                s_roe = _roe_score(avg_roe_arr[i])
+                current_pb = close[i] / bvps[i]
+                s_pb = _pb_percentile_score(
+                    pd.Series(pb_history.values[max(0, i - pb_window): i + 1]),
+                    current_pb,
+                )
+                lookback = max(1, int(momentum_months * 21))
+                ret = None
+                if i >= lookback:
+                    if close[i - lookback] > 0:
+                        ret = close[i] / close[i - lookback] - 1.0
+                s_mom = _momentum_score(ret)
+                s_div = _dividend_score(0.0)  # в live-сигнале дивидендных данных нет
+                s_stab = _roe_stability_score(stability[i])
+                total_w = w_roe + w_pb + w_momentum + w_dividend + w_stability
+                score = (
+                    s_roe * w_roe + s_pb * w_pb + s_mom * w_momentum
+                    + s_div * w_dividend + s_stab * w_stability
+                ) / total_w if total_w > 0 else 0.0
+                if cur == 0 and score >= min_score:
+                    cur = 1
+                elif cur == 1 and (score < min_score * 0.6 or (close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit)):
                     cur = 0
         pos[i] = cur
     return pd.Series(pos, index=prices.index)
@@ -413,6 +503,14 @@ def roe_pb_position(
     pb_exit: float = 1.5,
     roe_exit: float = 12.0,
     rebalance_days: int = 5,
+    scoring: int = 0,
+    w_roe: float = 1.0,
+    w_pb: float = 1.0,
+    w_momentum: float = 0.5,
+    w_dividend: float = 0.5,
+    w_stability: float = 0.5,
+    min_score: float = 0.4,
+    momentum_months: int = 6,
 ) -> pd.Series:
     """Позиция (1=long, 0=flat) по «высокий ROE + цена дешевле капитала».
 
@@ -432,6 +530,14 @@ def roe_pb_position(
         pb_exit=pb_exit,
         roe_exit=roe_exit,
         rebalance_days=rebalance_days,
+        scoring=scoring,
+        w_roe=w_roe,
+        w_pb=w_pb,
+        w_momentum=w_momentum,
+        w_dividend=w_dividend,
+        w_stability=w_stability,
+        min_score=min_score,
+        momentum_months=momentum_months,
     )
 
 

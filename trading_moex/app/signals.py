@@ -354,6 +354,95 @@ SIGNAL_FUNCS = {
 }
 
 
+# ── Фундаментальный сигнал ROE + P/B ────────────────────────────────────────
+
+def roe_pb_signal(
+    prices: pd.Series,
+    fundamentals: pd.DataFrame,
+    min_avg_roe: float = 15.0,
+    min_single_roe: float = 12.0,
+    pb_entry: float = 0.8,
+    pb_exit: float = 1.5,
+    roe_exit: float = 12.0,
+    rebalance_days: int = 5,
+) -> pd.Series:
+    """Серия позиций (1=long, 0=flat) по «усреднённому ROE + P/B».
+
+    ``fundamentals`` — DataFrame с колонками ``date`` (YYYY-MM-DD), ``roe`` (%),
+    ``book_value_per_share`` (₽), отсортированный по дате. На каждый день
+    prices значения forward-fill из последней строки отчётности; средний ROE —
+    среднее за последние ``min_avg_roe`` лет по одному значению на год.
+
+    Проверки выполняются каждые ``rebalance_days`` баров:
+    - вход: avg_roe >= min_avg_roe И годовой ROE >= min_single_roe
+      И цена <= pb_entry * book_value_per_share;
+    - выход: цена >= pb_exit * book_value_per_share ИЛИ годовой ROE < roe_exit.
+    """
+    ff = _forward_fill_fundamentals(prices, fundamentals)
+    avg_roe = _rolling_avg_roe_series(ff)
+
+    close = prices.values
+    roe = ff["roe"].values
+    bvps = ff["book_value_per_share"].values
+    avg_roe_arr = avg_roe.values
+
+    pos = np.zeros(len(prices), dtype=int)
+    cur = 0
+    for i in range(len(prices)):
+        if i % rebalance_days != 0:
+            pos[i] = cur
+            continue
+        if np.isnan(roe[i]) or np.isnan(bvps[i]) or np.isnan(avg_roe_arr[i]) or bvps[i] <= 0:
+            pos[i] = cur
+            continue
+        if cur == 0:
+            if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
+                cur = 1
+        else:
+            if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
+                cur = 0
+        pos[i] = cur
+    return pd.Series(pos, index=prices.index)
+
+
+def _forward_fill_fundamentals(prices: pd.Series, fundamentals: pd.DataFrame) -> pd.DataFrame:
+    """Квартальные значения ROE/BV развёрнуты на каждый день prices (ffill)."""
+    ff = pd.DataFrame(index=prices.index)
+    ff["roe"] = np.nan
+    ff["book_value_per_share"] = np.nan
+    fund = fundamentals.copy()
+    fund["date"] = pd.to_datetime(fund["date"])
+    for _, row in fund.sort_values("date").iterrows():
+        ff.loc[row["date"]:, "roe"] = row["roe"]
+        ff.loc[row["date"]:, "book_value_per_share"] = row["book_value_per_share"]
+    if not fund.empty:
+        first = fund.iloc[0]
+        ff.loc[prices.index[0], ["roe", "book_value_per_share"]] = [
+            first["roe"], first["book_value_per_share"],
+        ]
+    return ff.ffill()
+
+
+def _rolling_avg_roe_series(ff: pd.DataFrame, years: int = 10) -> pd.Series:
+    """Средний ROE за ``years`` календарных лет по последнему значению года."""
+    year_fill = ff.copy()
+    year_fill["year"] = year_fill.index.year
+    col = "roe"
+
+    vals = {}
+    for year, group in year_fill.groupby("year"):
+        vals[year] = group[col].iloc[-1]
+    series = [np.nan] * len(year_fill)
+    prev = {}
+    for i, ts in enumerate(year_fill.index):
+        y = ts.year
+        prev[y] = vals[y]
+        window = [prev.get(y - k, np.nan) for k in range(years)]
+        valid = [v for v in window if not np.isnan(v)]
+        series[i] = np.mean(valid) if valid else np.nan
+    return pd.Series(series, index=year_fill.index)
+
+
 def signal_from_position(pos: pd.Series) -> str:
     """Вернуть действие по последней паре баров: buy / sell / hold."""
     if len(pos) < 2:

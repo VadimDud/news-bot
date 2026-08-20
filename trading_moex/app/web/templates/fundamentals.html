@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Фундаментальные данные — MOEX Trader{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Загрузка фундаментальной отчётности (ROE, Book Value)</h2>
+  <p class="hint">
+    История ROE и стоимости капитала импортируется CSV-файлом (например, скачанным
+    со SmartLab или составленным вручную). Текущая цена и капитализация берутся из
+    бесплатного MOEX ISS API автоматически.
+  </p>
+  {% if error %}
+  <div class="notice error">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/fundamentals/upload" enctype="multipart/form-data">
+    <div class="grid">
+      <div>
+        <label for="ticker">Тикер</label>
+        <input type="text" id="ticker" name="ticker" value="{{ ticker or '' }}" list="ticker-suggestions" required>
+        <datalist id="ticker-suggestions">
+          {% for t in ticker_suggestions %}
+          <option value="{{ t }}"></option>
+          {% endfor %}
+        </datalist>
+      </div>
+    </div>
+    <label for="csv_file">CSV-файл (колонки: date, roe, book_value_per_share; опционально roa, eps, equity, net_profit, revenue)</label>
+    <input type="file" id="csv_file" name="csv_file" accept=".csv,text/csv">
+    <label for="csv_text">Или вставьте текст CSV</label>
+    <textarea id="csv_text" name="csv_text" rows="5" style="width:100%"
+      placeholder="date,roe,book_value_per_share&#10;2016-12-31,22.5,74.3&#10;2017-12-31,24.1,89.9"></textarea>
+    <div class="hint">Даты: YYYY-MM-DD, DD.MM.YYYY или MM/DD/YYYY. ROE — проценты (например 22.5 = 22.5%).</div>
+    <button type="submit">Импортировать</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Загруженная отчётность</h2>
+  {% if rows %}
+  <table>
+    <thead>
+      <tr><th>Тикер</th><th>Строк</th><th>Период</th><th>ROE (посл.), %</th><th>BVPS (посл.), ₽</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.ticker }}</td>
+        <td>{{ r.count }}</td>
+        <td>{{ r.from or '—' }} … {{ r.to or '—' }}</td>
+        <td>{{ '%.2f' % r.roe_latest if r.roe_latest is not none else '—' }}</td>
+        <td>{{ '%.2f' % r.bvps if r.bvps is not none else '—' }}</td>
+        <td>
+          <form method="post" action="/fundamentals/delete" style="margin:0">
+            <input type="hidden" name="ticker" value="{{ r.ticker }}">
+            <button class="link danger" type="submit">удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Отчётность ещё не загружена. Импортируйте CSV выше.</div>
+  {% endif %}
+</div>
+{% endblock %}

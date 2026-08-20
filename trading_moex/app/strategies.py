@@ -5,6 +5,7 @@ Price Action: лот от % риска, стоп-лосс по ATR, тейк п�
 """
 
 import backtrader as bt
+import pandas as pd
 
 from . import risk as risk_module
 from . import signals as sig
@@ -27,6 +28,7 @@ class TradeRecordingStrategy(bt.Strategy):
                     "traded": str(bt.num2date(trade.dtclose)),
                     "status": "closed",
                     "pnl": round(float(trade.pnlcomm or 0.0), 2),
+                    "ticker": getattr(trade.data, "_name", None) or trade.getdataname(),
                 }
             )
 
@@ -906,6 +908,253 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
             self._search_retest()
 
 
+# Параметры фундаментальной портфельной стратегии ROE + P/B. Логика повторяет
+# ``signals.roe_pb_signal``, но мульти-дата: портфель (несколько тикеров)
+# с равными долями. Вход при цене <= 0.8 стоимости капитала и высоком среднем
+# за 10 лет ROE; выход при цене >= стоимости капитала или падении ROE.
+_ROE_PORTFOLIO_PARAMS_TUPLE = (
+    ("min_avg_roe", 15.0),
+    ("min_single_roe", 12.0),
+    ("pb_entry", 0.8),
+    ("pb_exit", 1.5),
+    ("pb_exit_partial", 1.2),  # при цене ≥ этого продаём часть позиции
+    ("partial_frac", 0.5),     # доля позиции, продаваемая при pb_exit_partial
+    ("roe_exit", 12.0),
+    ("max_positions", 4),      # каждая сделка ≈ 100% / max_positions депозита
+    ("rebalance_days", 5),
+    ("cash_yield", 8.0),  # годовая доходность денежной подушки (фонд TMON), %
+    ("fundamentals", None),  # {ticker: DataFrame(date, roe, book_value_per_share)} — подаётся извне
+    ("dividends", None),       # {ticker: DataFrame(date, dividend)} — дивиденды на отсечке, подаются извне
+)
+
+
+class ROEPortfolioStrategy(TradeRecordingStrategy):
+    """Фундаментальный портфель: равные доли в бумагах с дешёвым капиталом.
+
+    На каждый ``rebalance_days`` баров проверяются все тикеры (data-фиды):
+    - кандидат: средний ROE за ``min_avg_roe`` лет >= ``min_avg_roe`` И
+      годовой ROE >= ``min_single_roe`` И цена <= ``pb_entry`` * BVPS;
+    - позиция закрывается при цене >= ``pb_exit`` * BVPS или ROE < ``roe_exit``.
+
+    Фундаментальные данные подаются параметром ``fundamentals`` — словарь
+    ``{ticker: DataFrame}`` из prepare_fundamentals_series (колонки date, roe,
+    book_value_per_share, avg_roe, min_roe; даты в виде строк YYYY-MM-DD).
+
+    Доли равные: каждый вход покупает на ``1 / max_positions`` от капитала.
+    """
+
+    params = _ROE_PORTFOLIO_PARAMS_TUPLE
+
+    def __init__(self):
+        super().__init__()
+        self._fundamentals = {}
+        self._dividends = {}
+        for d in self.datas:
+            ticker = getattr(d, "_name", None) or d._dataname or ""
+            fund_df = (self.p.fundamentals or {}).get(ticker)
+            if fund_df is not None:
+                self._fundamentals[ticker] = self._index_by_date(fund_df)
+            div_df = (self.p.dividends or {}).get(ticker)
+            if div_df is not None:
+                self._dividends[ticker] = self._index_dividends(div_df)
+        self._bar = 0
+        self._ff_cache: dict[str, dict] = {}
+        self._div_paid: set[tuple[str, object]] = set()
+        self._entry_dates: dict[str, object] = {}
+        self._partial_sold: set[str] = set()
+
+    def _index_dividends(self, df):
+        """Дивиденды в {timestamp(отсечки): (dividend_руб, buy_before_ts)}.
+
+        Право на дивиденд даёт владение НА дату отсечки, а для этого нужно
+        купить бумагу не позже ``buy_before`` (T-1 от отсечки). Стратегия
+        проверяет, что позиция была открыта на buy_before.
+        """
+        import pandas as pd
+
+        out = df.copy()
+        out["_dt"] = pd.to_datetime(out["date"])
+        out["_bb"] = pd.to_datetime(out["buy_before"])
+        return {
+            row["_dt"]: (float(row["dividend"]), pd.Timestamp(row["_bb"]))
+            for _, row in out.iterrows()
+        }
+
+    def _payout(self, ticker: str, dt, size: int) -> float:
+        """Дивиденд за позицию при покупке до даты отсечки.
+
+        Начисляется, если позиция открыта на ``buy_before`` (T-1) — день перед
+        отсечкой, последний для покупки с правом на дивиденд. В момент,
+        когда стратегия смотрит на бар отсечки, проверяется, что акция куплена
+        до неё включительно по buy_before.
+        """
+        if size <= 0:
+            return 0.0
+        ts = pd.Timestamp(dt.date())
+        key = (ticker, ts)
+        if key in self._div_paid:
+            return 0.0  # не платим дважды за одну отсечку
+        entry = self._dividends.get(ticker) or {}
+        item = entry.get(ts)
+        if item is None:
+            return 0.0
+        dividend_per_share, buy_before = item
+        if buy_before is None or not self._entry_dates.get(ticker):
+            return 0.0  # нет данных о покупке — не начисляем
+        if self._entry_dates[ticker] <= buy_before:
+            self._div_paid.add(key)
+            return float(dividend_per_share) * size
+        return 0.0
+
+    def _index_by_date(self, df):
+        import pandas as pd
+
+        out = df.copy()
+        out["_dt"] = pd.to_datetime(out["date"])
+        out = out.set_index("_dt").sort_index()
+        return out
+
+    def _ff(self, ticker: str, dt):
+        """Forward-fill отчётности на дату dt (включая сам день)."""
+        fund = self._fundamentals.get(ticker)
+        if fund is None or fund.empty:
+            return None
+        if ticker not in self._ff_cache:
+            self._ff_cache[ticker] = {}
+        cache = self._ff_cache[ticker]
+        key = pd.Timestamp(dt.date())
+        if key in cache:
+            return cache[key]
+        before = fund[fund.index <= key]
+        row = before.iloc[-1] if not before.empty else None
+        cache[key] = row
+        return row
+
+    def _avg_roe_value(self, row):
+        avg = row.get("avg_roe")
+        if avg is None:
+            return None
+        try:
+            return float(avg)
+        except (TypeError, ValueError):
+            return None
+
+    def _roe_value(self, row):
+        roe = row.get("roe")
+        if roe is None:
+            return None
+        try:
+            return float(roe)
+        except (TypeError, ValueError):
+            return None
+
+    def _bvps_value(self, row):
+        bv = row.get("book_value_per_share")
+        if bv is None:
+            return None
+        try:
+            return float(bv)
+        except (TypeError, ValueError):
+            return None
+
+    def next(self):
+        self._bar += 1
+        # Денежная подушка в фонде денежного рынка (TMON): свободный кэш приносит
+        # доход по ставке cash_yield (% годовых), начисляется ежедневно, пока
+        # деньги не задействованы в акциях. При покупке бумаг кэш уходит в акции
+        # (эквивалент продажи доли фонда), при продаже — возвращается в фонд.
+        cash = self.broker.getcash()
+        if cash > 0 and float(getattr(self.p, "cash_yield", 0.0) or 0.0) > 0:
+            daily = (float(self.p.cash_yield) / 100.0) / 365.0
+            self.broker.add_cash(cash * daily)
+        # Дивиденды: начисляются на дату отсечки за открытую позицию (каждый бар,
+        # не только в дни ребаланса).
+        if self.p.dividends:
+            for d in self.datas:
+                ticker = getattr(d, "_name", None) or d._dataname or ""
+                pos = self.getposition(d)
+                if pos.size <= 0:
+                    continue
+                if len(d) < len(self.data):
+                    continue  # фид не догнал текущую дату портфеля
+                amount = self._payout(ticker, d.datetime.datetime(0), pos.size)
+                if amount:
+                    self.broker.add_cash(amount)
+                    self._dividends_income = getattr(self, "_dividends_income", 0.0) + amount
+        if self._bar % int(self.p.rebalance_days) != 0:
+            return
+        dt = self.data.datetime.datetime(0)
+
+        # 1) Закрытие позиций:
+        #    - ROE упал ниже порога или цена >= pb_exit*BVPS → закрываем всю позицию
+        #    - цена >= pb_exit_partial*BVPS (и ещё не продавалась частично) →
+        #      продаём долю partial_frac, остаток оставляем
+        for d in self.datas:
+            ticker = getattr(d, "_name", None) or d._dataname or ""
+            pos = self.getposition(d)
+            if pos.size <= 0:
+                continue
+            row = self._ff(ticker, dt)
+            if row is None:
+                continue
+            bvps = self._bvps_value(row)
+            roe = self._roe_value(row)
+            price = float(d.close[0])
+            # полный выход: по ROE или по цене pb_exit*BVPS
+            if (bvps and price >= float(self.p.pb_exit) * bvps) or (roe is not None and roe < float(self.p.roe_exit)):
+                self.close(data=d)
+                self._entry_dates.pop(ticker, None)
+                continue
+            # частичный выход: цена >= pb_exit_partial*BVPS → продаём часть позиции
+            if (
+                bvps
+                and price >= float(self.p.pb_exit_partial) * bvps
+                and ticker not in self._partial_sold
+                and self.p.partial_frac > 0
+            ):
+                sell_size = max(1, int(pos.size * float(self.p.partial_frac)))
+                if sell_size >= pos.size:
+                    self.close(data=d)
+                    self._entry_dates.pop(ticker, None)
+                else:
+                    self.sell(data=d, size=sell_size)
+                    self._partial_sold.add(ticker)
+
+        # 2) Открытие: докупаем, пока есть свободные доли, но не больше max_positions.
+        open_positions = sum(1 for d in self.datas if self.getposition(d).size > 0)
+        if open_positions >= int(self.p.max_positions):
+            return
+        target_weight = 1.0 / int(self.p.max_positions)
+        for d in self.datas:
+            if open_positions >= int(self.p.max_positions):
+                break
+            ticker = getattr(d, "_name", None) or d._dataname or ""
+            if self.getposition(d).size > 0:
+                continue
+            row = self._ff(ticker, dt)
+            if row is None:
+                continue
+            avg_roe = self._avg_roe_value(row)
+            roe = self._roe_value(row)
+            bvps = self._bvps_value(row)
+            price = float(d.close[0])
+            if avg_roe is None or roe is None or bvps is None or price <= 0:
+                continue
+            if avg_roe >= float(self.p.min_avg_roe) and roe >= float(self.p.min_single_roe) and price <= float(self.p.pb_entry) * bvps:
+                size = int(float(self.broker.getvalue()) * target_weight / price)
+                if size <= 0:
+                    continue
+                this_value = float(self.broker.getvalue()) * target_weight
+                if this_value > float(self.broker.getcash()):
+                    size = int(float(self.broker.getcash()) / price * 0.95)
+                if size > 0:
+                    if ticker not in self._entry_dates:
+                        self._entry_dates[ticker] = pd.Timestamp(dt.date())
+                    self._partial_sold.discard(ticker)
+                    self.buy(data=d, size=size)
+                    open_positions += 1
+
+
 STRATEGIES = {
     "sma_cross": {
         "name": "SMA Crossover",
@@ -1001,6 +1250,22 @@ STRATEGIES = {
             {"key": "pin_shadow", "label": "Пин-бар шорт: доля верхней тени", "type": "float", "default": 0.6},
             {"key": "vol_period", "label": "Подтверждение объёма: период (0 = выкл)", "type": "int", "default": 20},
             {"key": "vol_mult", "label": "Подтверждение объёма: множитель", "type": "float", "default": 1.5},
+        ],
+    },
+    "roe_portfolio": {
+        "name": "ROE + P/B (портфель равных долей)",
+        "cls": ROEPortfolioStrategy,
+        "params": [
+            {"key": "min_avg_roe", "label": "Мин. средний ROE за 10 лет, %", "type": "float", "default": 15.0},
+            {"key": "min_single_roe", "label": "Мин. годовой ROE, %", "type": "float", "default": 12.0},
+            {"key": "pb_entry", "label": "Вход: цена ≤ (этого) × BVPS", "type": "float", "default": 0.8},
+            {"key": "pb_exit", "label": "Полный выход: цена ≥ (этого) × BVPS", "type": "float", "default": 1.5},
+            {"key": "pb_exit_partial", "label": "Частичная продажа: цена ≥ (этого) × BVPS", "type": "float", "default": 1.2},
+            {"key": "partial_frac", "label": "Частичная продажа: доля позиции", "type": "float", "default": 0.5},
+            {"key": "roe_exit", "label": "Выход: годовой ROE ниже, %", "type": "float", "default": 12.0},
+            {"key": "max_positions", "label": "Макс. позиций (≈ 100%/N депозита на сделку)", "type": "int", "default": 4},
+            {"key": "rebalance_days", "label": "Ребаланс, бар", "type": "int", "default": 5},
+            {"key": "cash_yield", "label": "Денежный фонд (TMON): доходность, % годовых", "type": "float", "default": 8.0},
         ],
     },
 }

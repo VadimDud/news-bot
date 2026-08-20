@@ -18,9 +18,10 @@ import aiohttp_jinja2
 import jinja2
 from aiohttp import web
 
-from .. import config, data, settings, storage
-from ..backtest import run_backtest
+from .. import config, data, fundamentals, settings, storage
+from ..backtest import run_backtest, run_portfolio_backtest
 from ..catalog import AVAILABLE_TICKERS
+from ..fundamentals_screener import screen_catalog, scan_moex_candidates
 from ..live import live_trader
 from ..strategies import STRATEGIES, strategy_defaults
 
@@ -288,6 +289,132 @@ async def settings_save(request: web.Request) -> web.Response:
     return resp
 
 
+async def fundamentals_page(request: web.Request) -> web.Response:
+    """Страница загрузки/списка фундаментальной отчётности по тикерам."""
+    tickers = storage.list_tickers_with_fundamentals()
+    rows = []
+    for t in tickers:
+        stats = storage.fundamentals_stats(t)
+        latest = fundamentals.get_latest_fundamentals(t)
+        rows.append(
+            {
+                "ticker": t,
+                "count": stats["count"],
+                "from": stats["min_date"],
+                "to": stats["max_date"],
+                "roe_latest": round(latest["roe"], 2) if latest and latest.get("roe") is not None else None,
+                "bvps": round(latest["book_value_per_share"], 2) if latest and latest.get("book_value_per_share") is not None else None,
+            }
+        )
+    return aiohttp_jinja2.render_template(
+        "fundamentals.html",
+        request,
+        {"rows": rows, "catalog": AVAILABLE_TICKERS, "ticker_suggestions": _ticker_suggestions()},
+    )
+
+
+async def fundamentals_upload(request: web.Request) -> web.Response:
+    """Загрузить CSV-файл отчётности + указать тикер в form-поле ticker."""
+    post = await request.post()
+    ticker = (post.get("ticker") or "").strip().upper()
+    errors = []
+    if not ticker:
+        errors.append("Укажите тикер.")
+    csv_text = ""
+
+    file = post.get("csv_file")
+    if file is not None and getattr(file, "filename", "") and getattr(file, "file", None):
+        csv_text = file.file.read().decode("utf-8-sig", errors="replace")
+    if not csv_text:
+        csv_text = post.get("csv_text", "").strip()
+    if not csv_text:
+        errors.append("Выберите CSV-файл или вставьте текст отчёта.")
+
+    if not errors:
+        try:
+            n = fundamentals.import_fundamentals(ticker, csv_text)
+            if n == 0:
+                errors.append("В CSV нет строк с датой — ничего не сохранено.")
+            else:
+                return web.HTTPFound("/fundamentals")
+        except ValueError as exc:
+            errors.append(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Импорт фундаментальных данных %s не удался: %s", ticker, exc)
+            errors.append(f"Ошибка импорта: {exc}")
+
+    return aiohttp_jinja2.render_template(
+        "fundamentals.html",
+        request,
+        {
+            "rows": [],
+            "catalog": AVAILABLE_TICKERS,
+            "ticker_suggestions": _ticker_suggestions(),
+            "error": " ".join(errors),
+            "ticker": ticker,
+        },
+    )
+
+
+async def fundamentals_delete(request: web.Request) -> web.Response:
+    form = await request.post()
+    ticker = form.get("ticker", "").strip().upper()
+    if ticker:
+        storage.delete_fundamentals(ticker)
+    raise web.HTTPFound("/fundamentals")
+
+
+async def screener_page(request: web.Request) -> web.Response:
+    """Скринер ROE + P/B: форма фильтров + таблица кандидатов."""
+    form = await request.post() if request.method == "POST" else {}
+
+    def fget(key: str, default: float) -> float:
+        raw = form.get(key)
+        try:
+            return float(raw) if raw else default
+        except (TypeError, ValueError):
+            return default
+
+    min_avg_roe = fget("min_avg_roe", 15.0)
+    min_single_roe = fget("min_single_roe", 12.0)
+    pb_entry = fget("pb_entry", 0.8)
+    years = int(fget("years", 10))
+    scan = bool(form.get("scan"))
+    min_market_cap = fget("min_market_cap", fundamentals.DEFAULT_MIN_MARKET_CAP)
+    min_volume_rub = fget("min_volume_rub", fundamentals.DEFAULT_MIN_VOLUME_RUB)
+
+    candidates: list[dict] = []
+    if form.get("tickers"):
+        selected = [t.strip().upper() for t in form["tickers"].replace(";", ",").replace("\n", ",").split(",") if t.strip()]
+        candidates = screen_catalog(min_avg_roe, min_single_roe, pb_entry, years, selected)
+    elif request.method == "POST":
+        try:
+            if scan:
+                candidates = scan_moex_candidates(min_avg_roe, min_single_roe, pb_entry, years, min_market_cap, min_volume_rub)
+            else:
+                candidates = screen_catalog(min_avg_roe, min_single_roe, pb_entry, years)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Скрининг не удался: %s", exc)
+            candidates = [{"ticker": "—", "error": f"Ошибка сканирования: {exc}"}]
+
+    return aiohttp_jinja2.render_template(
+        "screener.html",
+        request,
+        {
+            "candidates": candidates,
+            "min_avg_roe": min_avg_roe,
+            "min_single_roe": min_single_roe,
+            "pb_entry": pb_entry,
+            "years": years,
+            "scan": scan,
+            "min_market_cap": min_market_cap,
+            "min_volume_rub": min_volume_rub,
+            "candidate_tickers": ",".join(c["ticker"] for c in candidates if c.get("candidate")),
+            "periods": data.PERIODS,
+        },
+    )
+
+
 async def index(request: web.Request) -> web.Response:
     runs = storage.list_runs(20)
     default_ticker = "SBER"
@@ -447,7 +574,8 @@ async def data_download_result(request: web.Request) -> web.Response:
 async def backtest_run(request: web.Request) -> web.Response:
     """Запустить бэктест в фоне; вернуть job_id для опроса прогресса."""
     form = await request.post()
-    ticker = form.get("ticker", "").strip().upper()
+    ticker_raw = form.get("ticker", "").strip()
+    tickers = [t.strip().upper() for t in ticker_raw.replace(";", ",").split(",") if t.strip()]
     period = form.get("period", "1day")
     strategy_key = form.get("strategy", "")
     start_raw = form.get("start", "")
@@ -459,8 +587,11 @@ async def backtest_run(request: web.Request) -> web.Response:
         return web.json_response({"error": "Некорректный капитал или комиссия"}, status=400)
 
     errors = []
-    if not ticker:
+    if not tickers:
         errors.append("Укажите тикер (например SBER, LKOH).")
+    if strategy_key == "roe_portfolio":
+        if len(tickers) < 1:
+            errors.append("Укажите тикеры для портфельной стратегии.")
     if period not in data.PERIODS:
         errors.append("Неизвестный таймфрейм.")
     if strategy_key not in STRATEGIES:
@@ -476,7 +607,7 @@ async def backtest_run(request: web.Request) -> web.Response:
         return web.json_response({"error": "Дата начала должна быть раньше даты окончания."}, status=400)
 
     params = _parse_params(strategy_key, form)
-    run_id = storage.create_run(ticker, period, strategy_key, params, start.isoformat(), end.isoformat())
+    run_id = storage.create_run(",".join(tickers), period, strategy_key, params, start.isoformat(), end.isoformat())
 
     _prune_bt_jobs()
     job_id = secrets.token_hex(8)
@@ -488,7 +619,7 @@ async def backtest_run(request: web.Request) -> web.Response:
         "created": time.monotonic(),
     }
     asyncio.get_running_loop().create_task(
-        _run_backtest_job(job_id, run_id, ticker, period, strategy_key, params, cash, commission, start, end)
+        _run_backtest_job(job_id, run_id, tickers, period, strategy_key, params, cash, commission, start, end)
     )
     return web.json_response({"job_id": job_id})
 
@@ -496,7 +627,7 @@ async def backtest_run(request: web.Request) -> web.Response:
 async def _run_backtest_job(
     job_id: str,
     run_id: int,
-    ticker: str,
+    tickers: list[str],
     period: str,
     strategy_key: str,
     params: dict,
@@ -512,19 +643,58 @@ async def _run_backtest_job(
         job["percent"] = pct
 
     try:
-        df = await loop.run_in_executor(None, data.fetch_history, ticker, period, start, end, True, set_progress)
-        job["percent"] = 90
-        result = await loop.run_in_executor(
-            None, run_backtest, df, STRATEGIES[strategy_key]["cls"], params, cash, commission
-        )
+        if strategy_key == "roe_portfolio":
+            result = await _run_roe_portfolio(
+                loop, tickers, period, params, cash, commission, start, end, set_progress
+            )
+        else:
+            df = await loop.run_in_executor(
+                None, data.fetch_history, tickers[0], period, start, end, True, set_progress
+            )
+            job["percent"] = 90
+            result = await loop.run_in_executor(
+                None, run_backtest, df, STRATEGIES[strategy_key]["cls"], params, cash, commission
+            )
         storage.finish_run(run_id, result)
         job["percent"] = 100
         job["state"] = "done"
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Backtest %s (%s %s) failed: %s", run_id, ticker, period, exc)
+        logger.warning("Backtest %s (%s %s) failed: %s", run_id, ",".join(tickers), period, exc)
         storage.finish_run(run_id, None, str(exc))
         job["state"] = "error"
         job["error"] = str(exc)
+
+
+async def _run_roe_portfolio(loop, tickers, period, params, cash, commission, start, end, set_progress) -> dict:
+    """Общий ход портфельного ROE-бэктеста: свечи каждого тикера + его отчётность + дивиденды."""
+    data_map: dict[str, object] = {}
+    fundamentals_map: dict[str, object] = {}
+    dividends_map: dict[str, object] = {}
+    total = len(tickers)
+    for i, ticker in enumerate(tickers, start=1):
+        set_progress(int(10 + i * 60 / total))
+        df = await loop.run_in_executor(None, data.fetch_history, ticker, period, start, end, True)
+        data_map[ticker] = df
+        fund_df = await loop.run_in_executor(
+            None, fundamentals.prepare_fundamentals_series, ticker, start, end
+        )
+        if fund_df is not None and not fund_df.empty:
+            fundamentals_map[ticker] = fund_df
+        div_df = await loop.run_in_executor(None, storage.load_dividends, ticker, start, end)
+        if div_df is not None and not div_df.empty:
+            dividends_map[ticker] = div_df
+    set_progress(80)
+    return await loop.run_in_executor(
+        None,
+        run_portfolio_backtest,
+        data_map,
+        STRATEGIES["roe_portfolio"]["cls"],
+        params,
+        fundamentals_map,
+        cash,
+        commission,
+        dividends_map,
+    )
 
 
 async def backtest_status(request: web.Request) -> web.Response:
@@ -645,6 +815,11 @@ def create_app() -> web.Application:
     app.router.add_get("/watchlist", watchlist_page)
     app.router.add_post("/watchlist/add", watchlist_add)
     app.router.add_post("/watchlist/remove", watchlist_remove)
+    app.router.add_get("/fundamentals", fundamentals_page)
+    app.router.add_post("/fundamentals/upload", fundamentals_upload)
+    app.router.add_post("/fundamentals/delete", fundamentals_delete)
+    app.router.add_get("/screener", screener_page)
+    app.router.add_post("/screener", screener_page)
     app.router.add_get("/settings", settings_page)
     app.router.add_post("/settings", settings_save)
     app.router.add_get("/", index)

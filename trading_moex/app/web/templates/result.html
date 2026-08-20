@@ -37,6 +37,10 @@
       <div class="value" style="font-size:15px">{{ result.longest_win_streak }} / {{ result.longest_loss_streak }}</div></div>
     <div class="metric"><div class="label">Баров</div>
       <div class="value">{{ result.n_bars }}</div></div>
+    {% if result.dividends_income %}
+    <div class="metric"><div class="label">Дивиденды</div>
+      <div class="value pos">{{ '%.0f' % result.dividends_income }} ₽</div></div>
+    {% endif %}
   </div>
 </div>
 

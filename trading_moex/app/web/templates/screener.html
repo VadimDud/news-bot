@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Скринер ROE + P/B — MOEX Trader{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Скринер «высокий ROE + цена дешевле капитала»</h2>
+  <p class="hint">
+    Отбираются бумаги со средним ROE за {{ years }} лет ≥ {{ min_avg_roe }}%,
+    годовым ROE ≥ {{ min_single_roe }}% и ценой ниже {{ pb_entry }}× стоимости
+    капитала (P/B &lt; {{ pb_entry }}). Источник цены — MOEX ISS (бесплатно).
+  </p>
+  <form method="post" action="/screener">
+    <div class="grid">
+      <div>
+        <label for="min_avg_roe">Мин. средний ROE, %</label>
+        <input type="number" id="min_avg_roe" name="min_avg_roe" value="{{ min_avg_roe }}" step="any">
+      </div>
+      <div>
+        <label for="min_single_roe">Мин. годовой ROE, %</label>
+        <input type="number" id="min_single_roe" name="min_single_roe" value="{{ min_single_roe }}" step="any">
+      </div>
+      <div>
+        <label for="pb_entry">Макс. P/B (цена ≤ … × BVPS)</label>
+        <input type="number" id="pb_entry" name="pb_entry" value="{{ pb_entry }}" step="0.05" min="0">
+      </div>
+      <div>
+        <label for="years">Годы усреднения</label>
+        <input type="number" id="years" name="years" value="{{ years }}" min="3" max="20">
+      </div>
+    </div>
+    <div class="grid">
+      <div>
+        <label><input type="checkbox" name="scan" value="1" {% if scan %}checked{% endif %}>
+          Авто-скан: только высококапитализационные (MOEX ISS)</label>
+        <input type="number" id="min_market_cap" name="min_market_cap" value="{{ '%.0f' % min_market_cap }}" step="1000000000">
+        <div class="hint">Мин. капитализация, ₽ (по умолчанию 10 млрд)</div>
+      </div>
+      <div>
+        <label for="min_volume_rub">Мин. оборот дня, ₽</label>
+        <input type="number" id="min_volume_rub" name="min_volume_rub" value="{{ '%.0f' % min_volume_rub }}" step="1000000">
+      </div>
+    </div>
+    <button type="submit">Отобрать</button>
+  </form>
+</div>
+
+{% if candidates %}
+<div class="card">
+  <h2>Результаты</h2>
+  <table>
+    <thead>
+      <tr>
+        <th></th><th>Тикер</th><th>Название</th><th>Сред. ROE, %</th>
+        <th>Мин. ROE, %</th><th>Посл. ROE, %</th><th>BVPS, ₽</th>
+        <th>Цена, ₽</th><th>P/B</th><th>Отчётность</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in candidates %}
+      <tr style="{{ 'background:rgba(62,207,142,.08)' if c.candidate else '' }}">
+        <td>
+          {% if c.candidate %}
+          <input type="checkbox" class="pick" value="{{ c.ticker }}" checked>
+          {% endif %}
+        </td>
+        <td><b>{{ c.ticker }}</b></td>
+        <td>{{ c.name or '—' }}</td>
+        {% if c.error %}
+        <td colspan="8" class="hint">{{ c.error }}</td>
+        {% else %}
+        <td>{{ '%.2f' % c.avg_roe if c.avg_roe is not none else '—' }}</td>
+        <td>{{ '%.2f' % c.min_roe if c.min_roe is not none else '—' }}</td>
+        <td>{{ '%.2f' % c.roe_latest if c.roe_latest is not none else '—' }}</td>
+        <td>{{ '%.2f' % c.bvps if c.bvps is not none else '—' }}</td>
+        <td>{{ '%.2f' % c.price if c.price is not none else '—' }}</td>
+        <td>{{ '%.3f' % c.pb if c.pb is not none else '—' }}</td>
+        <td class="hint">{{ c.report_count }} стр., {{ (c.report_from or '?')[:10] }}…{{ (c.report_to or '?')[:10] }}</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Портфельный бэктест отобранных</h2>
+  <p class="hint">Отмеченные галочками тикеры проверяются как портфель равных долей (стратегия ROE + P/B).</p>
+  <form method="post" action="/backtest/run" id="sq-form" enctype="multipart/form-data">
+    <div class="grid">
+      <div>
+        <label for="tickers">Тикеры (заполняется из отмеченных)</label>
+        <input type="text" id="tickers" name="ticker" value="{{ candidate_tickers }}" readonly>
+      </div>
+      <div>
+        <label for="period">Таймфрейм</label>
+        <select id="period" name="period">
+          {% for key in periods %}
+          <option value="{{ key }}" {{ 'selected' if key == '1day' }}>{{ key }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="cash">Капитал, ₽</label>
+        <input type="number" id="cash" name="cash" value="1000000" min="1" step="any">
+      </div>
+    </div>
+    <input type="hidden" name="strategy" value="roe_portfolio">
+    <input type="hidden" name="min_avg_roe" value="{{ min_avg_roe }}">
+    <input type="hidden" name="min_single_roe" value="{{ min_single_roe }}">
+    <input type="hidden" name="pb_entry" value="{{ pb_entry }}">
+    <input type="hidden" name="pb_exit" value="1.5">
+    <input type="hidden" name="roe_exit" value="{{ min_single_roe }}">
+    <input type="hidden" name="max_positions" value="10">
+    <input type="hidden" name="rebalance_days" value="5">
+    <button type="submit" id="sq-btn">Запустить портфельный бэктест</button>
+  </form>
+  <div id="sq-progress" style="display:none">
+    <div class="progress-track"><div class="progress-bar" id="sq-progress-bar"></div></div>
+    <p class="hint" id="sq-progress-text"></p>
+  </div>
+</div>
+
+<script>
+const qsForm = document.getElementById("sq-form");
+const qsBtn = document.getElementById("sq-btn");
+const qsProgress = document.getElementById("sq-progress");
+const qsBar = document.getElementById("sq-progress-bar");
+const qsText = document.getElementById("sq-progress-text");
+
+document.querySelectorAll(".pick").forEach(cb => {
+  cb.addEventListener("change", () => {
+    const picked = Array.from(document.querySelectorAll(".pick:checked")).map(c => c.value);
+    document.getElementById("tickers").value = picked.join(",");
+  });
+});
+
+qsForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const picked = Array.from(document.querySelectorAll(".pick:checked")).map(c => c.value);
+  if (!picked.length) { alert("Отметьте хотя бы один тикер"); return; }
+  document.getElementById("tickers").value = picked.join(",");
+  qsBtn.disabled = true;
+  qsProgress.style.display = "block";
+  qsBar.style.width = "0%";
+  qsText.textContent = "Запуск…";
+
+  let jobId = null;
+  try {
+    const resp = await fetch("/backtest/run", { method: "POST", body: new FormData(qsForm) });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { qsText.textContent = "Ошибка: " + (data.error || "запуск не удался"); qsBtn.disabled = false; return; }
+    jobId = data.job_id;
+  } catch (err) { qsText.textContent = "Ошибка запуска: " + err; qsBtn.disabled = false; return; }
+
+  const poll = async () => {
+    let data;
+    try {
+      const resp = await fetch(`/backtest/status?job_id=${encodeURIComponent(jobId)}`);
+      data = await resp.json();
+    } catch { window.setTimeout(poll, 500); return; }
+    if (data.state === "error") {
+      qsText.textContent = "Ошибка: " + (data.error || "неизвестная");
+      qsBtn.disabled = false;
+      return;
+    }
+    qsBar.style.width = (data.percent || 0) + "%";
+    qsText.textContent = `Скачивание данных и расчёт… ${data.percent || 0}%`;
+    if (data.state === "done") {
+      window.location.href = `/backtest/result?job_id=${encodeURIComponent(jobId)}`;
+      return;
+    }
+    window.setTimeout(poll, 500);
+  };
+  poll();
+});
+</script>
+{% else %}
+<div class="empty">Запустите отбор — результаты появятся здесь.</div>
+{% endif %}
+{% endblock %}

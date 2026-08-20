@@ -10,14 +10,37 @@ logger = logging.getLogger("moex_trader.backtest")
 
 
 class _EquityCurve(bt.Analyzer):
-    """Записывает стоимость портфеля на каждом баре для построения кривой капитала."""
+    """Записывает стоимость портфеля и вложенный в позиции капитал на каждом баре.
+
+    ``curve``: [[ts, total_value], ...]; ``invested_curve``: [[ts, positions_value], ...].
+    """
 
     def start(self):
         self.curve = []
+        self.invested_curve = []
 
     def next(self):
         ts = self.strategy.data.datetime.datetime(0).isoformat()
         self.curve.append([ts, round(float(self.strategy.broker.getvalue()), 2)])
+        invested = 0.0
+        for d in self.strategy.datas:
+            pos = self.strategy.getposition(d)
+            if pos.size:
+                invested += float(pos.size) * float(d.close[0])
+        self.invested_curve.append([ts, round(invested, 2)])
+
+
+def _setup_cerebro(strategy_cls, params, cash: float, commission: float, extra_params: dict | None = None) -> bt.Cerebro:
+    cerebro = bt.Cerebro()
+    feed_params = {**params, **(extra_params or {})}
+    cerebro.addstrategy(strategy_cls, **feed_params)
+    cerebro.broker.setcash(cash)
+    cerebro.broker.setcommission(commission=commission)
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days)
+    cerebro.addanalyzer(btanalyzers.DrawDown, _name="drawdown")
+    cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(_EquityCurve, _name="equity")
+    return cerebro
 
 
 def run_backtest(
@@ -31,18 +54,48 @@ def run_backtest(
 
     Блокирующий вызов — запускать в отдельном потоке.
     """
-    cerebro = bt.Cerebro()
-    cerebro.addstrategy(strategy_cls, **params)
+    cerebro = _setup_cerebro(strategy_cls, params, cash, commission)
     cerebro.adddata(bt.feeds.PandasData(dataname=df))
-    cerebro.broker.setcash(cash)
-    cerebro.broker.setcommission(commission=commission)
-    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days)
-    cerebro.addanalyzer(btanalyzers.DrawDown, _name="drawdown")
-    cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
-    cerebro.addanalyzer(_EquityCurve, _name="equity")
-
     strat = cerebro.run(runonce=False)[0]
+    return _collect_metrics(cerebro, strat, cash, len(df))
 
+
+def run_portfolio_backtest(
+    data_map: dict[str, pd.DataFrame],
+    strategy_cls,
+    params: dict,
+    fundamentals: dict[str, pd.DataFrame] | None = None,
+    cash: float = 100_000.0,
+    commission: float = 0.0005,
+    dividends: dict[str, pd.DataFrame] | None = None,
+) -> dict:
+    """Портфельный бэктест на нескольких тикерах (по одному data-фиду на тикер).
+
+    ``data_map``: {ticker: OHLCV DataFrame с datetime-индексом};
+    ``fundamentals``: {ticker: DataFrame(date, roe, book_value_per_share, ...)}
+    передаётся в стратегию параметром ``fundamentals`` (для ROE-портфеля);
+    ``dividends``: {ticker: DataFrame(date, dividend)} — дивиденды на отсечке,
+    начисляются стратегией за открытые позиции.
+    Блокирующий вызов — запускать в отдельном потоке.
+    """
+    extra = {}
+    if fundamentals is not None:
+        extra["fundamentals"] = fundamentals
+    if dividends is not None:
+        extra["dividends"] = dividends
+    cerebro = _setup_cerebro(strategy_cls, params, cash, commission, extra_params=extra or None)
+    n_bars = 0
+    for ticker, df in data_map.items():
+        feed = bt.feeds.PandasData(dataname=df)
+        feed._name = ticker
+        cerebro.adddata(feed)
+        n_bars = max(n_bars, len(df))
+    strat = cerebro.run(runonce=False)[0]
+    return _collect_metrics(cerebro, strat, cash, n_bars)
+
+
+def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
+    """Общие анализеры и метрики результата бэктеста."""
     initial = float(cash)
     final = float(strat.broker.getvalue())
     total_return = (final / initial - 1) * 100 if initial else 0.0
@@ -67,8 +120,9 @@ def run_backtest(
     longest_win_streak = int((ta.get("streak") or {}).get("longest", {}).get("won", 0))
     longest_loss_streak = int((ta.get("streak") or {}).get("longest", {}).get("lost", 0))
 
-    equity = strat.analyzers.equity.curve or [[str(df.index[0]), round(initial, 2)]]
+    equity = strat.analyzers.equity.curve or [[str(strat.data.datetime.datetime(0).isoformat()), round(initial, 2)]]
     trades = getattr(strat, "recorded_trades", [])[-100:]
+    dividends_income = getattr(strat, "_dividends_income", 0.0)
 
     return {
         "initial_cash": initial,
@@ -86,9 +140,11 @@ def run_backtest(
         "expectancy": round(expectancy, 2),
         "longest_win_streak": longest_win_streak,
         "longest_loss_streak": longest_loss_streak,
-        "n_bars": int(len(df)),
+        "n_bars": int(n_bars),
         "equity_curve": equity,
+        "invested_curve": getattr(strat.analyzers.equity, "invested_curve", []),
         "trades": trades,
+        "dividends_income": round(dividends_income, 2),
     }
 
 

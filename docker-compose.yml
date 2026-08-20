@@ -16,6 +16,11 @@ services:
       TINKOFF_API_TOKEN: "${TINKOFF_API_TOKEN:-}"
       MOEX_LOGIN: "${MOEX_LOGIN:-}"
       MOEX_PASSWORD: "${MOEX_PASSWORD:-}"
+      # Переопределяем HTTP_PROXY из .env: контейнер в bridge-сети, адрес
+      # 127.0.0.1:31533 там недоступен, а MOEX/ЦБ блокировками не затронуты.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
     ports:
       - "8081:8081"
     volumes:

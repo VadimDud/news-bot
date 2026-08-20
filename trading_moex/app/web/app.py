@@ -22,7 +22,7 @@ from .. import config, data, fundamentals, settings, storage
 from ..backtest import run_backtest, run_portfolio_backtest
 from ..catalog import AVAILABLE_TICKERS
 from ..fundamentals_screener import screen_catalog, scan_moex_candidates
-from ..live import live_trader
+from ..live import LIVE_STRATEGIES, live_trader
 from ..strategies import STRATEGIES, strategy_defaults
 
 logging.basicConfig(
@@ -742,7 +742,7 @@ async def live_page(request: web.Request) -> web.Response:
         request,
         {
             "status": live_trader.snapshot(),
-            "strategies": STRATEGIES,
+            "strategies": {k: v for k, v in STRATEGIES.items() if k in LIVE_STRATEGIES},
             "has_token": bool(settings.tinkoff_token()),
             "live_intervals": TICKER_INTERVAL_LABELS,
         },
@@ -777,8 +777,8 @@ async def live_strategy(request: web.Request) -> web.Response:
     try:
         live_trader.set_strategy(key)
         msg = f"Стратегия: {STRATEGIES[key]['name']}"
-    except (ValueError, KeyError):
-        msg = "Неизвестная стратегия"
+    except (ValueError, KeyError) as exc:
+        msg = f"Неизвестная стратегия ({exc})"
     return web.Response(text=f"<span class='chip'>{msg}</span>", content_type="text/html")
 
 

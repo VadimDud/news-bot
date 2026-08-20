@@ -33,6 +33,10 @@ TICKER_LIVE_INTERVALS = {
 
 _LIVE_BARS = 200
 
+# Стратегии, пригодные для live-цикла (имеют функцию сигналов в SIGNAL_FUNCS).
+# Остальные из STRATEGIES — только бэктест (портфельные/фундаментальные).
+LIVE_STRATEGIES = frozenset(sig.SIGNAL_FUNCS)
+
 # Максимальный период запроса свечей по интервалу (лимит T-Bank Invest API,
 # превышение даёт ошибку 30014). Дольше — API отклонит запрос.
 _MAX_LOOKBACK = {
@@ -151,6 +155,10 @@ class LiveTrader:
     def set_strategy(self, key: str) -> None:
         if key not in STRATEGIES:
             raise ValueError(f"Неизвестная стратегия {key!r}")
+        if key not in LIVE_STRATEGIES:
+            raise ValueError(
+                f"Стратегия {key!r} доступна только для бэктеста, live-цикл её не поддерживает"
+            )
         self.strategy = key
         self.strategy_params = {p["key"]: p["default"] for p in STRATEGIES[key]["params"]}
         self.entries.clear()
@@ -335,6 +343,11 @@ class LiveTrader:
         и R:R, применяются трендовый фильтр EMA и риск-параметры стратегии.
         """
         func = sig.SIGNAL_FUNCS.get(self.strategy)
+        if func is None:
+            raise RuntimeError(
+                f"Стратегия {self.strategy!r} не поддерживается live-циклом "
+                f"(выберите одну из: {', '.join(sorted(LIVE_STRATEGIES))})"
+            )
         trend_period = int(self.strategy_params.get("trend_period", 0) or 0)
         atr_period = int(self.strategy_params.get("atr_period", 14) or 14)
         atr_mult = float(self.strategy_params.get("atr_stop_mult", 1.5) or 1.5)

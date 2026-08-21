@@ -35,7 +35,7 @@ async def _call_deepseek(system_prompt: str, user_message: str,
         return None
     url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, proxy=None) as client:
         resp = await client.post(url, json={
             "model": config.DEEPSEEK_MODEL,
             "messages": [

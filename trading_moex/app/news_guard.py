@@ -90,7 +90,7 @@ async def _call_deepseek_severity(prompt: str) -> dict | None:
         "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, proxy=None) as client:
         resp = await client.post(url, json={
             "model": config.DEEPSEEK_MODEL,
             "messages": [

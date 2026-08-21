@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}News Guard — MOEX Trader{% endblock %}
+{% block content %}
+<h1 style="margin-bottom:16px">News Guard</h1>
+
+<div class="card">
+  <h2>Фильтр по тикеру</h2>
+  <form method="get" action="/news" style="display:flex;gap:12px;align-items:end">
+    <div style="flex:1">
+      <label for="ticker">Тикер</label>
+      <input type="text" id="ticker" name="ticker" value="{{ ticker }}"
+             placeholder="SBER, LKOH, YDEX…" list="ticker-list">
+      <datalist id="ticker-list">
+        {% for t in tickers %}<option value="{{ t }}">{% endfor %}
+      </datalist>
+    </div>
+    <button type="submit">Показать</button>
+  </form>
+</div>
+
+{% if ticker %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h2>Новости: {{ ticker }}</h2>
+    <form method="post" action="/news/refresh">
+      <input type="hidden" name="ticker" value="{{ ticker }}">
+      <button type="submit" class="secondary">Обновить AI</button>
+    </form>
+  </div>
+
+  {% if not news_items %}
+    <div class="empty">Нет новостей по {{ ticker }} за последние 48ч.</div>
+  {% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Дата</th>
+        <th>Заголовок</th>
+        <th>Impact</th>
+        <th>Severity</th>
+        <th>Override</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for item in news_items %}
+      {% set severity = item.severity if item.severity is not none else 0 %}
+      {% set impact = (item.impact or 'NEUTRAL') | upper %}
+      {% set override_action = '' %}
+      {% for o in overrides %}
+        {% if o.content_hash == item.content_hash %}
+          {% set override_action = o.action %}
+        {% endif %}
+      {% endfor %}
+      <tr style="opacity:{{ '0.5' if override_action == 'ignore' else '1' }}">
+        <td style="white-space:nowrap;font-size:12px;color:var(--muted)">
+          {{ item.created_at[:10] if item.created_at else '—' }}
+        </td>
+        <td>
+          <strong>{{ item.title or '(нет заголовка)' }}</strong>
+          {% if item.reason %}
+            <div style="font-size:12px;color:var(--muted);margin-top:2px">{{ item.reason }}</div>
+          {% endif %}
+          {% if item.summary %}
+            <div style="font-size:12px;color:var(--muted);margin-top:2px">{{ item.summary[:120] }}{% if item.summary|length > 120 %}…{% endif %}</div>
+          {% endif %}
+        </td>
+        <td>
+          {% if impact == 'POSITIVE' %}
+            <span class="chip ok">POSITIVE</span>
+          {% elif impact == 'NEGATIVE' %}
+            <span class="chip danger">NEGATIVE</span>
+          {% else %}
+            <span class="chip">NEUTRAL</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if severity < -0.5 %}
+            <span class="chip danger">{{ "%.2f"|format(severity) }}</span>
+          {% elif severity < 0 %}
+            <span class="chip warn">{{ "%.2f"|format(severity) }}</span>
+          {% elif severity > 0.3 %}
+            <span class="chip ok">{{ "%.2f"|format(severity) }}</span>
+          {% else %}
+            <span class="chip">{{ "%.2f"|format(severity) }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if override_action == 'block' %}
+            <span class="chip danger">ЗАБЛОКИРОВАНО</span>
+          {% elif override_action == 'ignore' %}
+            <span class="chip">ИГНОРИРУЕТСЯ</span>
+          {% else %}
+            <span style="color:var(--muted);font-size:12px">—</span>
+          {% endif %}
+        </td>
+        <td style="white-space:nowrap">
+          {% if override_action != 'block' %}
+          <form method="post" action="/news/override" style="display:inline">
+            <input type="hidden" name="ticker" value="{{ ticker }}">
+            <input type="hidden" name="content_hash" value="{{ item.content_hash }}">
+            <input type="hidden" name="action" value="block">
+            <button type="submit" class="secondary" style="padding:4px 8px;font-size:12px;margin:0">Заблокировать</button>
+          </form>
+          {% endif %}
+          {% if override_action %}
+          <form method="post" action="/news/override" style="display:inline">
+            <input type="hidden" name="ticker" value="{{ ticker }}">
+            <input type="hidden" name="content_hash" value="{{ item.content_hash }}">
+            <input type="hidden" name="action" value="none">
+            <button type="submit" class="secondary" style="padding:4px 8px;font-size:12px;margin:0">Сбросить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -38,3 +38,13 @@ WEB_PORT = int(os.environ.get("TRADER_WEB_PORT", "8081"))
 WEB_PASSWORD = os.environ.get("TRADER_WEB_PASSWORD", "")
 COOKIE_NAME = "moex_trader"
 COOKIE_MAX_AGE = 30 * 24 * 3600
+
+# News Guard: AI-powered news severity scoring + user overrides
+# Path to bot.db (Telegram bot's database with news/sentiment data).
+# Empty = feature disabled (no bot.db access from this container).
+BOT_DB_PATH: str = os.environ.get("BOT_DB_PATH", "")
+NEWS_AI_ENABLED: bool = os.environ.get("NEWS_AI_ENABLED", "true").lower() in ("1", "true")
+# DeepSeek API for news severity scoring (same keys as bot)
+DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL: str = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")

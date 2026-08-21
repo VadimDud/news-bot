@@ -47,6 +47,7 @@ async def _call_deepseek(system_prompt: str, user_message: str,
         }, headers=headers)
         if resp.status_code == 200:
             return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        logger.warning("DeepSeek API error %d: %s", resp.status_code, resp.text[:200])
     return None
 
 
@@ -68,6 +69,7 @@ async def _call_gemini(system_prompt: str, user_message: str,
         if resp.status_code == 200:
             parts = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
             return parts[0].get("text", "") if parts else None
+        logger.warning("Gemini API error %d: %s", resp.status_code, resp.text[:200])
     return None
 
 
@@ -99,6 +101,7 @@ async def _call_dashscope(system_prompt: str, user_message: str,
             choices = resp.json().get("output", {}).get("choices", [])
             if choices:
                 return choices[0].get("message", {}).get("content", "")
+        logger.warning("DashScope API error %d: %s", resp.status_code, resp.text[:200])
     return None
 
 

@@ -24,6 +24,7 @@ from ..catalog import AVAILABLE_TICKERS
 from ..conomy import ConomyError, build_fundamentals
 from ..fundamentals_screener import screen_catalog, scan_moex_candidates
 from ..live import LIVE_STRATEGIES, live_trader
+from ..news_guard import NewsGuard
 from ..strategies import STRATEGIES, strategy_defaults
 
 logging.basicConfig(
@@ -729,6 +730,55 @@ TICKER_INTERVAL_LABELS = {
 }
 
 
+# ── News Guard: веб-интерфейс ───────────────────────────────────────────────
+
+async def news_page(request: web.Request) -> web.Response:
+    """Список новостей с AI-оценкой и ручными override для тикера."""
+    ticker = (request.query.get("ticker") or "").strip().upper()
+    tickers = storage.list_watchlist()
+    news_items = []
+    guard = None
+    if ticker:
+        guard = NewsGuard()
+        news_items = storage.get_cached_sentiments(ticker, since_iso=None)[:50]
+        # Загружаем свежие новости из bot.db, если кэш пуст
+        if not news_items and config.BOT_DB_PATH:
+            news_items = guard.analyze_and_cache(ticker)[:50]
+    return aiohttp_jinja2.render_template(
+        "news.html",
+        request,
+        {
+            "ticker": ticker,
+            "tickers": tickers,
+            "news_items": news_items,
+            "overrides": storage.get_user_overrides(ticker) if ticker else [],
+        },
+    )
+
+
+async def news_override(request: web.Request) -> web.Response:
+    """Установить/сбросить пользовательский override для новости."""
+    form = await request.post()
+    ticker = form.get("ticker", "").strip().upper()
+    content_hash = form.get("content_hash", "")
+    action = form.get("action", "none")
+    reason = form.get("reason", "")
+    if ticker and content_hash:
+        storage.set_user_override(content_hash, ticker, action, reason or None)
+    raise web.HTTPFound(f"/news?ticker={ticker}")
+
+
+async def news_refresh(request: web.Request) -> web.Response:
+    """Принудительно обновить AI-оценку для тикера."""
+    form = await request.post()
+    ticker = form.get("ticker", "").strip().upper()
+    if ticker and config.BOT_DB_PATH:
+        guard = NewsGuard()
+        items = guard.analyze_and_cache(ticker)
+        logger.info("News refresh for %s: %d items scored", ticker, len(items))
+    raise web.HTTPFound(f"/news?ticker={ticker}")
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
@@ -764,5 +814,8 @@ def create_app() -> web.Application:
     app.router.add_post("/live/stop", live_stop)
     app.router.add_post("/live/strategy", live_strategy)
     app.router.add_post("/live/dryrun", live_dryrun)
+    app.router.add_get("/news", news_page)
+    app.router.add_post("/news/override", news_override)
+    app.router.add_post("/news/refresh", news_refresh)
     app.router.add_static("/static", Path(__file__).resolve().parent / "static")
     return app

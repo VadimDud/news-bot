@@ -9,6 +9,7 @@ import pandas as pd
 
 from . import risk as risk_module
 from . import signals as sig
+from .news_guard import NewsGuard
 
 
 class TradeRecordingStrategy(bt.Strategy):
@@ -922,6 +923,8 @@ _ROE_PORTFOLIO_PARAMS_TUPLE = (
     ("w_stability", 0.5),      # вес фактора «стабильность ROE» (min_roe / avg_roe)
     ("min_score", 0.4),        # мин. composite score (0-1) для входа в scoring-режиме
     ("momentum_months", 6),    # период моментума (месяцев) в scoring-режиме
+    # News Guard: блокировка входа при негативных новостях (0 = выкл, 1 = вкл)
+    ("news_guard", 0),
 )
 
 
@@ -962,6 +965,24 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         self._div_paid: set[tuple[str, object]] = set()
         self._entry_dates: dict[str, object] = {}
         self._partial_sold: set[str] = set()
+        # News Guard: lazy-init экземпляра (создаётся только при news_guard=1)
+        self._news_guard_instance: NewsGuard | None = None
+        self._news_blocked_log: list[str] = []
+
+    def _get_news_guard(self) -> NewsGuard:
+        if self._news_guard_instance is None:
+            self._news_guard_instance = NewsGuard()
+        return self._news_guard_instance
+
+    def _is_news_blocked(self, ticker: str, dt) -> bool:
+        """Проверка блокировки входа из-за негативных новостей."""
+        if not int(getattr(self.p, "news_guard", 0)):
+            return False
+        guard = self._get_news_guard()
+        blocked, reason = guard.is_blocked(ticker, dt)
+        if blocked:
+            self._news_blocked_log.append(f"{dt.date()} {ticker}: {reason}")
+        return blocked
 
     def _index_dividends(self, df):
         """Дивиденды в {timestamp(отсечки): (dividend_руб, buy_before_ts)}.
@@ -1222,6 +1243,8 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     break
                 if score < float(self.p.min_score):
                     break  # отсортировано по убыванию — дальше только хуже
+                if self._is_news_blocked(ticker, dt):
+                    continue  # негативные новости — пропускаем тикер
                 price = float(d.close[0])
                 if price <= 0:
                     continue
@@ -1254,6 +1277,8 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
             price = float(d.close[0])
             if avg_roe is None or roe is None or bvps is None or price <= 0:
                 continue
+            if self._is_news_blocked(ticker, dt):
+                continue  # негативные новости — пропускаем тикер
             if avg_roe >= float(self.p.min_avg_roe) and roe >= float(self.p.min_single_roe) and price <= float(self.p.pb_entry) * bvps:
                 size = int(float(self.broker.getvalue()) * target_weight / price)
                 if size <= 0:
@@ -1388,6 +1413,7 @@ STRATEGIES = {
             {"key": "w_stability", "label": "Скоринг: вес стабильности ROE", "type": "float", "default": 0.5},
             {"key": "min_score", "label": "Скоринг: мин. composite score для входа", "type": "float", "default": 0.4},
             {"key": "momentum_months", "label": "Скоринг: период моментума, мес", "type": "int", "default": 6},
+            {"key": "news_guard", "label": "News Guard: блокировка входа при негативных новостях (1 = вкл)", "type": "int", "default": 0},
         ],
     },
 }

@@ -116,6 +116,41 @@ def init_db() -> None:
         except sqlite3.Error:  # pragma: no cover — таблица может быть недоступна
             pass
 
+        # ── News Guard: AI severity cache + user overrides ──────────────────
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_sentiment_cache (
+                content_hash TEXT NOT NULL,
+                ticker       TEXT NOT NULL,
+                title        TEXT,
+                summary      TEXT,
+                impact       TEXT,
+                severity     REAL,
+                reason       TEXT,
+                source       TEXT,
+                created_at   TEXT,
+                cached_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (content_hash, ticker)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS news_user_overrides (
+                content_hash TEXT NOT NULL,
+                ticker       TEXT NOT NULL,
+                action       TEXT NOT NULL,
+                reason       TEXT,
+                created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (content_hash, ticker)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nsc_ticker_dt "
+            "ON news_sentiment_cache(ticker, created_at DESC)"
+        )
+
 
 def create_run(ticker: str, period: str, strategy: str, params: dict, start_date: str, end_date: str) -> int:
     with _connect() as conn:
@@ -457,3 +492,85 @@ def load_dividends(ticker: str, start: date | None = None, end: date | None = No
         return pd.DataFrame(columns=["date", "buy_before", "period", "dividend"])
     df = pd.DataFrame([dict(r) for r in rows])
     return df.rename(columns={"cutoff_date": "date", "dividend_per_share": "dividend"})
+
+
+# ── News Guard: sentiment cache + user overrides ─────────────────────────────
+
+def cache_news_sentiment(
+    content_hash: str, ticker: str, title: str, summary: str,
+    impact: str, severity: float | None, reason: str | None,
+    source: str | None, created_at: str | None,
+) -> None:
+    """Сохранить AI-оценку новости в кэш (upsert)."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO news_sentiment_cache"
+            " (content_hash, ticker, title, summary, impact, severity, reason, source, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (content_hash, ticker, title, summary, impact, severity, reason, source, created_at),
+        )
+
+
+def get_cached_sentiments(ticker: str, since_iso: str | None = None) -> list[dict]:
+    """Все кэшированные sentiment для тикера после since_iso."""
+    query = "SELECT * FROM news_sentiment_cache WHERE ticker = ?"
+    params: list = [ticker]
+    if since_iso:
+        query += " AND created_at >= ?"
+        params.append(since_iso)
+    query += " ORDER BY created_at DESC"
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_pending_severity(ticker: str, since_iso: str | None = None) -> list[dict]:
+    """Новости без AI-оценки (severity IS NULL) для тикера."""
+    query = "SELECT * FROM news_sentiment_cache WHERE ticker = ? AND severity IS NULL"
+    params: list = [ticker]
+    if since_iso:
+        query += " AND created_at >= ?"
+        params.append(since_iso)
+    query += " ORDER BY created_at DESC"
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_user_override(content_hash: str, ticker: str, action: str, reason: str | None = None) -> None:
+    """Установить решение пользователя: 'block', 'ignore' или 'none' (сброс)."""
+    with _connect() as conn:
+        if action == "none":
+            conn.execute(
+                "DELETE FROM news_user_overrides WHERE content_hash = ? AND ticker = ?",
+                (content_hash, ticker),
+            )
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO news_user_overrides"
+                " (content_hash, ticker, action, reason) VALUES (?, ?, ?, ?)",
+                (content_hash, ticker, action, reason),
+            )
+
+
+def get_user_overrides(ticker: str | None = None) -> list[dict]:
+    """Все пользовательские решения (опционально по тикеру)."""
+    if ticker:
+        query = "SELECT * FROM news_user_overrides WHERE ticker = ? ORDER BY created_at DESC"
+        params: list = [ticker]
+    else:
+        query = "SELECT * FROM news_user_overrides ORDER BY created_at DESC"
+        params = []
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_user_override(content_hash: str, ticker: str) -> dict | None:
+    """Решение пользователя для конкретной новости."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM news_user_overrides WHERE content_hash = ? AND ticker = ?",
+            (content_hash, ticker),
+        ).fetchone()
+    return dict(row) if row else None

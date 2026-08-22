@@ -52,6 +52,38 @@ async def _call_deepseek(system_prompt: str, user_message: str,
 
 
 @async_retry(max_retries=2, base_delay=1.0)
+async def _call_lmstudio(system_prompt: str, user_message: str,
+                         temperature: float = 0.2, max_tokens: int = 4096,
+                         timeout: int = 30) -> str | None:
+    """Local model served by LM Studio (OpenAI-compatible API on LAN PC).
+
+    Connection errors are swallowed (return None) so a switched-off PC
+    degrades gracefully to the next provider instead of raising.
+    """
+    if not config.LMSTUDIO_BASE_URL:
+        return None
+    url = f"{config.LMSTUDIO_BASE_URL.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {config.LMSTUDIO_API_KEY}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, proxy=None) as client:
+            resp = await client.post(url, json={
+                "model": config.LMSTUDIO_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }, headers=headers)
+            if resp.status_code == 200:
+                return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.warning("LM Studio API error %d: %s", resp.status_code, resp.text[:200])
+    except httpx.HTTPError as e:
+        logger.warning("LM Studio unreachable: %s", e)
+    return None
+
+
+@async_retry(max_retries=2, base_delay=1.0)
 async def _call_gemini(system_prompt: str, user_message: str,
                        temperature: float = 0.2, max_tokens: int = 4096,
                        timeout: int = 30) -> str | None:
@@ -106,6 +138,7 @@ async def _call_dashscope(system_prompt: str, user_message: str,
 
 
 _AVAILABLE_PROVIDERS: dict[str, Callable] = {
+    "lmstudio": _call_lmstudio,
     "deepseek": _call_deepseek,
     "gemini": _call_gemini,
     "dashscope": _call_dashscope,

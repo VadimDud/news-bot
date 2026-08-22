@@ -23,6 +23,11 @@ DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
+# Local model via LM Studio on LAN PC (OpenAI-compatible)
+LMSTUDIO_API_KEY: str = os.getenv("LMSTUDIO_API_KEY", "lm-studio")
+LMSTUDIO_BASE_URL: str = os.getenv("LMSTUDIO_BASE_URL", "")
+LMSTUDIO_MODEL: str = os.getenv("LMSTUDIO_MODEL", "local-model")
+
 # Gemini API for financial analysis (fallback)
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")

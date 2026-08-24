@@ -448,9 +448,7 @@ async def run_daily_scan() -> list[dict]:
         pb_entry=cfg.TRADER_ROE_PB_ENTRY,
         pb_exit=cfg.TRADER_ROE_PB_EXIT,
         roe_exit=cfg.TRADER_ROE_ROE_EXIT,
-        # Прибыльный вариант бэктеста на SBER 2020–2026: scoring s=0.5/rebal=21д
-        # дал +80.5% (DD 9%, PF 5.77) против +68.4%/PF 1.43 у rebal=2.
-        rebalance_days=21,
+        rebalance_days=cfg.TRADER_ROE_REBALANCE_DAYS,
         min_score=cfg.TRADER_ROE_MIN_SCORE,
         w_roe=cfg.TRADER_ROE_W_ROE,
         w_pb=cfg.TRADER_ROE_W_PB,

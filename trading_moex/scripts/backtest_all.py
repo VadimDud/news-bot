@@ -66,7 +66,7 @@ def base_params(**overrides) -> dict:
         pb_exit=cfg.TRADER_ROE_PB_EXIT,
         roe_exit=cfg.TRADER_ROE_ROE_EXIT,
         max_positions=4,
-        rebalance_days=21,
+        rebalance_days=cfg.TRADER_ROE_REBALANCE_DAYS,
         cash_yield=cfg.TRADER_ROE_CASH_YIELD,
         scoring=1,
         min_score=0.5,
@@ -228,7 +228,7 @@ def main():
         return
 
     print(f"\n=== ROE+P/B BACKTEST: {len(data_map)} tickers, {days} days, {n_bars} bars ===\n")
-    print(f"Cash: {cash:.0f} | Commission: {COMMISSION*100:.2f}% | Deposit rate: {rate}% | Rebalance: 21d\n")
+    print(f"Cash: {cash:.0f} | Commission: {COMMISSION*100:.2f}% | Deposit rate: {rate}% | Rebalance: {cfg.TRADER_ROE_REBALANCE_DAYS}d\n")
 
     # ── Portfolio variants (R1–R4) ──────────────────────────────────────────
     print("--- Portfolio variants ---\n")

@@ -104,6 +104,7 @@ TRADER_ROE_PARTIAL_FRAC: float = float(os.environ.get("TRADER_ROE_PARTIAL_FRAC",
 TRADER_ROE_MAX_POSITIONS: int = int(os.environ.get("TRADER_ROE_MAX_POSITIONS", "4"))  # каждая сделка ≈ 100% / max_positions депозита
 TRADER_ROE_CASH_YIELD: float = float(os.environ.get("TRADER_ROE_CASH_YIELD", "8.0"))  # годовая доходность денежной подушки (TMON), %
 TRADER_ROE_STOP_LOSS_PCT: float = float(os.environ.get("TRADER_ROE_STOP_LOSS_PCT", "0"))  # стоп-лосс: 0=выключен, 10=10% от цены входа
+TRADER_ROE_REBALANCE_DAYS: int = int(os.environ.get("TRADER_ROE_REBALANCE_DAYS", "126"))  # ребаланс: 126=5.5мес (grid-оптимизация)
 
 # Автозагрузка дивидендов с T-Bank Invest API при скане (0=выкл, 1=вкл).
 TRADER_SIGNALS_AUTO_DIVIDENDS: bool = os.environ.get("TRADER_SIGNALS_AUTO_DIVIDENDS", "true").lower() in ("1", "true")

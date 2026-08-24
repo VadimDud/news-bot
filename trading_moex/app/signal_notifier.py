@@ -330,11 +330,24 @@ def _format_data_alert(issues_by_ticker: dict[str, list[str]]) -> str:
 
 
 async def _send_data_alert(text: str) -> bool:
-    """Отправить алерт о данных не чаще раза в сутки (дедуп в settings)."""
-    today_iso = _today().isoformat()
-    if storage.get_setting(DATA_ALERT_SETTING) == today_iso:
-        logger.info("Алерт о данных уже отправлялся сегодня — пропуск")
+    """Отправить алерт о данных с интервалом из TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS.
+
+    0 = алерты отключены; 1 = раз в сутки; N = раз в N дней.
+    Дата хранится в settings (переживает рестарты).
+    """
+    interval = trading_config.TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS
+    if interval <= 0:
         return False
+    today_iso = _today().isoformat()
+    raw = storage.get_setting(DATA_ALERT_SETTING)
+    if raw:
+        try:
+            last = date.fromisoformat(raw)
+        except ValueError:
+            last = None
+        if last is not None and (_today() - last).days < interval:
+            logger.info("Алерт о данных: интервал %d дн. — пропуск (последний %s)", interval, raw)
+            return False
     if await send_telegram_message(text):
         storage.set_setting(DATA_ALERT_SETTING, today_iso)
         return True

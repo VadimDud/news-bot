@@ -70,6 +70,8 @@ TRADER_SIGNALS_MAX_STALE_DAYS: int = int(os.environ.get("TRADER_SIGNALS_MAX_STAL
 # Отчётность старше этого возраста (дней) помечается предупреждением в алерте
 # (годовая отчётность выходит раз в год, поэтому порог щадящий).
 TRADER_SIGNALS_FUND_MAX_AGE_DAYS: int = int(os.environ.get("TRADER_SIGNALS_FUND_MAX_AGE_DAYS", "400"))
+# Интервал повтора алертов о данных (дней): 0 = алерты отключены, 1 = раз в сутки, N = раз в N дней.
+TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS: int = int(os.environ.get("TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS", "1"))
 
 # Telegram для сигналов: тот же бот, что и новостной (общий .env).
 TELEGRAM_BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")

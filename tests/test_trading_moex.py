@@ -1078,8 +1078,46 @@ async def test_backtest_job_error_and_validation(tmp_path, monkeypatch):
         assert "Ошибка бэктеста" in await resp.text()
 
         # неизвестный job
-        resp = await client.get("/backtest/status?job_id=nope")
+        resp = await client.get(f"/backtest/status?job_id=nope")
         assert resp.status == 404
     finally:
         await client.close()
+
+
+def test_index_dividends_vectorized():
+    """_index_dividends handles missing buy_before and invalid rows without crashing."""
+    from trading_moex.app.strategies import ROEPortfolioStrategy
+
+    strategy = type("_MockStrat", (), {"_index_dividends": ROEPortfolioStrategy._index_dividends})()
+
+    df = pd.DataFrame({
+        "date": ["2025-06-01", "2025-09-01", "2025-12-01"],
+        "dividend": [10.5, 0.0, 20.0],
+        "buy_before": ["2025-05-30", "2025-08-29", "2025-11-28"],
+    })
+    result = strategy._index_dividends(df)
+    assert len(result) == 3
+    assert result[pd.Timestamp("2025-06-01")] == (10.5, pd.Timestamp("2025-05-30"))
+    assert result[pd.Timestamp("2025-12-01")] == (20.0, pd.Timestamp("2025-11-28"))
+
+    # missing buy_before → (amount, None), no crash
+    df_missing = pd.DataFrame({
+        "date": ["2025-06-01"],
+        "dividend": [5.0],
+    })
+    result2 = strategy._index_dividends(df_missing)
+    assert len(result2) == 1
+    ts, (amount, bb) = next(iter(result2.items()))
+    assert amount == 5.0
+    assert bb is None
+
+    # invalid date and NaN dividend → row dropped silently
+    df_bad = pd.DataFrame({
+        "date": ["not-a-date", "2025-06-01"],
+        "dividend": [float("nan"), 3.0],
+        "buy_before": ["2025-05-30", "2025-05-30"],
+    })
+    result3 = strategy._index_dividends(df_bad)
+    assert len(result3) == 1
+
 

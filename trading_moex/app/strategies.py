@@ -985,18 +985,26 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         return blocked
 
     def _index_dividends(self, df):
-        """Дивиденды в {timestamp(отсечки): (dividend_руб, buy_before_ts)}.
+        """Дивиденды в {timestamp(отсечки): (dividend_руб, buy_before_ts | None)}.
 
         Право на дивиденд даёт владение НА дату отсечки, а для этого нужно
         купить бумагу не позже ``buy_before`` (T-1 от отсечки). Стратегия
         проверяет, что позиция была открыта на buy_before.
+
+        Векторная реализация: iterrows в pandas 3 на смешанных колонках
+        (datetime + float + str) превращает nan → NaT, ломая присваивание.
         """
-        out = df.copy()
-        out["_dt"] = pd.to_datetime(out["date"])
-        out["_bb"] = pd.to_datetime(out["buy_before"])
+        dts = pd.to_datetime(df["date"], format="mixed", errors="coerce")
+        amounts = pd.to_numeric(df["dividend"], errors="coerce")
+        bbs = (
+            pd.to_datetime(df["buy_before"], errors="coerce")
+            if "buy_before" in df.columns
+            else pd.Series(pd.NaT, index=df.index)
+        )
+        mask = dts.notna() & amounts.notna()
         return {
-            row["_dt"]: (float(row["dividend"]), pd.Timestamp(row["_bb"]))
-            for _, row in out.iterrows()
+            ts: (float(amt), None if pd.isna(bb) else pd.Timestamp(bb))
+            for ts, amt, bb in zip(dts[mask], amounts[mask], bbs[mask])
         }
 
     def _payout(self, ticker: str, dt, size: int) -> float:

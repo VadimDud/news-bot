@@ -352,3 +352,51 @@ async def test_stale_and_update_failure_alert_sent_once(monkeypatch):
 
 def test_freshness_issues_direct():
     assert sn._freshness_issues("UNKNOWN") != []  # нет ни свечей, ни отчётности
+
+
+async def test_data_alert_interval_disabled(monkeypatch):
+    """TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS=0 → алерты отключены."""
+    from app import config as cfg
+    monkeypatch.setattr(cfg, "TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS", 0)
+    result = await sn._send_data_alert("test")
+    assert result is False
+
+
+async def test_data_alert_interval_respects_days(monkeypatch):
+    """Алерт не отправляется, если прошло меньше N дней с последнего."""
+    from datetime import date
+
+    from app import config as cfg
+    monkeypatch.setattr(cfg, "TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS", 7)
+
+    sent = []
+
+    async def fake_send(text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(sn, "send_telegram_message", fake_send)
+
+    # Первый алерт — отправляется
+    assert await sn._send_data_alert("first")
+    assert len(sent) == 1
+
+    # Сегодня ещё раз — пропуск (прошло 0 дней < 7)
+    sent.clear()
+    assert await sn._send_data_alert("second") is False
+    assert len(sent) == 0
+
+    # Подменяем дату последнего алерта на 3 дня назад
+    three_days_ago = (date.today() - timedelta(days=3)).isoformat()
+    monkeypatch.setattr(storage, "get_setting", lambda key: three_days_ago)
+    # (today - 3_days_ago).days == 3 < 7 → пропуск
+    sent.clear()
+    assert await sn._send_data_alert("third") is False
+    assert len(sent) == 0
+
+    # 8 дней назад → отправляется
+    eight_days_ago = (date.today() - timedelta(days=8)).isoformat()
+    monkeypatch.setattr(storage, "get_setting", lambda key: eight_days_ago)
+    sent.clear()
+    assert await sn._send_data_alert("fourth") is True
+    assert len(sent) == 1

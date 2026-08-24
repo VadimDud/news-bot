@@ -4,12 +4,16 @@
 Price Action: лот от % риска, стоп-лосс по ATR, тейк по R:R, трендовый фильтр EMA.
 """
 
+import logging
+
 import backtrader as bt
 import pandas as pd
 
 from . import risk as risk_module
 from . import signals as sig
 from .news_guard import NewsGuard
+
+logger = logging.getLogger("moex_trader.strategies")
 
 
 class TradeRecordingStrategy(bt.Strategy):

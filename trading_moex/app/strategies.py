@@ -925,6 +925,8 @@ _ROE_PORTFOLIO_PARAMS_TUPLE = (
     ("momentum_months", 6),    # период моментума (месяцев) в scoring-режиме
     # News Guard: блокировка входа при негативных новостях (0 = выкл, 1 = вкл)
     ("news_guard", 0),
+    # Стоп-лосс: 0 = выключен, 10 = 10% от цены входа (проверяется каждый бар)
+    ("stop_loss_pct", 0.0),
 )
 
 
@@ -965,6 +967,8 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         self._div_paid: set[tuple[str, object]] = set()
         self._entry_dates: dict[str, object] = {}
         self._partial_sold: set[str] = set()
+        self._pb_history: dict[str, list[float]] = {}  # trailing P/B для percentile scoring
+        self._entry_prices: dict[str, float] = {}      # цена входа для стоп-лосса
         # News Guard: lazy-init экземпляра (создаётся только при news_guard=1)
         self._news_guard_instance: NewsGuard | None = None
         self._news_blocked_log: list[str] = []
@@ -1116,11 +1120,19 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         avg_roe = self._avg_roe_value(row)
         s_roe = min(avg_roe / 30.0, 1.0) if avg_roe is not None else 0.0
 
-        # 2) Дешевизна: относительная к порогу входа pb_entry, чем дешевле — тем выше.
+        # 2) Дешевизна: percentile P/B за trailing momentum_months окно
+        #    (совпадает с _pb_percentile_score в signals.py)
         bvps = self._bvps_value(row)
         if bvps and bvps > 0:
             current_pb = price / bvps
-            s_pb = min(float(self.p.pb_entry) / current_pb, 1.5) / 1.5
+            pb_window_size = int(self.p.momentum_months) * 21
+            pb_hist = self._pb_history.get(ticker, [])
+            if len(pb_hist) >= 5:
+                hist_arr = pd.Series(pb_hist[-pb_window_size:])
+                pct = (hist_arr <= current_pb).mean()
+                s_pb = 1.0 - float(pct)
+            else:
+                s_pb = 0.5  # слишком мало данных — нейтральный балл
         else:
             s_pb = 0.0
 
@@ -1187,6 +1199,40 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                 if amount:
                     self.broker.add_cash(amount)
                     self._dividends_income = getattr(self, "_dividends_income", 0.0) + amount
+        # Обновление истории P/B (каждый бар) — нужна для percentile scoring.
+        if int(self.p.scoring) == 1:
+            pb_window = int(self.p.momentum_months) * 21
+            for d in self.datas:
+                ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
+                row = self._ff(ticker, dt)
+                if row is None:
+                    continue
+                bvps = self._bvps_value(row)
+                if bvps and bvps > 0:
+                    price_val = float(d.close[0])
+                    if price_val > 0:
+                        pb = price_val / bvps
+                        hist = self._pb_history.setdefault(ticker, [])
+                        hist.append(pb)
+                        if len(hist) > pb_window:
+                            hist[:] = hist[-pb_window:]
+        # Стоп-лосс: проверяется каждый бар (вне гейта ребаланса).
+        stop_pct = float(getattr(self.p, "stop_loss_pct", 0.0) or 0.0)
+        if stop_pct > 0:
+            for d in self.datas:
+                ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
+                pos = self.getposition(d)
+                if pos.size <= 0:
+                    continue
+                entry = self._entry_prices.get(ticker)
+                if entry is not None:
+                    price_now = float(d.close[0])
+                    if price_now <= entry * (1 - stop_pct / 100.0):
+                        self.close(data=d)
+                        self._entry_prices.pop(ticker, None)
+                        self._entry_dates.pop(ticker, None)
+                        logger.info("STOP-LOSS %s: entry=%.2f current=%.2f stop=%.1f%%",
+                                    ticker, entry, price_now, stop_pct)
         # Ребаланс по календарным дням (не по числу баров): входам/выходам
         # достаточно одного раза в rebalance_days дней независимо от таймфрейма.
         self._days_since_rebalance += elapsed
@@ -1213,6 +1259,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
             if (bvps and price >= float(self.p.pb_exit) * bvps) or (roe is not None and roe < float(self.p.roe_exit)):
                 self.close(data=d)
                 self._entry_dates.pop(ticker, None)
+                self._entry_prices.pop(ticker, None)
                 continue
             # частичный выход: цена >= pb_exit_partial*BVPS → продаём часть позиции
             if (
@@ -1225,6 +1272,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                 if sell_size >= pos.size:
                     self.close(data=d)
                     self._entry_dates.pop(ticker, None)
+                    self._entry_prices.pop(ticker, None)
                 else:
                     self.sell(data=d, size=sell_size)
                     self._partial_sold.add(ticker)
@@ -1265,6 +1313,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                 if size > 0:
                     if ticker not in self._entry_dates:
                         self._entry_dates[ticker] = pd.Timestamp(dt.date())
+                    self._entry_prices[ticker] = price
                     self._partial_sold.discard(ticker)
                     self.buy(data=d, size=size)
                     open_positions += 1
@@ -1297,6 +1346,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                 if size > 0:
                     if ticker not in self._entry_dates:
                         self._entry_dates[ticker] = pd.Timestamp(dt.date())
+                    self._entry_prices[ticker] = price
                     self._partial_sold.discard(ticker)
                     self.buy(data=d, size=size)
                     open_positions += 1
@@ -1422,6 +1472,7 @@ STRATEGIES = {
             {"key": "min_score", "label": "Скоринг: мин. composite score для входа", "type": "float", "default": 0.4},
             {"key": "momentum_months", "label": "Скоринг: период моментума, мес", "type": "int", "default": 6},
             {"key": "news_guard", "label": "News Guard: блокировка входа при негативных новостях (1 = вкл)", "type": "int", "default": 0},
+            {"key": "stop_loss_pct", "label": "Стоп-лосс: 0 = выключен, иначе % от цены входа", "type": "float", "default": 0.0},
         ],
     },
 }

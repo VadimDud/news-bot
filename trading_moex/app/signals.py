@@ -407,6 +407,7 @@ def roe_pb_signal(
     w_stability: float = 0.5,
     min_score: float = 0.4,
     momentum_months: int = 6,
+    stop_loss_pct: float = 0.0,
 ) -> pd.Series:
     """Серия позиций (1=long, 0=flat) по «усреднённому ROE + P/B».
 
@@ -415,7 +416,7 @@ def roe_pb_signal(
     prices значения forward-fill из последней строки отчётности; средний ROE —
     среднее за последние ``min_avg_roe`` лет по одному значению на год.
 
-    Проверки выполняются каждые ``rebalance_days`` баров:
+    Проверки выполняются каждые ``rebalance_days`` календарных дней:
     - вход: avg_roe >= min_avg_roe И годовой ROE >= min_single_roe
       И цена <= pb_entry * book_value_per_share;
     - выход: цена >= pb_exit * book_value_per_share ИЛИ годовой ROE < roe_exit.
@@ -451,6 +452,7 @@ def roe_pb_signal(
     pos = np.zeros(len(prices), dtype=int)
     cur = 0
     last_check = None
+    entry_price = None  # цена закрытия бара входа (для стоп-лосса)
     for i in range(len(prices)):
         cur_date = prices.index[i].date()
         if last_check is None or (cur_date - last_check).total_seconds() // 86400 >= rebalance_days:
@@ -462,9 +464,11 @@ def roe_pb_signal(
                 if cur == 0:
                     if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
                         cur = 1
+                        entry_price = close[i]
                 else:
                     if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
                         cur = 0
+                        entry_price = None
             else:
                 # Scoring-режим: composite score выше порога → вход.
                 s_roe = _roe_score(avg_roe_arr[i])
@@ -492,8 +496,15 @@ def roe_pb_signal(
                 hard_exit = close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit
                 if cur == 0 and score >= min_score and not hard_exit:
                     cur = 1
+                    entry_price = close[i]
                 elif cur == 1 and (score < min_score * 0.6 or hard_exit):
                     cur = 0
+                    entry_price = None
+        # Стоп-лосс: проверяется каждый бар (вне гейта ребаланса)
+        if stop_loss_pct > 0 and cur == 1 and entry_price is not None:
+            if close[i] <= entry_price * (1 - stop_loss_pct / 100.0):
+                cur = 0
+                entry_price = None
         pos[i] = cur
     return pd.Series(pos, index=prices.index)
 
@@ -515,6 +526,7 @@ def roe_pb_position(
     w_stability: float = 0.5,
     min_score: float = 0.4,
     momentum_months: int = 6,
+    stop_loss_pct: float = 0.0,
 ) -> pd.Series:
     """Позиция (1=long, 0=flat) по «высокий ROE + цена дешевле капитала».
 
@@ -542,6 +554,7 @@ def roe_pb_position(
         w_stability=w_stability,
         min_score=min_score,
         momentum_months=momentum_months,
+        stop_loss_pct=stop_loss_pct,
     )
 
 

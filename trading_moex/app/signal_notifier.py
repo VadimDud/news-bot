@@ -205,6 +205,7 @@ def compute_ticker_signal(
     w_dividend: float,
     w_stability: float,
     momentum_months: int,
+    stop_loss_pct: float = 0.0,
 ) -> dict[str, Any]:
     """Позиция на последнем баре + факторы + готовый текст пояснения.
 
@@ -231,6 +232,7 @@ def compute_ticker_signal(
         w_stability=w_stability,
         min_score=min_score,
         momentum_months=momentum_months,
+        stop_loss_pct=stop_loss_pct,
     )
     last_pos = int(pos_series.iloc[-1]) if not pos_series.empty else 0
 
@@ -386,6 +388,7 @@ async def run_daily_scan() -> list[dict]:
         w_dividend=cfg.TRADER_ROE_W_DIVIDEND,
         w_stability=cfg.TRADER_ROE_W_STABILITY,
         momentum_months=6,
+        stop_loss_pct=cfg.TRADER_ROE_STOP_LOSS_PCT,
     )
 
     sent: list[dict] = []

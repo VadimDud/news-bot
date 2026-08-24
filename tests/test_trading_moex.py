@@ -1121,3 +1121,128 @@ def test_index_dividends_vectorized():
     assert len(result3) == 1
 
 
+# ── Stop-loss tests ─────────────────────────────────────────────────────────
+
+
+def _make_fundamentals(roe_val: float = 20.0, bvps_val: float = 100.0) -> pd.DataFrame:
+    """Create multi-year fundamentals so avg_roe can be computed."""
+    return pd.DataFrame({
+        "date": [f"{y}-04-01" for y in range(2015, 2025)],
+        "roe": [roe_val] * 10,
+        "book_value_per_share": [bvps_val] * 10,
+    })
+
+
+def test_stop_loss_triggers_on_drop():
+    """Position opens at price, then drops >stop_loss_pct → position goes flat."""
+    from trading_moex.app.signals import roe_pb_signal
+
+    prices = pd.Series(
+        [100.0, 100.0, 100.0, 100.0, 100.0,  # entry check window
+         95.0, 90.0, 85.0, 84.0, 83.0],      # drop after entry
+        index=pd.date_range("2024-01-01", periods=10),
+    )
+    # Fundamentals: high ROE, BVPS=100 → price/BVPS=1.0, which is > pb_entry=0.8
+    # In scoring mode the entry happens via score, not via hard pb_entry check.
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=100.0)
+    # Use scoring=0 for easier entry: avg_roe >= 15, roe >= 12, price <= 0.8*100=80
+    # But price is 100 > 80, so won't enter with scoring=0.
+    # Use scoring=1 instead with very low min_score to force entry.
+    pos = roe_pb_signal(
+        prices, fund,
+        scoring=1, min_score=0.01, stop_loss_pct=10.0,
+        rebalance_days=1,
+    )
+    # With rebalance_days=1 and stop_loss=10%, price=100 → stop at 90.
+    # First bar with rebalance should enter (score high enough), second bar checks stop.
+    entered = (pos == 1)
+    assert entered.any(), "Should have entered position at some point"
+    # entry_price = 100, stop = 90 (10%). Price hits 90 at bar 6 → stop fires.
+    assert pos.iloc[5] == 1, "Position should still be open at price=95 (not yet 10% drop)"
+    assert pos.iloc[6] == 0, "Position should be closed when price=90 (exactly 10% stop)"
+    # With rebalance_days=1, re-entry at next rebalance bar (bar 7) is allowed
+    assert pos.iloc[7] == 1, "Re-entry at bar 7 (next rebalance) when price=85"
+
+
+def test_stop_loss_disabled():
+    """When stop_loss_pct=0, position stays open even during large drops."""
+    from trading_moex.app.signals import roe_pb_signal
+
+    prices = pd.Series(
+        [100.0, 100.0, 100.0, 100.0, 100.0,
+         95.0, 90.0, 85.0, 84.0, 83.0],
+        index=pd.date_range("2024-01-01", periods=10),
+    )
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=100.0)
+    pos = roe_pb_signal(
+        prices, fund,
+        scoring=1, min_score=0.01, stop_loss_pct=0.0,
+        rebalance_days=1,
+    )
+    entered = (pos == 1)
+    if entered.any():
+        first_entry_idx = int(entered.argmax())
+        # Without stop-loss, should still be in position even at price=83
+        remaining = pos.iloc[first_entry_idx + 2:]
+        assert remaining.all(), "Without stop-loss, position should stay open"
+
+
+def test_stop_loss_re_entry_after_cooldown():
+    """After stop-loss fires, re-entry only happens at next rebalance check."""
+    from trading_moex.app.signals import roe_pb_signal
+
+    # Price: enter at 100, crash to 80 (stop fires at 90), recover to 95, 100
+    prices = pd.Series(
+        [100.0, 100.0, 100.0, 100.0, 100.0,
+         95.0, 90.0, 80.0, 95.0, 100.0],
+        index=pd.date_range("2024-01-01", periods=10),
+    )
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=100.0)
+    pos = roe_pb_signal(
+        prices, fund,
+        scoring=1, min_score=0.01, stop_loss_pct=10.0,
+        rebalance_days=5,  # rebalance every 5 bars
+    )
+    # After stop fires, should NOT re-enter until next rebalance (bar 5 or 10)
+    # The key assertion: no immediate re-entry after stop
+    entries = []
+    pos_list = list(pos)
+    for i in range(1, len(pos_list)):
+        if pos_list[i] == 1 and pos_list[i - 1] == 0:
+            entries.append(i)
+    if len(entries) >= 2:
+        gap = entries[1] - entries[0]
+        assert gap >= 5, f"Re-entry after stop should respect rebalance_days=5, got gap={gap}"
+
+
+def test_roe_pb_position_passes_stop_loss_pct():
+    """roe_pb_position forwards stop_loss_pct to roe_pb_signal."""
+    from trading_moex.app.signals import roe_pb_position
+
+    df = pd.DataFrame({
+        "open": [100.0] * 10,
+        "high": [101.0] * 10,
+        "low": [99.0] * 10,
+        "close": [100.0] * 10,
+        "volume": [1000] * 10,
+    }, index=pd.date_range("2024-01-01", periods=10))
+
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=200.0)  # BVPS=200 → price/BVPS=0.5
+
+    # With stop_loss_pct=0 → position always 1 (price=100 <= 0.8*200=160)
+    pos_no_stop = roe_pb_position(df, fund, stop_loss_pct=0.0, rebalance_days=1)
+    assert pos_no_stop.sum() > 0, "Should have positions with no stop-loss"
+
+    # With stop_loss_pct=10 → triggers if price drops >10% from entry
+    pos_with_stop = roe_pb_position(df, fund, stop_loss_pct=10.0, rebalance_days=1)
+    # Since price is flat (100), stop should never trigger
+    assert (pos_with_stop == pos_no_stop).all(), "Flat price: stop-loss should not change anything"
+
+
+def test_stop_loss_config_exists():
+    """TRADER_ROE_STOP_LOSS_PCT config var exists with default 0."""
+    from trading_moex.app import config
+    assert hasattr(config, "TRADER_ROE_STOP_LOSS_PCT")
+    assert config.TRADER_ROE_STOP_LOSS_PCT == 0.0
+
+

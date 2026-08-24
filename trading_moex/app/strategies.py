@@ -1208,6 +1208,8 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
             pb_window = int(self.p.momentum_months) * 21
             for d in self.datas:
                 ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
+                if len(d) < len(self.data):
+                    continue
                 row = self._ff(ticker, dt)
                 if row is None:
                     continue
@@ -1225,6 +1227,8 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         if stop_pct > 0:
             for d in self.datas:
                 ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
+                if len(d) < len(self.data):
+                    continue
                 pos = self.getposition(d)
                 if pos.size <= 0:
                     continue

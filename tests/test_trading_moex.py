@@ -1246,3 +1246,43 @@ def test_stop_loss_config_exists():
     assert config.TRADER_ROE_STOP_LOSS_PCT == 0.0
 
 
+def test_mixed_frequency_feeds_no_crash():
+    """Strategy with pb_history/stop blocks handles lagging feeds without error."""
+    import backtrader as bt
+    from trading_moex.app.strategies import ROEPortfolioStrategy
+
+    dates_long = pd.date_range("2024-01-01", periods=60, freq="B")
+    dates_short = pd.date_range("2024-02-15", periods=30, freq="B")
+
+    df_long = pd.DataFrame({
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000,
+    }, index=dates_long)
+    df_short = pd.DataFrame({
+        "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "volume": 500,
+    }, index=dates_short)
+
+    fund_long = _make_fundamentals(roe_val=20.0, bvps_val=100.0)
+    fund_short = _make_fundamentals(roe_val=18.0, bvps_val=110.0)
+
+    cerebro = bt.Cerebro()
+    data_long = bt.feeds.PandasData(dataname=df_long, name="LONG")
+    data_short = bt.feeds.PandasData(dataname=df_short, name="SHORT")
+    cerebro.adddata(data_long)
+    cerebro.adddata(data_short)
+
+    cerebro.addstrategy(
+        ROEPortfolioStrategy,
+        fundamentals={"LONG": fund_long, "SHORT": fund_short},
+        scoring=1, stop_loss_pct=10.0, rebalance_days=21,
+        min_avg_roe=15.0, min_single_roe=12.0, pb_entry=0.8, pb_exit=1.5,
+        pb_exit_partial=1.2, partial_frac=0.5, roe_exit=12.0, max_positions=4,
+        cash_yield=0.0, w_roe=1.0, w_pb=1.0, w_momentum=0.5,
+        w_dividend=0.5, w_stability=0.5, min_score=0.5, momentum_months=6,
+    )
+    cerebro.broker.setcash(100_000)
+
+    results = cerebro.run()
+    assert len(results) == 1
+    assert results[0]._bar > 0
+
+

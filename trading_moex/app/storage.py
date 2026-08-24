@@ -108,6 +108,15 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_state (
+                ticker TEXT PRIMARY KEY,
+                position INTEGER NOT NULL DEFAULT 0,
+                notified_at TEXT
+            )
+            """
+        )
         # graceful-миграция: старые таблицы dividends могли не иметь buy_before
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(dividends)").fetchall()]
@@ -237,6 +246,30 @@ def add_watchlist(ticker: str) -> None:
 def remove_watchlist(ticker: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
+
+
+def get_signal_state(ticker: str) -> dict:
+    """Получить текущее состояние сигнала для тикера.
+
+    Возвращает dict: {ticker, position, notified_at}
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT ticker, position, notified_at FROM signal_state WHERE ticker = ?", (ticker,)
+        ).fetchone()
+    if row is None:
+        return {"ticker": ticker, "position": 0, "notified_at": None}
+    return {"ticker": row[0], "position": int(row[1]), "notified_at": row[2]}
+
+
+def set_signal_state(ticker: str, position: int, notified_at: str | None = None) -> None:
+    """Установить состояние сигнала для тикера (дедупликация)."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO signal_state (ticker, position, notified_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(ticker) DO UPDATE SET position = excluded.position, notified_at = excluded.notified_at",
+            (ticker, position, notified_at),
+        )
 
 
 def set_watchlist(tickers: list[str]) -> None:

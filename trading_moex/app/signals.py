@@ -486,9 +486,13 @@ def roe_pb_signal(
                     s_roe * w_roe + s_pb * w_pb + s_mom * w_momentum
                     + s_div * w_dividend + s_stab * w_stability
                 ) / total_w if total_w > 0 else 0.0
-                if cur == 0 and score >= min_score:
+                # Жёсткие условия выхода имеют приоритет над скорингом: без этого
+                # дорогая бумага (P/B ≥ pb_exit) на следующем же баре покупается
+                # обратно по score → осцилляция выход/вход каждый бар.
+                hard_exit = close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit
+                if cur == 0 and score >= min_score and not hard_exit:
                     cur = 1
-                elif cur == 1 and (score < min_score * 0.6 or (close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit)):
+                elif cur == 1 and (score < min_score * 0.6 or hard_exit):
                     cur = 0
         pos[i] = cur
     return pd.Series(pos, index=prices.index)
@@ -546,11 +550,16 @@ def _forward_fill_fundamentals(prices: pd.Series, fundamentals: pd.DataFrame) ->
     ff = pd.DataFrame(index=prices.index)
     ff["roe"] = np.nan
     ff["book_value_per_share"] = np.nan
+    has_stability = "roe_stability" in fundamentals.columns
+    if has_stability:
+        ff["roe_stability"] = np.nan
     fund = fundamentals.copy()
     fund["date"] = pd.to_datetime(fund["date"])
     for _, row in fund.sort_values("date").iterrows():
         ff.loc[row["date"]:, "roe"] = row["roe"]
         ff.loc[row["date"]:, "book_value_per_share"] = row["book_value_per_share"]
+        if has_stability:
+            ff.loc[row["date"]:, "roe_stability"] = row.get("roe_stability")
     return ff.ffill()
 
 
@@ -584,6 +593,93 @@ def _rolling_avg_roe_series(
         if valid:
             series[i] = float(np.mean(valid))
     return pd.Series(series, index=ff.index)
+
+
+def roe_score_breakdown(
+    prices: pd.Series,
+    fundamentals: pd.DataFrame,
+    *,
+    w_roe: float = 1.0,
+    w_pb: float = 1.0,
+    w_momentum: float = 0.5,
+    w_dividend: float = 0.5,
+    w_stability: float = 0.5,
+    momentum_months: int = 6,
+) -> dict:
+    """Composite score и факторные оценки ROE+P/B на последнем баре.
+
+    Повторяет скоринг-ветку ``roe_pb_signal`` для одной точки — нужно для
+    человекочитаемых пояснений сигналов (сколько дал каждый фактор).
+    Возвращает {} если данных недостаточно.
+    """
+    if prices is None or len(prices) == 0 or fundamentals is None or fundamentals.empty:
+        return {}
+
+    ff = _forward_fill_fundamentals(prices, fundamentals)
+    if ff.empty:
+        return {}
+
+    if "avg_roe" in fundamentals.columns:
+        avg_roe = (
+            pd.to_numeric(fundamentals["avg_roe"], errors="coerce")
+            .set_axis(pd.to_datetime(fundamentals["date"]), axis=0)
+            .reindex(prices.index)
+            .values.astype(float)
+        )
+    else:
+        avg_roe = _rolling_avg_roe_series(ff, fundamentals).values.astype(float)
+
+    close = prices.values.astype(float)
+    bvps = pd.to_numeric(ff["book_value_per_share"], errors="coerce").values.astype(float)
+    if "roe_stability" in ff.columns:
+        stability = pd.to_numeric(ff["roe_stability"], errors="coerce").values.astype(float)
+    else:
+        stability = np.full(len(close), np.nan)
+
+    i = len(close) - 1
+    window = max(1, int(momentum_months) * 21)
+
+    current_pb = None
+    if not np.isnan(bvps[i]) and bvps[i] > 0:
+        current_pb = close[i] / bvps[i]
+
+    avg_roe_i = None if np.isnan(avg_roe[i]) else float(avg_roe[i])
+    s_roe = _roe_score(avg_roe_i)
+
+    pb_history = pd.Series(close, index=prices.index) / pd.Series(bvps, index=prices.index)
+    s_pb = (
+        _pb_percentile_score(pb_history.iloc[max(0, i - window): i + 1], current_pb)
+        if current_pb is not None
+        else 0.5
+    )
+
+    ret = None
+    if i >= window and close[i - window] > 0:
+        ret = close[i] / close[i - window] - 1.0
+    s_mom = _momentum_score(ret)
+
+    s_div = _dividend_score(None)  # в live-сигнале дивидендных данных нет
+
+    st = None if np.isnan(stability[i]) else float(stability[i])
+    s_stab = _roe_stability_score(st)
+
+    total_w = w_roe + w_pb + w_momentum + w_dividend + w_stability
+    score = (
+        (s_roe * w_roe + s_pb * w_pb + s_mom * w_momentum + s_div * w_dividend + s_stab * w_stability)
+        / total_w
+        if total_w > 0
+        else 0.0
+    )
+    return {
+        "score": round(float(score), 3),
+        "s_roe": round(float(s_roe), 3),
+        "s_pb": round(float(s_pb), 3),
+        "s_mom": round(float(s_mom), 3),
+        "s_div": round(float(s_div), 3),
+        "s_stab": round(float(s_stab), 3),
+        "momentum_ret_pct": None if ret is None else round(ret * 100.0, 1),
+        "current_pb": None if current_pb is None else round(current_pb, 2),
+    }
 
 
 def signal_from_position(pos: pd.Series) -> str:

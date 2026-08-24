@@ -1,6 +1,7 @@
 """Точка входа MOEX-торгового контейнера: веб-дашборд + управление live-циклом."""
 
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -44,10 +45,27 @@ async def main() -> None:
     if not app_settings.tinkoff_token():
         logger.warning("TINKOFF_API_TOKEN не задан — live-торговля недоступна, только бэктест")
 
+    # Запустить фоновый сканер сигналов (ежедневно после открытия рынка)
+    signal_task: asyncio.Task | None = None
+    if config.TRADER_SIGNALS_ENABLED:
+        from app.signal_notifier import scan_loop
+
+        logger.info(
+            "Starting signal notifier scheduler (scan daily at %02d:%02d UTC)",
+            config.TRADER_SIGNALS_SCAN_HOUR, config.TRADER_SIGNALS_SCAN_MINUTE,
+        )
+        signal_task = asyncio.create_task(scan_loop())
+    else:
+        logger.info("Signal notifier disabled via TRADER_SIGNALS_ENABLED")
+
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
+        if signal_task is not None:
+            signal_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await signal_task
         await runner.cleanup()
 
 

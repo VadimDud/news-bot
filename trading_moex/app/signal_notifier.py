@@ -1,0 +1,396 @@
+"""Дневной сканер сигналов ROE+P/B и отправка в Telegram.
+
+Работает без T-Bank API: берёт дневные свечи из локальной SQLite (MOEX ISS)
+и отчётность fundamentals из той же БД. Скан запускается каждое утро после
+открытия рынка (по умолчанию 08:30 UTC ≈ 30 мин после 07:00 UTC открытия MOEX).
+
+Логика:
+- позиция считается через signals.roe_pb_position (по умолчанию scoring=1 —
+  мультифакторный скоринг; настройки из бэктестов);
+- переворот позиции flat→long = ПОКУПКА, long→flat = ПРОДАЖА;
+- первое наблюдение тикера фиксируется в БД молча (baseline), иначе при
+  каждом рестарте контейнера шли бы ложные «продажи» по flat-бумагам;
+- сообщение отправляется только при смене позиции (дедупликация).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, time, timedelta, timezone
+from typing import Any
+
+import aiohttp
+import pandas as pd
+
+from . import config as trading_config
+from . import fundamentals as fundamentals_module
+from . import signals
+from . import storage
+
+logger = logging.getLogger("moex_trader.signal_notifier")
+
+MSK = timezone(timedelta(hours=3))  # время биржи для метки в сообщении
+
+
+# ── Telegram ───────────────────────────────────────────────────────────────
+
+async def send_telegram_message(text: str) -> bool:
+    """Отправить сообщение админу (BOT_TOKEN/ADMIN_ID из общего .env)."""
+    token = trading_config.TELEGRAM_BOT_TOKEN
+    chat_id = trading_config.TELEGRAM_CHAT_ID
+    if not token or not chat_id:
+        logger.warning("BOT_TOKEN/ADMIN_ID не заданы — сигнал не отправлен")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    logger.error("Telegram error %d: %s", resp.status, (await resp.text())[:200])
+                    return False
+                return True
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Ошибка отправки в Telegram: %s", exc)
+        return False
+
+
+# ── Форматирование ─────────────────────────────────────────────────────────
+
+def _fmt_pct(val: float | None) -> str:
+    return "—" if val is None else f"{val:.1f}%"
+
+
+def _fmt_money(val: float | None) -> str:
+    return "—" if val is None else f"{val:.2f} ₽"
+
+
+def _check(ok: bool) -> str:
+    return "✅" if ok else "❌"
+
+
+def explain_roe_signal(
+    ticker: str,
+    df: pd.DataFrame,
+    fund: pd.DataFrame,
+    *,
+    action: str,
+    score_info: dict,
+    min_avg_roe: float,
+    min_single_roe: float,
+    pb_entry: float,
+    pb_exit: float,
+    roe_exit: float,
+    min_score: float,
+    pb_exit_partial: float | None = None,
+    momentum_months: int = 6,
+) -> str:
+    """Человекочитаемое пояснение сигнала ROE+P/B (plain text).
+
+    ``fund`` — обогащённый ряд отчётности (prepare_fundamentals_series):
+    колонки date, roe, book_value_per_share, avg_roe, roe_stability.
+    """
+    last_close = float(df["close"].iloc[-1])
+    last_row = fund.iloc[-1]
+    avg_roe = None if pd.isna(last_row.get("avg_roe")) else float(last_row["avg_roe"])
+    latest_roe = None if pd.isna(last_row.get("roe")) else float(last_row["roe"])
+    bvps = None if pd.isna(last_row.get("book_value_per_share")) else float(last_row["book_value_per_share"])
+
+    pb = score_info.get("current_pb")
+    score = score_info.get("score", 0.0)
+    mom_pct = score_info.get("momentum_ret_pct")
+
+    now_msk = datetime.now(MSK).strftime("%d.%m.%Y %H:%M")
+    header = (
+        f"📈 СИГНАЛ ПОКУПКИ — {ticker}"
+        if action == "buy"
+        else f"📉 СИГНАЛ ПРОДАЖИ — {ticker}"
+    )
+    lines = [
+        header,
+        f"Стратегия ROE+P/B • {now_msk} МСК",
+        "",
+        f"Цена: {last_close:.2f} ₽",
+        f"{_check(avg_roe is not None and avg_roe >= min_avg_roe)} "
+        f"Средний ROE (10 лет): {_fmt_pct(avg_roe)} (порог ≥{min_avg_roe}%)",
+        f"{_check(latest_roe is not None and latest_roe >= min_single_roe)} "
+        f"ROE последнего года: {_fmt_pct(latest_roe)} (порог ≥{min_single_roe}%)",
+    ]
+    if pb is not None:
+        lines.append(
+            f"{_check(pb <= pb_entry)} P/B: {pb:.2f} "
+            f"(вход ≤{pb_entry:.2f}, BVPS {_fmt_money(bvps)})"
+        )
+    else:
+        lines.append(f"❌ P/B: — (BVPS отсутствует)")
+    lines.append(f"📊 Score: {score:.2f} (порог ≥{min_score:.2f})")
+    lines.append(
+        "   • Качество ROE: {:.2f} | Дешевизна P/B: {:.2f}".format(
+            score_info.get("s_roe", 0.0), score_info.get("s_pb", 0.0)
+        )
+    )
+    lines.append(
+        "   • Моментум: {:.2f} | Стабильность ROE: {:.2f}".format(
+            score_info.get("s_mom", 0.0), score_info.get("s_stab", 0.0)
+        )
+    )
+    lines.append(f"📈 Моментум {momentum_months} мес: {_fmt_pct(mom_pct)}")
+    lines.append("")
+
+    partial = pb_exit_partial if pb_exit_partial is not None else trading_config.TRADER_ROE_PB_EXIT_PARTIAL
+    if action == "buy":
+        reason = (
+            f"composite score {score:.2f} ≥ порога {min_score:.2f}: бизнес качественный"
+            + (
+                f" (ROE выше порогов)"
+                if avg_roe is not None and avg_roe >= min_avg_roe and latest_roe is not None and latest_roe >= min_single_roe
+                else ""
+            )
+            + (
+                f", акция торгуется ниже балансовой стоимости (P/B {pb:.2f} ≤ {pb_entry:.2f})"
+                if pb is not None and pb <= pb_entry
+                else ""
+            )
+        )
+        lines.append(f"Почему покупка: {reason}.")
+    else:
+        exit_reasons = []
+        if pb is not None and pb >= pb_exit:
+            exit_reasons.append(
+                f"цена выросла до {pb:.2f} стоимости капитала (порог ≥{pb_exit:.2f})"
+            )
+        if latest_roe is not None and latest_roe < roe_exit:
+            exit_reasons.append(f"ROE опустился до {_fmt_pct(latest_roe)} (порог <{roe_exit}%)")
+        if score < min_score * 0.6:
+            exit_reasons.append(f"score {score:.2f} ниже {min_score * 0.6:.2f}")
+        reason = " или ".join(exit_reasons) if exit_reasons else "условия выхода выполнены"
+        lines.append(f"Почему продажа: {reason}.")
+
+    lines.append(
+        f"Выход: частичная продажа при P/B ≥{partial:.2f}, полная при ≥{pb_exit:.2f}"
+        f" или падении ROE ниже {roe_exit:.0f}%."
+    )
+    return "\n".join(lines)
+
+
+# ── Скан одного тикера ─────────────────────────────────────────────────────
+
+def compute_ticker_signal(
+    ticker: str,
+    df: pd.DataFrame,
+    fund_enriched: pd.DataFrame,
+    *,
+    prev_position: int | None = None,
+    scoring: int,
+    min_avg_roe: float,
+    min_single_roe: float,
+    pb_entry: float,
+    pb_exit: float,
+    roe_exit: float,
+    rebalance_days: int,
+    min_score: float,
+    w_roe: float,
+    w_pb: float,
+    w_momentum: float,
+    w_dividend: float,
+    w_stability: float,
+    momentum_months: int,
+) -> dict[str, Any]:
+    """Позиция на последнем баре + факторы + готовый текст пояснения.
+
+    ``prev_position`` — позиция, известная сканеру с прошлого прогона (БД).
+    Если задана, действие определяется относительно неё (правильный способ для
+    ежедневного сканера: вход мог случиться много баров назад). Если None —
+    по перевороту в последних двух барах ряда.
+    """
+    prices = df["close"]
+    pos_series = signals.roe_pb_position(
+        df,
+        fund_enriched,
+        min_avg_roe=min_avg_roe,
+        min_single_roe=min_single_roe,
+        pb_entry=pb_entry,
+        pb_exit=pb_exit,
+        roe_exit=roe_exit,
+        rebalance_days=rebalance_days,
+        scoring=scoring,
+        w_roe=w_roe,
+        w_pb=w_pb,
+        w_momentum=w_momentum,
+        w_dividend=w_dividend,
+        w_stability=w_stability,
+        min_score=min_score,
+        momentum_months=momentum_months,
+    )
+    last_pos = int(pos_series.iloc[-1]) if not pos_series.empty else 0
+
+    if prev_position is not None:
+        base = int(prev_position)
+    else:
+        base = int(pos_series.iloc[-2]) if len(pos_series) >= 2 else 0
+    action = "hold" if last_pos == base else ("buy" if last_pos == 1 else "sell")
+
+    score_info = signals.roe_score_breakdown(
+        prices,
+        fund_enriched,
+        w_roe=w_roe,
+        w_pb=w_pb,
+        w_momentum=w_momentum,
+        w_dividend=w_dividend,
+        w_stability=w_stability,
+        momentum_months=momentum_months,
+    )
+
+    result: dict[str, Any] = {
+        "ticker": ticker,
+        "position": last_pos,
+        "action": action,
+        "score": score_info.get("score", 0.0),
+    }
+    if action != "hold":
+        result["message"] = explain_roe_signal(
+            ticker,
+            df,
+            fund_enriched,
+            action=action,
+            score_info=score_info,
+            min_avg_roe=min_avg_roe,
+            min_single_roe=min_single_roe,
+            pb_entry=pb_entry,
+            pb_exit=pb_exit,
+            roe_exit=roe_exit,
+            min_score=min_score,
+            momentum_months=momentum_months,
+        )
+    return result
+
+
+# ── Ежедневный скан ────────────────────────────────────────────────────────
+
+def _watchlist() -> list[str]:
+    stored = storage.list_watchlist()
+    if stored:
+        return stored
+    return list(trading_config.WATCH_TICKERS)
+
+
+async def run_daily_scan() -> list[dict]:
+    """Один проход по watchlist: детект смены позиции и отправка сигналов.
+
+    Возвращает список отправленных сигналов [{ticker, action}].
+    """
+    cfg = trading_config
+    params = dict(
+        scoring=cfg.TRADER_ROE_SCORING,
+        min_avg_roe=cfg.TRADER_ROE_MIN_AVG_ROE,
+        min_single_roe=cfg.TRADER_ROE_MIN_SINGLE_ROE,
+        pb_entry=cfg.TRADER_ROE_PB_ENTRY,
+        pb_exit=cfg.TRADER_ROE_PB_EXIT,
+        roe_exit=cfg.TRADER_ROE_ROE_EXIT,
+        rebalance_days=1,  # ежедневный скан — проверяем каждый дневной бар
+        min_score=cfg.TRADER_ROE_MIN_SCORE,
+        w_roe=cfg.TRADER_ROE_W_ROE,
+        w_pb=cfg.TRADER_ROE_W_PB,
+        w_momentum=cfg.TRADER_ROE_W_MOMENTUM,
+        w_dividend=cfg.TRADER_ROE_W_DIVIDEND,
+        w_stability=cfg.TRADER_ROE_W_STABILITY,
+        momentum_months=6,
+    )
+
+    sent: list[dict] = []
+    for ticker in _watchlist():
+        try:
+            df_raw = storage.get_candles(ticker, "1day")
+            if df_raw.empty or len(df_raw) < 3:
+                logger.info("Нет свечей по %s — пропуск", ticker)
+                continue
+            # индекс-даты нужны сигнальным функциям (prices.index)
+            df = df_raw.copy()
+            df["begin"] = pd.to_datetime(df["begin"])
+            df = df.set_index("begin").sort_index()[["open", "high", "low", "close", "volume"]]
+
+            raw_fund = storage.load_fundamentals(ticker)
+            if raw_fund.empty:
+                logger.info("Нет отчётности по %s — пропуск", ticker)
+                continue
+            fund = fundamentals_module.prepare_fundamentals_series(
+                ticker, df.index.min().date(), df.index.max().date()
+            )
+            if fund.empty:
+                fund = raw_fund  # fallback: без avg_roe/stability (скоринг их пересчитает)
+
+            prev = storage.get_signal_state(ticker)
+            known_prev: int | None = (
+                int(prev["position"]) if prev["notified_at"] is not None else None
+            )
+            info = compute_ticker_signal(
+                ticker, df, fund, prev_position=known_prev, **params
+            )
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if known_prev is None:
+                # Первое наблюдение: фиксируем baseline молча, чтобы после
+                # рестартов не сыпались ложные «продажи» по flat-бумагам.
+                storage.set_signal_state(ticker, info["position"], now_iso)
+                logger.info("Baseline %s: position=%d", ticker, info["position"])
+                continue
+            if info["position"] == known_prev:
+                continue
+
+            message = info.get("message")
+            if message and await send_telegram_message(message):
+                storage.set_signal_state(ticker, info["position"], now_iso)
+                sent.append({"ticker": ticker, "action": info["action"]})
+                logger.info("Сигнал отправлен: %s %s", info["action"].upper(), ticker)
+            else:
+                logger.warning("Не удалось отправить сигнал по %s", ticker)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка скана %s: %s", ticker, exc)
+    return sent
+
+
+# ── Расписание ─────────────────────────────────────────────────────────────
+
+def _next_scan_delay(now: datetime | None = None) -> float:
+    """Секунды до следующего скана (время из TRADER_SIGNALS_SCAN_HOUR/MINUTE)."""
+    now = now or datetime.now(timezone.utc)
+    target = datetime.combine(
+        now.date(),
+        time(trading_config.TRADER_SIGNALS_SCAN_HOUR, trading_config.TRADER_SIGNALS_SCAN_MINUTE),
+        tzinfo=timezone.utc,
+    )
+    if now >= target:
+        target += timedelta(days=1)
+    return max((target - now).total_seconds(), 0.0)
+
+
+async def scan_loop() -> None:
+    """Каждое утро после открытия рынка: sleep → run_daily_scan."""
+    logger.info(
+        "Сканер ROE-сигналов запущен: ежедневно %02d:%02d UTC%s",
+        trading_config.TRADER_SIGNALS_SCAN_HOUR,
+        trading_config.TRADER_SIGNALS_SCAN_MINUTE,
+        ", стартовый прогон включён" if trading_config.TRADER_SIGNALS_RUN_ON_STARTUP else "",
+    )
+    if trading_config.TRADER_SIGNALS_RUN_ON_STARTUP:
+        try:
+            await run_daily_scan()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Стартовый скан упал: %s", exc)
+
+    while True:
+        try:
+            delay = _next_scan_delay()
+            next_run = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            logger.info("Следующий скан: %s (через %.0f c)", next_run.isoformat(timespec="seconds"), delay)
+            await asyncio.sleep(delay)
+            await run_daily_scan()
+        except asyncio.CancelledError:
+            logger.info("Сканер ROE-сигналов остановлен")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка цикла сканера: %s", exc)
+            await asyncio.sleep(3600)

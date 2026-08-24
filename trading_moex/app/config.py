@@ -48,3 +48,45 @@ NEWS_AI_ENABLED: bool = os.environ.get("NEWS_AI_ENABLED", "true").lower() in ("1
 DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL: str = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+# ── ROE-signal notifier configuration ─────────────────────────────────────
+# Time of day (UTC) to run the daily ROE signal scan, after MOEX opening (07:00 UTC).
+# Default 08:30 UTC gives ~30 min for candles to appear in the local DB.
+TRADER_SIGNALS_SCAN_HOUR: int = int(os.environ.get("TRADER_SIGNALS_SCAN_HOUR", "8"))
+TRADER_SIGNALS_SCAN_MINUTE: int = int(os.environ.get("TRADER_SIGNALS_SCAN_MINUTE", "30"))
+
+# Enable/disable the notifier (when running inside the trader container).
+TRADER_SIGNALS_ENABLED: bool = os.environ.get("TRADER_SIGNALS_ENABLED", "true").lower() in ("1", "true")
+
+# Прогнать скан один раз сразу при старте контейнера (догоняем пропущенные дни;
+# дубликаты исключены — первое наблюдение фиксируется как baseline без отправки).
+TRADER_SIGNALS_RUN_ON_STARTUP: bool = os.environ.get("TRADER_SIGNALS_RUN_ON_STARTUP", "true").lower() in ("1", "true")
+
+# Telegram для сигналов: тот же бот, что и новостной (общий .env).
+TELEGRAM_BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.environ.get("ADMIN_ID", "")
+
+# ROE-signal parameters — tuned by backtests (CAGR 24.6%, DD 16% on 2021‑2024, 7 tickers).
+# Скоринг-режим (scoring=1) дал +21.2% trading part против +6.1% у AND-логики при rebalance=21д.
+# Для ежедневного скана оставляем дефолтные веса из _ROE_PORTFOLIO_PARAMS_TUPLE.
+TRADER_ROE_MIN_AVG_ROE: float = float(os.environ.get("TRADER_ROE_MIN_AVG_ROE", "15.0"))  # мин. avg ROE за 10 лет, %
+TRADER_ROE_MIN_SINGLE_ROE: float = float(os.environ.get("TRADER_ROE_MIN_SINGLE_ROE", "12.0"))  # мин. годовой ROE, %
+TRADER_ROE_PB_ENTRY: float = float(os.environ.get("TRADER_ROE_PB_ENTRY", "0.8"))  # вход: цена ≤ pb_entry × BVPS
+TRADER_ROE_PB_EXIT: float = float(os.environ.get("TRADER_ROE_PB_EXIT", "1.5"))  # выход: цена ≥ pb_exit × BVPS
+TRADER_ROE_ROE_EXIT: float = float(os.environ.get("TRADER_ROE_ROE_EXIT", "12.0"))  # выход: ROE < roe_exit
+TRADER_ROE_MIN_SCORE: float = float(os.environ.get("TRADER_ROE_MIN_SCORE", "0.4"))  # мин. composite score при scoring=1
+TRADER_ROE_SCORING: int = int(os.environ.get("TRADER_ROE_SCORING", "1"))  # 1 = мульти-factor, 0 = AND-логика
+
+# Веса факторов при scoring=1 (сумма весов не обязана быть 1, используются как коэффициенты):
+TRADER_ROE_W_ROE: float = float(os.environ.get("TRADER_ROE_W_ROE", "1.0"))  # качество ROE (avg_roe)
+TRADER_ROE_W_PB: float = float(os.environ.get("TRADER_ROE_W_PB", "1.0"))  # дешевизна (price / BVPS)
+TRADER_ROE_W_MOMENTUM: float = float(os.environ.get("TRADER_ROE_W_MOMENTUM", "0.5"))  # моментум (возврат 6 мес)
+TRADER_ROE_W_DIVIDEND: float = float(os.environ.get("TRADER_ROE_W_DIVIDEND", "0.5"))  # дивидендная доходность
+TRADER_ROE_W_STABILITY: float = float(os.environ.get("TRADER_ROE_W_STABILITY", "0.5"))  # стабильность ROE (min_roe / avg_roe)
+
+# ── Partial exit for portfolio (unused in per-ticker scanner, но оставлено для совместимости) ──
+
+TRADER_ROE_PB_EXIT_PARTIAL: float = float(os.environ.get("TRADER_ROE_PB_EXIT_PARTIAL", "1.2"))  # при P/B ≥ этого продаём часть позиции
+TRADER_ROE_PARTIAL_FRAC: float = float(os.environ.get("TRADER_ROE_PARTIAL_FRAC", "0.5"))  # доля позиции при частной продаже
+TRADER_ROE_MAX_POSITIONS: int = int(os.environ.get("TRADER_ROE_MAX_POSITIONS", "4"))  # каждая сделка ≈ 100% / max_positions депозита
+TRADER_ROE_CASH_YIELD: float = float(os.environ.get("TRADER_ROE_CASH_YIELD", "8.0"))  # годовая доходность денежной подушки (TMON), %

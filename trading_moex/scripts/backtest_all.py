@@ -3,6 +3,7 @@
 
 Usage (from repo root, inside or outside container):
     PYTHONPATH=trading_moex python3 trading_moex/scripts/backtest_all.py [--tickers SBER,LKOH] [--cash 100000] [--rate 8.0]
+    PYTHONPATH=trading_moex python3 trading_moex/scripts/backtest_all.py --grid [--rebalances 21,42,63,126] [--positions 2,3,4]
 """
 
 import argparse
@@ -131,11 +132,71 @@ def _print_trades(res: dict, rate: float):
     print()
 
 
+def run_grid(data_map, fund_map, divs_map, cash, days, rate, rebalances, positions):
+    stop_losses = [0.0, 10.0]
+
+    rows = []
+    total = len(rebalances) * len(positions) * len(stop_losses)
+    print(f"\n=== GRID: {len(rebalances)}×{len(positions)}×{len(stop_losses)}={total} combos ===")
+    print(f"    rebalance_days: {rebalances}")
+    print(f"    max_positions:  {positions}")
+    print(f"    stop_loss:      {stop_losses}")
+    print(f"    dividends:      ON (all combos)\n")
+
+    i = 0
+    for sl in stop_losses:
+        for reb in rebalances:
+            for pos in positions:
+                i += 1
+                label = f"SL{sl:.0f}% rebal={reb} pos={pos}"
+                params = base_params(scoring=1, stop_loss_pct=sl, rebalance_days=reb, max_positions=pos)
+                res = run_portfolio_backtest(data_map, ROEPortfolioStrategy, params, fund_map, cash=cash, commission=COMMISSION, dividends=divs_map or None)
+                if res is None:
+                    print(f"  [{i}/{total}] {label}: skipped")
+                    continue
+                dep_ret = deposit_return_pct(days, rate)
+                alpha = res["total_return_pct"] - dep_ret
+                rows.append({
+                    "sl": sl, "rebal": reb, "pos": pos,
+                    "final": res["final_value"],
+                    "ret": res["total_return_pct"],
+                    "alpha": alpha,
+                    "maxdd": res.get("max_drawdown_pct", 0),
+                    "trades": res.get("trades_total", 0),
+                    "win": res.get("win_rate_pct", 0),
+                    "divs": res.get("dividends_income", 0),
+                    "sharpe": res.get("sharpe"),
+                })
+                print(f"  [{i}/{total}] {label}: {res['total_return_pct']:+.2f}% (α {alpha:+.2f}%)")
+
+    if not rows:
+        print("\nNo results.")
+        return
+
+    rows.sort(key=lambda r: r["ret"], reverse=True)
+    best = rows[0]
+    dep_ret = deposit_return_pct(days, rate)
+    dep_f = deposit_final(cash, days, rate)
+
+    print(f"\n{'='*105}")
+    print(f"  {'SL':>4s}  {'rebal':>5s}  {'pos':>3s}  {'final_value':>12s}  {'return%':>8s}  {'alpha':>8s}  {'maxDD':>7s}  {'trades':>6s}  {'win%':>5s}  {'div_income':>12s}")
+    print(f"  {'-'*97}")
+    for r in rows:
+        print(f"  {r['sl']:>4.0f}  {r['rebal']:>5d}  {r['pos']:>3d}  {r['final']:>12.2f}  {r['ret']:>+7.2f}%  {r['alpha']:>+7.2f}%  {r['maxdd']:>6.2f}%  {r['trades']:>6d}  {r['win']:>5.1f}%  {r['divs']:>12.2f}")
+    print(f"  {'-'*97}")
+    print(f"  {'dep':>4s}  {'':>5s}  {'':>3s}  {dep_f:>12.2f}  {dep_ret:>+7.2f}%  {'+0.00%':>8s}")
+    print(f"\n  BEST: SL={best['sl']:.0f}% rebal={best['rebal']} pos={best['pos']} → {best['ret']:+.2f}% (α {best['alpha']:+.2f}%, {best['trades']} trades, {best['win']:.1f}% win)")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="ROE+P/B portfolio backtest with deposit comparison")
     parser.add_argument("--tickers", default=",".join(ALL_TICKERS))
     parser.add_argument("--cash", type=float, default=CASH)
     parser.add_argument("--rate", type=float, default=DEPOSIT_RATE)
+    parser.add_argument("--grid", action="store_true", help="Grid search over rebalance/positions/SL")
+    parser.add_argument("--rebalances", default="21,42,63,126", help="Comma-separated rebalance_days")
+    parser.add_argument("--positions", default="2,3,4", help="Comma-separated max_positions")
     args = parser.parse_args()
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     cash = args.cash
@@ -159,6 +220,13 @@ def main():
 
     n_bars = max(len(df) for df in data_map.values())
     days = (max(df.index.max() for df in data_map.values()) - min(df.index.min() for df in data_map.values())).days
+
+    if args.grid:
+        rebalances = [int(x) for x in args.rebalances.split(",")]
+        positions = [int(x) for x in args.positions.split(",")]
+        run_grid(data_map, fund_map, divs_map, cash, days, rate, rebalances, positions)
+        return
+
     print(f"\n=== ROE+P/B BACKTEST: {len(data_map)} tickers, {days} days, {n_bars} bars ===\n")
     print(f"Cash: {cash:.0f} | Commission: {COMMISSION*100:.2f}% | Deposit rate: {rate}% | Rebalance: 21d\n")
 

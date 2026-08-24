@@ -950,7 +950,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         self._fundamentals = {}
         self._dividends = {}
         for d in self.datas:
-            ticker = getattr(d, "_name", None) or d._dataname or ""
+            ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
             fund_df = (self.p.fundamentals or {}).get(ticker)
             if fund_df is not None:
                 self._fundamentals[ticker] = self._index_by_date(fund_df)
@@ -1169,7 +1169,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         # не только в дни ребаланса).
         if self.p.dividends:
             for d in self.datas:
-                ticker = getattr(d, "_name", None) or d._dataname or ""
+                ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
                 pos = self.getposition(d)
                 if pos.size <= 0:
                     continue
@@ -1191,7 +1191,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         #    - цена >= pb_exit_partial*BVPS (и ещё не продавалась частично) →
         #      продаём долю partial_frac, остаток оставляем
         for d in self.datas:
-            ticker = getattr(d, "_name", None) or d._dataname or ""
+            ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
             pos = self.getposition(d)
             if pos.size <= 0:
                 continue
@@ -1232,7 +1232,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
             # сортируем по убыванию и берём top-N с score >= min_score.
             candidates: list[tuple[float, object, str]] = []
             for d in self.datas:
-                ticker = getattr(d, "_name", None) or d._dataname or ""
+                ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
                 if self.getposition(d).size > 0:
                     continue
                 score = self._compute_score(ticker, dt, d)
@@ -1265,7 +1265,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         for d in self.datas:
             if open_positions >= int(self.p.max_positions):
                 break
-            ticker = getattr(d, "_name", None) or d._dataname or ""
+            ticker = getattr(d, "_name", None) or (d._dataname if isinstance(d._dataname, str) else "") or ""
             if self.getposition(d).size > 0:
                 continue
             row = self._ff(ticker, dt)

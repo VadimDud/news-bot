@@ -973,6 +973,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         self._partial_sold: set[str] = set()
         self._pb_history: dict[str, list[float]] = {}  # trailing P/B для percentile scoring
         self._entry_prices: dict[str, float] = {}      # цена входа для стоп-лосса
+        self._div_accrued: dict[str, float] = {}       # накопленные дивы для total-return стопа
         # News Guard: lazy-init экземпляра (создаётся только при news_guard=1)
         self._news_guard_instance: NewsGuard | None = None
         self._news_blocked_log: list[str] = []
@@ -1084,17 +1085,25 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
     def _roe_stability_value(self, row):
         return self._float_col(row, "roe_stability")
 
-    def _dividend_trailing_yield(self, ticker: str, price: float) -> float:
-        """Дивидендная доходность за последние 12 месяцев, % от цены."""
+    def _dividend_trailing_yield(self, ticker: str, price: float, dt=None) -> float:
+        """Дивидендная доходность за последние 12 месяцев от даты бара, % от цены.
+
+        ``dt`` — текущая дата бара (или datetime); если не задана — текущий момент
+        (для обратной совместимости).
+        """
         if price <= 0:
             return 0.0
         divs = self._dividends.get(ticker) or {}
         if not divs:
             return 0.0
+        if dt is not None:
+            dt_now = pd.Timestamp(dt.date()) if not isinstance(dt, pd.Timestamp) else pd.Timestamp(dt.date())
+        else:
+            dt_now = pd.Timestamp.now()
+        cutoff_lower = dt_now - pd.DateOffset(months=12)
         total = 0.0
-        cutoff_lower = pd.Timestamp(pd.Timestamp.now().date()) - pd.DateOffset(months=12)
         for ts, (amount, _) in divs.items():
-            if cutoff_lower <= ts:
+            if cutoff_lower <= ts <= dt_now:
                 total += float(amount or 0.0)
         return total * 100.0 / price if total > 0 else 0.0
 
@@ -1148,7 +1157,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
             s_mom = max(min((ret + 0.30) / 0.60, 1.0), 0.0)
 
         # 4) Дивидендная доходность: от суммы дивидендов за 12 мес / цену.
-        dy = self._dividend_trailing_yield(ticker, price)
+        dy = self._dividend_trailing_yield(ticker, price, dt)
         s_div = min(dy / 8.0, 1.0)
 
         # 5) Стабильность ROE: min_roe / avg_roe (0-1 из фундаментального ряда).
@@ -1203,6 +1212,9 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                 if amount:
                     self.broker.add_cash(amount)
                     self._dividends_income = getattr(self, "_dividends_income", 0.0) + amount
+                    # Accumulate per-share dividend for total-return stop
+                    per_share = amount / pos.size if pos.size > 0 else 0.0
+                    self._div_accrued[ticker] = self._div_accrued.get(ticker, 0.0) + per_share
         # Обновление истории P/B (каждый бар) — нужна для percentile scoring.
         if int(self.p.scoring) == 1:
             pb_window = int(self.p.momentum_months) * 21
@@ -1223,6 +1235,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                         if len(hist) > pb_window:
                             hist[:] = hist[-pb_window:]
         # Стоп-лосс: проверяется каждый бар (вне гейта ребаланса).
+        # Total-return: эффективный вход = цена − накопленные дивиденды.
         stop_pct = float(getattr(self.p, "stop_loss_pct", 0.0) or 0.0)
         if stop_pct > 0:
             for d in self.datas:
@@ -1234,13 +1247,16 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     continue
                 entry = self._entry_prices.get(ticker)
                 if entry is not None:
+                    accrued = self._div_accrued.get(ticker, 0.0)
+                    effective_entry = max(entry - accrued, 0.0)
                     price_now = float(d.close[0])
-                    if price_now <= entry * (1 - stop_pct / 100.0):
+                    if price_now <= effective_entry * (1 - stop_pct / 100.0):
                         self.close(data=d)
                         self._entry_prices.pop(ticker, None)
                         self._entry_dates.pop(ticker, None)
-                        logger.info("STOP-LOSS %s: entry=%.2f current=%.2f stop=%.1f%%",
-                                    ticker, entry, price_now, stop_pct)
+                        self._div_accrued.pop(ticker, None)
+                        logger.info("STOP-LOSS %s: entry=%.2f accrued=%.2f effective=%.2f current=%.2f stop=%.1f%%",
+                                    ticker, entry, accrued, effective_entry, price_now, stop_pct)
         # Ребаланс по календарным дням (не по числу баров): входам/выходам
         # достаточно одного раза в rebalance_days дней независимо от таймфрейма.
         self._days_since_rebalance += elapsed
@@ -1268,6 +1284,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                 self.close(data=d)
                 self._entry_dates.pop(ticker, None)
                 self._entry_prices.pop(ticker, None)
+                self._div_accrued.pop(ticker, None)
                 continue
             # частичный выход: цена >= pb_exit_partial*BVPS → продаём часть позиции
             if (
@@ -1281,6 +1298,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     self.close(data=d)
                     self._entry_dates.pop(ticker, None)
                     self._entry_prices.pop(ticker, None)
+                    self._div_accrued.pop(ticker, None)
                 else:
                     self.sell(data=d, size=sell_size)
                     self._partial_sold.add(ticker)
@@ -1322,6 +1340,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     if ticker not in self._entry_dates:
                         self._entry_dates[ticker] = pd.Timestamp(dt.date())
                     self._entry_prices[ticker] = price
+                    self._div_accrued[ticker] = 0.0
                     self._partial_sold.discard(ticker)
                     self.buy(data=d, size=size)
                     open_positions += 1
@@ -1355,6 +1374,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     if ticker not in self._entry_dates:
                         self._entry_dates[ticker] = pd.Timestamp(dt.date())
                     self._entry_prices[ticker] = price
+                    self._div_accrued[ticker] = 0.0
                     self._partial_sold.discard(ticker)
                     self.buy(data=d, size=size)
                     open_positions += 1

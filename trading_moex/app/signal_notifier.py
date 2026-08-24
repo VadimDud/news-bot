@@ -206,6 +206,7 @@ def compute_ticker_signal(
     w_stability: float,
     momentum_months: int,
     stop_loss_pct: float = 0.0,
+    dividends: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Позиция на последнем баре + факторы + готовый текст пояснения.
 
@@ -233,6 +234,7 @@ def compute_ticker_signal(
         min_score=min_score,
         momentum_months=momentum_months,
         stop_loss_pct=stop_loss_pct,
+        dividends=dividends,
     )
     last_pos = int(pos_series.iloc[-1]) if not pos_series.empty else 0
 
@@ -251,6 +253,7 @@ def compute_ticker_signal(
         w_dividend=w_dividend,
         w_stability=w_stability,
         momentum_months=momentum_months,
+        dividends=dividends,
     )
 
     result: dict[str, Any] = {
@@ -293,6 +296,52 @@ def _refresh_ticker_candles(ticker: str) -> str | None:
         return None
     except Exception as exc:  # noqa: BLE001
         return f"ошибка обновления свечей MOEX: {exc}"
+
+
+def _refresh_ticker_dividends(ticker: str) -> str | None:
+    """Загрузка дивидендов с T-Bank Invest API. Текст ошибки или None."""
+    token = trading_config.TINKOFF_API_TOKEN
+    if not token:
+        return None  # токен не задан — тихий пропуск
+    try:
+        from tinkoff.invest import Client
+        with Client(token=token, app_name="moex-trader") as client:
+            resp = client.instruments.find_instrument(query=ticker)
+            matches = [
+                item for item in resp.instruments
+                if item.ticker.upper() == ticker.upper()
+                and getattr(item, "instrument_type", "") == "share"
+                and item.figi
+            ]
+            if not matches and resp.instruments:
+                matches = [resp.instruments[0]]
+            if not matches:
+                return f"T-Bank: инструмент {ticker} не найден"
+            figi = matches[0].figi
+            div_resp = client.instruments.get_dividends(
+                instrument_id=figi,
+            )
+            rows = []
+            for d in div_resp.dividends:
+                rec = d.record_date
+                lbb = d.last_buy_date
+                amount = float(d.dividend_net.units) + float(d.dividend_net.nano) / 1e9
+                if amount <= 0 or rec is None:
+                    continue
+                rows.append({
+                    "date": rec.date().isoformat() if hasattr(rec, "date") else str(rec)[:10],
+                    "dividend": amount,
+                    "buy_before": lbb.date().isoformat() if hasattr(lbb, "date") and lbb is not None else None,
+                    "period": str(getattr(d, "regularity", "")) or None,
+                })
+            if rows:
+                import pandas as pd
+                df = pd.DataFrame(rows)
+                storage.save_dividends(ticker, df, source="tinkoff")
+                logger.info("T-Bank дивиденды %s: %d записей", ticker, len(rows))
+            return None
+    except Exception as exc:  # noqa: BLE001
+        return f"ошибка загрузки дивидендов T-Bank {ticker}: {exc}"
 
 
 def _freshness_issues(ticker: str) -> list[str]:
@@ -401,6 +450,10 @@ async def run_daily_scan() -> list[dict]:
                 err = await asyncio.to_thread(_refresh_ticker_candles, ticker)
                 if err:
                     issues.append(err)
+                if cfg.TRADER_SIGNALS_AUTO_DIVIDENDS:
+                    div_err = await asyncio.to_thread(_refresh_ticker_dividends, ticker)
+                    if div_err:
+                        issues.append(div_err)
             issues.extend(_freshness_issues(ticker))
             data_issues[ticker] = issues
 
@@ -423,12 +476,16 @@ async def run_daily_scan() -> list[dict]:
             if fund.empty:
                 fund = raw_fund  # fallback: без avg_roe/stability (скоринг их пересчитает)
 
+            div_df = storage.load_dividends(ticker, df.index.min().date(), df.index.max().date())
+            div_param = div_df if not div_df.empty else None
+
             prev = storage.get_signal_state(ticker)
             known_prev: int | None = (
                 int(prev["position"]) if prev["notified_at"] is not None else None
             )
             info = compute_ticker_signal(
-                ticker, df, fund, prev_position=known_prev, **params
+                ticker, df, fund, prev_position=known_prev,
+                dividends=div_param, **params,
             )
 
             now_iso = datetime.now(timezone.utc).isoformat()

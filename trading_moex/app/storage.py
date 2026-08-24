@@ -527,6 +527,50 @@ def load_dividends(ticker: str, start: date | None = None, end: date | None = No
     return df.rename(columns={"cutoff_date": "date", "dividend_per_share": "dividend"})
 
 
+def save_dividends(ticker: str, df, source: str = "tinkoff") -> int:
+    """Upsert дивидендов тикера в таблицу ``dividends``.
+
+    ``df`` — DataFrame с колонками ``date`` (отсечка, YYYY-MM-DD),
+    ``dividend`` (руб./акцию) и опционально ``buy_before`` (T-1),
+    ``period``. Возвращает количество записанных строк.
+    """
+    import pandas as pd
+
+    rows = []
+    for _, r in df.iterrows():
+        date_val = r["date"]
+        if isinstance(date_val, pd.Timestamp):
+            date_val = date_val.strftime("%Y-%m-%d")
+        else:
+            date_val = str(date_val)
+        buy_before = r.get("buy_before")
+        if buy_before is not None:
+            if isinstance(buy_before, pd.Timestamp):
+                buy_before = buy_before.strftime("%Y-%m-%d")
+            else:
+                buy_before = str(buy_before)
+        rows.append(
+            (
+                ticker,
+                date_val,
+                buy_before,
+                str(r.get("period")) if r.get("period") is not None else None,
+                to_float(r.get("dividend")),
+                source,
+            )
+        )
+    if not rows:
+        return 0
+    with _connect() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO dividends"
+            " (ticker, cutoff_date, buy_before, period, dividend_per_share, source)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+    return len(rows)
+
+
 # ── News Guard: sentiment cache + user overrides ─────────────────────────────
 
 def cache_news_sentiment(

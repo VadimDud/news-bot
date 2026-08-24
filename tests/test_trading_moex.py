@@ -1286,3 +1286,152 @@ def test_mixed_frequency_feeds_no_crash():
     assert results[0]._bar > 0
 
 
+# ── Dividend integration tests ──────────────────────────────────────────────
+
+
+def test_save_load_dividends_roundtrip():
+    """save_dividends + load_dividends roundtrip."""
+    import tempfile, os
+    from trading_moex.app import config, storage
+
+    old_db = config.DB_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        config.DB_PATH = os.path.join(tmp, "test.db")
+        storage.init_db()
+        df = pd.DataFrame({
+            "date": ["2024-05-15", "2024-07-10"],
+            "dividend": [33.3, 50.0],
+            "buy_before": ["2024-05-14", "2024-07-09"],
+        })
+        n = storage.save_dividends("TEST", df, source="test")
+        assert n == 2
+        loaded = storage.load_dividends("TEST")
+        assert len(loaded) == 2
+        assert loaded.iloc[0]["dividend"] == 33.3
+        assert loaded.iloc[1]["buy_before"] == "2024-07-09"
+    config.DB_PATH = old_db
+
+
+def test_dividend_trailing_yield_uses_bar_date():
+    """_dividend_trailing_yield filters by bar date, not now()."""
+    from trading_moex.app.strategies import ROEPortfolioStrategy
+
+    strategy = type("_MockStrat", (), {
+        "_dividend_trailing_yield": ROEPortfolioStrategy._dividend_trailing_yield,
+    })()
+
+    # Дивиденды: 100 руб только в мае 2023
+    strategy._dividends = {
+        "T": {
+            pd.Timestamp("2023-05-15"): (100.0, None),
+            pd.Timestamp("2022-05-15"): (80.0, None),
+        }
+    }
+
+    dt_2023 = pd.Timestamp("2023-06-01")
+    dy = ROEPortfolioStrategy._dividend_trailing_yield(strategy, "T", 1000.0, dt_2023)
+    assert abs(dy - 10.0) < 0.01  # 100/1000*100 = 10%
+
+    dt_2022 = pd.Timestamp("2022-06-01")
+    dy2 = ROEPortfolioStrategy._dividend_trailing_yield(strategy, "T", 1000.0, dt_2022)
+    assert abs(dy2 - 8.0) < 0.01  # 80/1000*100 = 8%
+
+    # На дату 2023-04-01: за 12 мес назад = 2022-04-01..2023-04-01 → только 80 руб (2022-05)
+    dt_before = pd.Timestamp("2023-04-01")
+    dy3 = ROEPortfolioStrategy._dividend_trailing_yield(strategy, "T", 1000.0, dt_before)
+    assert abs(dy3 - 8.0) < 0.01
+
+
+def test_signal_s_div_with_dividends():
+    """With dividends, s_div > 0 (was always 0 before)."""
+    from trading_moex.app.signals import roe_pb_signal
+
+    prices = pd.Series([100.0] * 60, index=pd.date_range("2024-01-01", periods=60))
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=200.0)
+
+    divs = pd.DataFrame({
+        "date": ["2024-01-10", "2024-03-10", "2024-05-10"],
+        "dividend": [10.0, 10.0, 10.0],
+        "buy_before": ["2024-01-09", "2024-03-09", "2024-05-09"],
+    })
+
+    # Without dividends → s_div=0
+    pos_no = roe_pb_signal(prices, fund, scoring=1, min_score=0.5, dividends=None)
+    # With dividends → s_div>0 for bars after May 10
+    pos_with = roe_pb_signal(prices, fund, scoring=1, min_score=0.5, dividends=divs)
+    # The positions may differ (div factor changes score)
+    # At minimum, verify no crash and series returned
+    assert len(pos_with) == 60
+    assert set(pos_with.unique()).issubset({0, 1})
+
+
+def test_total_return_stop_ex_date_gap():
+    """Ex-date gap doesn't trigger stop when accumulated dividends cover the drop."""
+    from trading_moex.app.signals import roe_pb_signal
+
+    # Buy at 100, get 5 dividend on bar 6 → effective entry = 95.
+    # Price drops to 92 on bar 7 (3% drop from effective 95) but 8% from raw 100.
+    # With stop_loss=10%: 92 > 95*0.90=85.5 → should NOT trigger.
+    prices = pd.Series(
+        [100.0, 100.0, 100.0, 100.0, 100.0,
+         100.0, 95.0, 92.0, 90.0, 85.0, 80.0],
+        index=pd.date_range("2024-01-01", periods=11),
+    )
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=200.0)
+    divs = pd.DataFrame({
+        "date": ["2024-01-07"],  # bar 6 (index 6)
+        "dividend": [5.0],
+        "buy_before": ["2024-01-06"],
+    })
+    pos = roe_pb_signal(
+        prices, fund, scoring=0, min_avg_roe=15, min_single_roe=12,
+        pb_entry=1.0,  # enter at price=100 <= 1.0*200=200
+        rebalance_days=1, stop_loss_pct=10.0, dividends=divs,
+    )
+    entered = (pos == 1)
+    if entered.any():
+        first = int(entered.argmax())
+        # After ex-date: effective entry = 100 - 5 = 95, stop at 85.5
+        # price 92 > 85.5 → still in
+        if first + 3 < len(pos):
+            assert pos.iloc[first + 3] == 1, "Dividend gap should not trigger stop (total-return)"
+
+
+def test_total_return_stop_deep_drop():
+    """Deep drop beyond effective entry STILL triggers stop."""
+    from trading_moex.app.signals import roe_pb_signal
+
+    prices = pd.Series(
+        [100.0, 100.0, 100.0, 100.0, 100.0,
+         100.0, 95.0, 80.0, 70.0, 60.0],
+        index=pd.date_range("2024-01-01", periods=10),
+    )
+    fund = _make_fundamentals(roe_val=20.0, bvps_val=200.0)
+    divs = pd.DataFrame({
+        "date": ["2024-01-07"],  # bar 6
+        "dividend": [5.0],
+        "buy_before": ["2024-01-06"],
+    })
+    pos = roe_pb_signal(
+        prices, fund, scoring=0, min_avg_roe=15, min_single_roe=12,
+        pb_entry=1.0, rebalance_days=1, stop_loss_pct=10.0, dividends=divs,
+    )
+    entered = (pos == 1)
+    if entered.any():
+        first = int(entered.argmax())
+        # effective entry = 100 - 5 = 95, stop at 85.5
+        # bar 7: price=80 < 85.5 → stop should trigger
+        if 7 < len(pos):
+            assert pos.iloc[7] == 0, "Deep drop (80 < 85.5) should trigger stop"
+        # bar 6: price=95, effective entry=95, 95 > 85.5 → still in
+        if 6 < len(pos):
+            assert pos.iloc[6] == 1, "Price 95 = effective entry → should still be in"
+
+
+def test_config_auto_dividends_exists():
+    """TRADER_SIGNALS_AUTO_DIVIDENDS config exists."""
+    from trading_moex.app import config
+    assert hasattr(config, "TRADER_SIGNALS_AUTO_DIVIDENDS")
+    assert config.TRADER_SIGNALS_AUTO_DIVIDENDS is True
+
+

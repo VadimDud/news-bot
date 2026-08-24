@@ -408,6 +408,7 @@ def roe_pb_signal(
     min_score: float = 0.4,
     momentum_months: int = 6,
     stop_loss_pct: float = 0.0,
+    dividends: pd.DataFrame | None = None,
 ) -> pd.Series:
     """Серия позиций (1=long, 0=flat) по «усреднённому ROE + P/B».
 
@@ -449,12 +450,41 @@ def roe_pb_signal(
     pb_history = pd.Series(close, index=prices.index) / pd.Series(bvps, index=prices.index)
     pb_window = int(momentum_months) * 21
 
+    # Дивидендная доходность за 12 мес (векторизовано) — в scoring=1
+    dy_arr = np.zeros(len(close), dtype=float)
+    if dividends is not None and not dividends.empty and scoring == 1:
+        divs = dividends.copy()
+        divs["date"] = pd.to_datetime(divs["date"])
+        divs["dividend"] = pd.to_numeric(divs["dividend"], errors="coerce")
+        divs = divs.dropna(subset=["date", "dividend"]).sort_values("date")
+        if not divs.empty:
+            div_ts = divs.set_index("date")["dividend"]
+            for i in range(len(close)):
+                dt_cur = prices.index[i]
+                lower = dt_cur - pd.DateOffset(months=12)
+                mask = (div_ts.index >= lower) & (div_ts.index <= dt_cur)
+                total_div = float(div_ts[mask].sum()) if mask.any() else 0.0
+                if total_div > 0 and close[i] > 0:
+                    dy_arr[i] = total_div * 100.0 / close[i]
+
     pos = np.zeros(len(prices), dtype=int)
     cur = 0
     last_check = None
     entry_price = None  # цена закрытия бара входа (для стоп-лосса)
+    div_accrued = 0.0   # накопленные дивиденды с момента входа (total-return)
+    # Карта дивидендов по дате отсечки: {date: dividend_per_share}
+    _div_map: dict = {}
+    if dividends is not None and not dividends.empty:
+        for _, r in dividends.iterrows():
+            try:
+                _div_map[pd.Timestamp(r["date"]).date()] = float(r["dividend"])
+            except Exception:  # noqa: BLE001
+                pass
     for i in range(len(prices)):
         cur_date = prices.index[i].date()
+        # Начисление дивидендов: если позиция открыта и сегодня дата отсечки
+        if cur == 1 and cur_date in _div_map:
+            div_accrued += _div_map[cur_date]
         if last_check is None or (cur_date - last_check).total_seconds() // 86400 >= rebalance_days:
             last_check = cur_date
             if np.isnan(roe[i]) or np.isnan(bvps[i]) or np.isnan(avg_roe_arr[i]) or bvps[i] <= 0:
@@ -465,10 +495,12 @@ def roe_pb_signal(
                     if avg_roe_arr[i] >= min_avg_roe and roe[i] >= min_single_roe and close[i] <= pb_entry * bvps[i]:
                         cur = 1
                         entry_price = close[i]
+                        div_accrued = 0.0
                 else:
                     if close[i] >= pb_exit * bvps[i] or roe[i] < roe_exit:
                         cur = 0
                         entry_price = None
+                        div_accrued = 0.0
             else:
                 # Scoring-режим: composite score выше порога → вход.
                 s_roe = _roe_score(avg_roe_arr[i])
@@ -483,7 +515,7 @@ def roe_pb_signal(
                     if close[i - lookback] > 0:
                         ret = close[i] / close[i - lookback] - 1.0
                 s_mom = _momentum_score(ret)
-                s_div = _dividend_score(0.0)  # в live-сигнале дивидендных данных нет
+                s_div = _dividend_score(float(dy_arr[i]))
                 s_stab = _roe_stability_score(stability[i])
                 total_w = w_roe + w_pb + w_momentum + w_dividend + w_stability
                 score = (
@@ -497,14 +529,20 @@ def roe_pb_signal(
                 if cur == 0 and score >= min_score and not hard_exit:
                     cur = 1
                     entry_price = close[i]
+                    div_accrued = 0.0
                 elif cur == 1 and (score < min_score * 0.6 or hard_exit):
                     cur = 0
                     entry_price = None
+                    div_accrued = 0.0
         # Стоп-лосс: проверяется каждый бар (вне гейта ребаланса)
+        # Total-return: эффективный вход = цена входа − накопленные дивиденды,
+        # чтобы гэп на отсечке не триггерил ложный стоп.
         if stop_loss_pct > 0 and cur == 1 and entry_price is not None:
-            if close[i] <= entry_price * (1 - stop_loss_pct / 100.0):
+            effective_entry = max(entry_price - div_accrued, 0.0)
+            if close[i] <= effective_entry * (1 - stop_loss_pct / 100.0):
                 cur = 0
                 entry_price = None
+                div_accrued = 0.0
         pos[i] = cur
     return pd.Series(pos, index=prices.index)
 
@@ -527,6 +565,7 @@ def roe_pb_position(
     min_score: float = 0.4,
     momentum_months: int = 6,
     stop_loss_pct: float = 0.0,
+    dividends: pd.DataFrame | None = None,
 ) -> pd.Series:
     """Позиция (1=long, 0=flat) по «высокий ROE + цена дешевле капитала».
 
@@ -555,6 +594,7 @@ def roe_pb_position(
         min_score=min_score,
         momentum_months=momentum_months,
         stop_loss_pct=stop_loss_pct,
+        dividends=dividends,
     )
 
 
@@ -629,6 +669,7 @@ def roe_score_breakdown(
     w_dividend: float = 0.5,
     w_stability: float = 0.5,
     momentum_months: int = 6,
+    dividends: pd.DataFrame | None = None,
 ) -> dict:
     """Composite score и факторные оценки ROE+P/B на последнем баре.
 
@@ -682,7 +723,22 @@ def roe_score_breakdown(
         ret = close[i] / close[i - window] - 1.0
     s_mom = _momentum_score(ret)
 
-    s_div = _dividend_score(None)  # в live-сигнале дивидендных данных нет
+    # Дивидендная доходность за 12 мес
+    dy_val = 0.0
+    if dividends is not None and not dividends.empty and close[i] > 0:
+        divs = dividends.copy()
+        divs["date"] = pd.to_datetime(divs["date"])
+        divs["dividend"] = pd.to_numeric(divs["dividend"], errors="coerce")
+        divs = divs.dropna(subset=["date", "dividend"]).sort_values("date")
+        if not divs.empty:
+            div_ts = divs.set_index("date")["dividend"]
+            dt_cur = prices.index[i]
+            lower = dt_cur - pd.DateOffset(months=12)
+            mask = (div_ts.index >= lower) & (div_ts.index <= dt_cur)
+            total_div = float(div_ts[mask].sum()) if mask.any() else 0.0
+            if total_div > 0:
+                dy_val = total_div * 100.0 / close[i]
+    s_div = _dividend_score(dy_val)
 
     st = None if np.isnan(stability[i]) else float(stability[i])
     s_stab = _roe_stability_score(st)

@@ -52,6 +52,11 @@ def deposit_return_pct(days: int, rate: float = 8.0) -> float:
     return ((1 + rate / 100.0 / 365.0) ** days - 1) * 100.0
 
 
+def deposit_final(cash: float, days: int, rate: float = 8.0) -> float:
+    """Итоговая сумма депозита с начислением сложного %."""
+    return cash * (1 + rate / 100.0 / 365.0) ** days if days > 0 else cash
+
+
 def base_params(**overrides) -> dict:
     params = dict(
         min_avg_roe=cfg.TRADER_ROE_MIN_AVG_ROE,
@@ -88,8 +93,10 @@ def _print_variant(name: str, res: dict, cash: float, days: int, rate: float):
     )
     total_trades = res.get("trades_total", 0)
     dep_win_pct = dep_beats / total_trades * 100 if total_trades else 0
+    dep_final = deposit_final(cash, days, rate)
     print(f"  {name}:")
     print(f"    final_value:     {res['final_value']:.2f}")
+    print(f"    deposit_final:   {dep_final:.2f}")
     print(f"    total_return:    {res['total_return_pct']:.2f}%")
     print(f"    deposit_return:  {dep_ret:.2f}% (compound {rate}%)")
     print(f"    alpha:           {alpha:+.2f}%")
@@ -103,7 +110,7 @@ def _print_variant(name: str, res: dict, cash: float, days: int, rate: float):
     print()
 
 
-def _print_trades(res: dict, rate: float, cash: float):
+def _print_trades(res: dict, rate: float):
     trades = res.get("trades", []) if res else []
     if not trades:
         return
@@ -162,25 +169,25 @@ def main():
     p1 = base_params(scoring=1, stop_loss_pct=0.0)
     r1 = run_portfolio_backtest(data_map, ROEPortfolioStrategy, p1, fund_map, cash=cash, commission=COMMISSION)
     _print_variant("R1: scoring + no div", r1, cash, days, rate)
-    _print_trades(r1, rate, cash)
+    _print_trades(r1, rate)
 
     # R2: scoring=1, stop_loss=10%, no dividends
     p2 = base_params(scoring=1, stop_loss_pct=10.0)
     r2 = run_portfolio_backtest(data_map, ROEPortfolioStrategy, p2, fund_map, cash=cash, commission=COMMISSION)
     _print_variant("R2: scoring + SL10%", r2, cash, days, rate)
-    _print_trades(r2, rate, cash)
+    _print_trades(r2, rate)
 
     # R3: scoring=1, no stop, with dividends
     p3 = base_params(scoring=1, stop_loss_pct=0.0)
     r3 = run_portfolio_backtest(data_map, ROEPortfolioStrategy, p3, fund_map, cash=cash, commission=COMMISSION, dividends=divs_map or None)
     _print_variant("R3: scoring + dividends", r3, cash, days, rate)
-    _print_trades(r3, rate, cash)
+    _print_trades(r3, rate)
 
     # R4: scoring=1, stop_loss=10%, with dividends (production config)
     p4 = base_params(scoring=1, stop_loss_pct=10.0)
     r4 = run_portfolio_backtest(data_map, ROEPortfolioStrategy, p4, fund_map, cash=cash, commission=COMMISSION, dividends=divs_map or None)
     _print_variant("R4: scoring + SL10% + div (production)", r4, cash, days, rate)
-    _print_trades(r4, rate, cash)
+    _print_trades(r4, rate)
 
     # ── Solo ticker runs (R4 config, max_positions=1) ───────────────────────
     print("--- Solo ticker runs (R4 config, full allocation) ---\n")
@@ -194,7 +201,7 @@ def main():
         solo_days = (data_map[t].index.max() - data_map[t].index.min()).days
         solo_res = run_portfolio_backtest(solo_data, ROEPortfolioStrategy, p_solo, solo_fund, cash=cash, commission=COMMISSION, dividends=solo_divs)
         _print_variant(f"{t}", solo_res, cash, solo_days, rate)
-        _print_trades(solo_res, rate, cash)
+        _print_trades(solo_res, rate)
 
 
 if __name__ == "__main__":

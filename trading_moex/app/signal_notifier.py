@@ -29,6 +29,9 @@ from . import storage
 
 logger = logging.getLogger("moex_trader.signal_notifier")
 
+# Флаг, чтобы предупреждать про отсутствие токена Т-Банк ровно один раз за сеанс
+_div_token_warned: bool = False
+
 MSK = timezone(timedelta(hours=3))  # время биржи для метки в сообщении
 
 DATA_ALERT_SETTING = "signals_data_alert_sent_on"  # дата последнего алерта (дедуп раз в сутки)
@@ -298,42 +301,60 @@ def _refresh_ticker_candles(ticker: str) -> str | None:
         return f"ошибка обновления свечей MOEX: {exc}"
 
 
+def _tbank_div_rows(div_resp) -> list[dict] | None:
+    """Построить список словарей дивидендов из ответа T-Bank get_dividends.
+    
+    Возвращает словари с датой (ex-date = last_buy_date + 1 день), суммой,
+    buy_before (last_buy_date) и period.
+    """
+    rows: list[dict] = []
+    for d in div_resp.dividends:
+        rec = d.record_date
+        lbb = d.last_buy_date
+        amount = float(d.dividend_net.units) + float(d.dividend_net.nano) / 1e9
+        if amount <= 0:
+            continue
+        # ex-date: торговый день после last_buy_date; fallback на record_date
+        if lbb is not None and hasattr(lbb, "date"):
+            ex_date = lbb.date() + timedelta(days=1)
+        elif rec is not None and hasattr(rec, "date"):
+            ex_date = rec.date()
+        else:
+            continue
+        rows.append({
+            "date": ex_date.isoformat(),
+            "dividend": amount,
+            "buy_before": lbb.date().isoformat() if hasattr(lbb, "date") and lbb is not None else None,
+            "period": str(getattr(d, "regularity", "")) or None,
+        })
+    return rows if rows else None
+
+
 def _refresh_ticker_dividends(ticker: str) -> str | None:
     """Загрузка дивидендов с T-Bank Invest API. Текст ошибки или None."""
+    global _div_token_warned
     token = trading_config.TINKOFF_API_TOKEN
     if not token:
-        return None  # токен не задан — тихий пропуск
+        if not _div_token_warned:
+            logger.warning("TINKOFF_API_TOKEN не задан — автозагрузка дивидендов отключена (TRADER_SIGNALS_AUTO_DIVIDENDS=true)")
+            _div_token_warned = True
+        return None
     try:
         from tinkoff.invest import Client
         with Client(token=token, app_name="moex-trader") as client:
             resp = client.instruments.find_instrument(query=ticker)
+            # Точное совпадение тикера + акция; fallback запрещен (чтобы не picking another instrument type)
             matches = [
                 item for item in resp.instruments
                 if item.ticker.upper() == ticker.upper()
                 and getattr(item, "instrument_type", "") == "share"
                 and item.figi
             ]
-            if not matches and resp.instruments:
-                matches = [resp.instruments[0]]
             if not matches:
-                return f"T-Bank: инструмент {ticker} не найден"
+                return f"T-Bank: инструмент {ticker} (share) не найден"
             figi = matches[0].figi
-            div_resp = client.instruments.get_dividends(
-                instrument_id=figi,
-            )
-            rows = []
-            for d in div_resp.dividends:
-                rec = d.record_date
-                lbb = d.last_buy_date
-                amount = float(d.dividend_net.units) + float(d.dividend_net.nano) / 1e9
-                if amount <= 0 or rec is None:
-                    continue
-                rows.append({
-                    "date": rec.date().isoformat() if hasattr(rec, "date") else str(rec)[:10],
-                    "dividend": amount,
-                    "buy_before": lbb.date().isoformat() if hasattr(lbb, "date") and lbb is not None else None,
-                    "period": str(getattr(d, "regularity", "")) or None,
-                })
+            div_resp = client.instruments.get_dividends(instrument_id=figi)
+            rows = _tbank_div_rows(div_resp)
             if rows:
                 import pandas as pd
                 df = pd.DataFrame(rows)

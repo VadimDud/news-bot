@@ -351,3 +351,36 @@ def test_scoring_backward_compat_equals_and():
     res = run_portfolio_backtest({"AA": _ohlc(dates)}, ROEPortfolioStrategy, params, fund_map, cash=100000)
     invested = [v for _, v in res["invested_curve"]]
     assert max(invested) > 0  # цена ~90 < 0.8*300=240 → вход есть
+
+
+def test_trade_record_has_new_fields():
+    """TradeRecordingStrategy records opened, days_held, entry_price, exit_price, ret_pct."""
+    bvps = 100.0
+    dates = pd.date_range("2021-01-04", periods=210, freq="D")
+    prices = [0.6 * bvps] * 50 + [1.0 * bvps] * 50 + [1.6 * bvps] * 110
+    close = np.array(prices, dtype=float)
+    df = pd.DataFrame(
+        {"open": close - 0.5, "high": close + 1, "low": close - 1,
+         "close": close, "volume": 1000},
+        index=dates,
+    )
+    df.index.name = "datetime"
+    fund_df = pd.DataFrame(
+        [{"date": f"{y}-12-31", "roe": 20.0, "book_value_per_share": bvps}
+         for y in range(2015, 2026)]
+    )
+    save_fundamentals("AA", fund_df)
+    fund_map = {"AA": prepare_fundamentals_series("AA", dates[0].date(), dates[-1].date())}
+    params = {
+        "min_avg_roe": 15.0, "min_single_roe": 12.0, "pb_entry": 0.8,
+        "pb_exit": 1.0, "roe_exit": 12.0, "max_positions": 10, "rebalance_days": 1,
+    }
+    res = run_portfolio_backtest({"AA": df}, ROEPortfolioStrategy, params, fund_map, cash=100000)
+    trades = res.get("trades", [])
+    assert len(trades) >= 1
+    t = trades[0]
+    assert t["opened"] is not None
+    assert t["days_held"] >= 1
+    assert t["entry_price"] > 0
+    assert t["exit_price"] > 0
+    assert isinstance(t["ret_pct"], float)

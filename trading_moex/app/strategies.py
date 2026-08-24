@@ -20,20 +20,39 @@ class TradeRecordingStrategy(bt.Strategy):
     """Базовая стратегия, записывающая закрытые сделки для отчёта бэктеста.
 
     Собственные стратегии наследуйте от этого класса, чтобы в результатах
-    бэктеста появлялась таблица сделок.
+    бэктеста появлялась таблица сделок.  При ``opened=True`` записываются
+    также дата входа, удержание (дней), цена входа/выхода и доходность %.
     """
 
     def __init__(self):
         self.recorded_trades: list[dict] = []
+        self._trade_cost: dict[str, tuple[float, float, float]] = {}
 
     def notify_trade(self, trade):
+        ticker = getattr(trade.data, "_name", None) or trade.getdataname()
+        if trade.justopened:
+            price = float(trade.price) if trade.price else 0.0
+            size = abs(float(trade.size)) if trade.size else 0.0
+            self._trade_cost[ticker] = (price * size, size, price)
         if trade.isclosed:
+            cost, orig_size, entry_price = self._trade_cost.pop(ticker, (0.0, 0.0, 0.0))
+            pnl = float(trade.pnlcomm or 0.0)
+            ret_pct = round(pnl / cost * 100.0, 2) if cost > 0 else 0.0
+            entry_dt = bt.num2date(trade.dtopen) if trade.dtopen else None
+            close_dt = bt.num2date(trade.dtclose) if trade.dtclose else None
+            days_held = (close_dt.date() - entry_dt.date()).days if entry_dt and close_dt else 0
+            exit_price = round(entry_price + pnl / orig_size, 2) if orig_size > 0 else 0.0
             self.recorded_trades.append(
                 {
-                    "traded": str(bt.num2date(trade.dtclose)),
+                    "opened": str(entry_dt) if entry_dt else None,
+                    "days_held": days_held,
+                    "entry_price": round(entry_price, 2),
+                    "exit_price": exit_price,
+                    "ret_pct": ret_pct,
+                    "traded": str(close_dt) if close_dt else None,
                     "status": "closed",
-                    "pnl": round(float(trade.pnlcomm or 0.0), 2),
-                    "ticker": getattr(trade.data, "_name", None) or trade.getdataname(),
+                    "pnl": round(pnl, 2),
+                    "ticker": ticker,
                 }
             )
 
@@ -1096,10 +1115,7 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
         divs = self._dividends.get(ticker) or {}
         if not divs:
             return 0.0
-        if dt is not None:
-            dt_now = pd.Timestamp(dt.date()) if not isinstance(dt, pd.Timestamp) else pd.Timestamp(dt.date())
-        else:
-            dt_now = pd.Timestamp.now()
+        dt_now = pd.Timestamp(dt.date()) if dt is not None else pd.Timestamp.now()
         cutoff_lower = dt_now - pd.DateOffset(months=12)
         total = 0.0
         for ts, (amount, _) in divs.items():

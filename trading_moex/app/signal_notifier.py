@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -31,6 +31,12 @@ logger = logging.getLogger("moex_trader.signal_notifier")
 
 MSK = timezone(timedelta(hours=3))  # время биржи для метки в сообщении
 
+DATA_ALERT_SETTING = "signals_data_alert_sent_on"  # дата последнего алерта (дедуп раз в сутки)
+
+
+def _today() -> date:
+    return datetime.now(timezone.utc).date()
+
 
 # ── Telegram ───────────────────────────────────────────────────────────────
 
@@ -44,9 +50,12 @@ async def send_telegram_message(text: str) -> bool:
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
+    # api.telegram.org из РФ часто недоступен напрямую — идём через локальный
+    # прокси (как новостной бот). Пустая настройка = прямое соединение.
+    proxy = trading_config.TRADER_TG_PROXY or None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30), proxy=proxy) as resp:
                 if resp.status != 200:
                     logger.error("Telegram error %d: %s", resp.status, (await resp.text())[:200])
                     return False
@@ -266,6 +275,72 @@ def compute_ticker_signal(
     return result
 
 
+# ── Здоровье данных: автообновление + алерты о протухании ─────────────────
+
+def _refresh_ticker_candles(ticker: str) -> str | None:
+    """Хвостовая догрузка дневных свечей с MOEX (moexalgo). Текст ошибки или None."""
+    from . import data as data_module
+
+    last = storage.last_candle_time(ticker, "1day")
+    if last is None:
+        return "нет истории свечей в БД — скачайте диапазон через дашборд (страница /data)"
+    end = _today()
+    start = min(pd.Timestamp(last).date(), end - timedelta(days=7))
+    try:
+        data_module.fetch_history(ticker, "1day", start, end, use_cache=True)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return f"ошибка обновления свечей MOEX: {exc}"
+
+
+def _freshness_issues(ticker: str) -> list[str]:
+    """Проблемы свежести данных тикера (после попытки обновления)."""
+    issues: list[str] = []
+    last = storage.last_candle_time(ticker, "1day")
+    if not last:
+        issues.append("свечей в БД нет")
+    else:
+        age = (_today() - pd.Timestamp(last).date()).days
+        if age > trading_config.TRADER_SIGNALS_MAX_STALE_DAYS:
+            issues.append(f"свечи устарели на {age} дн. (последняя {last[:10]})")
+    stats = storage.fundamentals_stats(ticker)
+    if not stats.get("count"):
+        issues.append("отчётности ROE/BVPS в БД нет")
+    elif stats.get("max_date"):
+        age = (_today() - date.fromisoformat(stats["max_date"])).days
+        if age > trading_config.TRADER_SIGNALS_FUND_MAX_AGE_DAYS:
+            issues.append(f"отчётность старая: {age} дн. (последняя {stats['max_date']}) — сигналы считаются по устаревшему ROE/BVPS")
+    return issues
+
+
+def _format_data_alert(issues_by_ticker: dict[str, list[str]]) -> str:
+    now_msk = datetime.now(MSK).strftime("%d.%m.%Y %H:%M")
+    lines = [f"⚠️ ПРОБЛЕМА ДАННЫХ ROE-сканера • {now_msk} МСК", ""]
+    for ticker, issues in issues_by_ticker.items():
+        for issue in issues:
+            lines.append(f"• {ticker}: {issue}")
+    lines += [
+        "",
+        "Сканер продолжает работать на имеющихся данных, но сигналы могут быть неверными.",
+        "Свечи: moexalgo/MOEX, докачиваются автоматически; если не помогает — страница /data.",
+        "Отчётность: conomy.ru через страницу /fundamentals.",
+        "Алерт повторяется раз в сутки, пока проблема не исчезнет.",
+    ]
+    return "\n".join(lines)
+
+
+async def _send_data_alert(text: str) -> bool:
+    """Отправить алерт о данных не чаще раза в сутки (дедуп в settings)."""
+    today_iso = _today().isoformat()
+    if storage.get_setting(DATA_ALERT_SETTING) == today_iso:
+        logger.info("Алерт о данных уже отправлялся сегодня — пропуск")
+        return False
+    if await send_telegram_message(text):
+        storage.set_setting(DATA_ALERT_SETTING, today_iso)
+        return True
+    return False
+
+
 # ── Ежедневный скан ────────────────────────────────────────────────────────
 
 def _watchlist() -> list[str]:
@@ -288,7 +363,9 @@ async def run_daily_scan() -> list[dict]:
         pb_entry=cfg.TRADER_ROE_PB_ENTRY,
         pb_exit=cfg.TRADER_ROE_PB_EXIT,
         roe_exit=cfg.TRADER_ROE_ROE_EXIT,
-        rebalance_days=1,  # ежедневный скан — проверяем каждый дневной бар
+        # Прибыльный вариант бэктеста на SBER 2020–2026: scoring s=0.5/rebal=21д
+        # дал +80.5% (DD 9%, PF 5.77) против +68.4%/PF 1.43 у rebal=2.
+        rebalance_days=21,
         min_score=cfg.TRADER_ROE_MIN_SCORE,
         w_roe=cfg.TRADER_ROE_W_ROE,
         w_pb=cfg.TRADER_ROE_W_PB,
@@ -299,8 +376,18 @@ async def run_daily_scan() -> list[dict]:
     )
 
     sent: list[dict] = []
+    data_issues: dict[str, list[str]] = {}
     for ticker in _watchlist():
         try:
+            # 0) Здоровье данных: догрузить хвост свечей и проверить свежесть.
+            issues: list[str] = []
+            if cfg.TRADER_SIGNALS_AUTO_UPDATE:
+                err = await asyncio.to_thread(_refresh_ticker_candles, ticker)
+                if err:
+                    issues.append(err)
+            issues.extend(_freshness_issues(ticker))
+            data_issues[ticker] = issues
+
             df_raw = storage.get_candles(ticker, "1day")
             if df_raw.empty or len(df_raw) < 3:
                 logger.info("Нет свечей по %s — пропуск", ticker)
@@ -347,6 +434,14 @@ async def run_daily_scan() -> list[dict]:
                 logger.warning("Не удалось отправить сигнал по %s", ticker)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка скана %s: %s", ticker, exc)
+
+    # Сводный алерт о проблемах данных — не чаще раза в сутки.
+    problems = {t: i for t, i in data_issues.items() if i}
+    if problems:
+        if await _send_data_alert(_format_data_alert(problems)):
+            logger.warning("Отправлен алерт о данных: %s", {t: len(i) for t, i in problems.items()})
+        else:
+            logger.info("Алерт о данных не отправлен (дедуп или ошибка сети)")
     return sent
 
 

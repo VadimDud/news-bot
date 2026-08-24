@@ -1,8 +1,9 @@
 """Тесты сканера ROE-сигналов (signal_notifier): пояснения, дедуп, расписание."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -175,10 +176,13 @@ def test_no_reentry_while_expensive():
 @pytest.mark.asyncio
 async def test_first_run_records_baseline_silently(monkeypatch):
     """Первый прогон по flat-бумаге не шлёт «продажу», а пишет baseline."""
+    import app.data as data_module
+
+    monkeypatch.setattr(data_module, "fetch_history", lambda *a, **k: None)
     storage.add_watchlist("FLAT")
-    # дорогая плохая бумага: сигнал flat
-    storage.save_candles("FLAT", "1day", _candle_df([200.0] * 30))
-    storage.save_fundamentals("FLAT", _EXPENSIVE)
+    # дорогая плохая бумага, данные свежие (иначе сработал бы алерт о протухании)
+    storage.save_candles("FLAT", "1day", _fresh_candles())
+    storage.save_fundamentals("FLAT", _fund_at(10))
 
     sent_messages: list[str] = []
 
@@ -197,10 +201,13 @@ async def test_first_run_records_baseline_silently(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_position_change_sends_buy_after_baseline(monkeypatch):
+    import app.data as data_module
+
+    monkeypatch.setattr(data_module, "fetch_history", lambda *a, **k: None)
     storage.add_watchlist("AAA")
-    # baseline: дорого (нет позиции)
-    storage.save_candles("AAA", "1day", _candle_df([200.0] * 30))
-    storage.save_fundamentals("AAA", _EXPENSIVE)
+    # baseline: дорого (нет позиции), данные свежие
+    storage.save_candles("AAA", "1day", _fresh_candles(close=200.0))
+    storage.save_fundamentals("AAA", _fund_prev_year_end(roe=5.0, bvps=50.0))
 
     sent_messages: list[str] = []
 
@@ -212,10 +219,14 @@ async def test_position_change_sends_buy_after_baseline(monkeypatch):
     await sn.run_daily_scan()  # baseline
     assert sent_messages == []
 
-    # рынок подешевел: цена 70 при BVPS 100 и ROE 25 → вход
-    storage.save_candles("AAA", "1day", _candle_df([70.0] * 260))
+    # рынок подешевел: цена плавно 100 → 70 при BVPS 100 и ROE 25.
+    # Падающая цена = текущий P/B в нижнем перцентиле истории (дешевизна ~1.0),
+    # composite score ≈ 0.67 ≥ порога 0.5 из конфига → вход.
+    storage.save_candles(
+        "AAA", "1day", _fresh_candles(n=260, close=list(np.linspace(100.0, 70.0, 260)))
+    )
     storage.delete_fundamentals("AAA")
-    storage.save_fundamentals("AAA", _CHEAP)
+    storage.save_fundamentals("AAA", _fund_prev_year_end(roe=25.0, bvps=100.0))
     await sn.run_daily_scan()
 
     assert len(sent_messages) == 1
@@ -229,11 +240,115 @@ async def test_position_change_sends_buy_after_baseline(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_missing_data_skipped(monkeypatch):
+    """Тикер без данных не даёт сигнала, но попадает в алерт о проблемах данных."""
     storage.add_watchlist("NODATA")
 
+    sent_messages: list[str] = []
+
     async def fake_send(text: str) -> bool:
-        raise AssertionError("не должно отправляться без данных")
+        sent_messages.append(text)
+        return True
 
     monkeypatch.setattr(sn, "send_telegram_message", fake_send)
-    await sn.run_daily_scan()  # не падает и не шлёт
-    # baseline даже не пишется: данных не было
+    await sn.run_daily_scan()
+
+    # Сигналов покупки/продажи нет...
+    assert [m for m in sent_messages if "ПОКУПКИ" in m or "ПРОДАЖИ" in m] == []
+    # ...но алерт о проблеме данных отправлен (это и есть цель мониторинга).
+    alerts = [m for m in sent_messages if "ПРОБЛЕМА ДАННЫХ" in m]
+    assert len(alerts) == 1
+    assert "NODATA: нет истории свечей" in alerts[0]
+
+
+# ── Здоровье данных: автообновление + алерты ───────────────────────────────
+
+def _fresh_candles(n: int = 60, close: float | list[float] = 200.0) -> pd.DataFrame:
+    """Свечи, заканчивающиеся сегодняшним днём (свежие)."""
+    end = pd.Timestamp.now().normalize()
+    ds = pd.date_range(end - pd.Timedelta(days=n - 1), periods=n)
+    closes = list(close) if isinstance(close, (list, tuple)) else [close] * n
+    return pd.DataFrame(
+        {
+            "begin": [d.strftime("%Y-%m-%d %H:%M:%S") for d in ds],
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": 1000.0,
+        }
+    )
+
+
+def _fund_at(days_ago: int, roe: float = 5.0, bvps: float = 50.0) -> pd.DataFrame:
+    d = (datetime.now(timezone.utc) - timedelta(days=days_ago)).date().isoformat()
+    return pd.DataFrame([{"date": d, "roe": roe, "book_value_per_share": bvps}])
+
+
+def _fund_prev_year_end(roe: float = 5.0, bvps: float = 50.0) -> pd.DataFrame:
+    """Отчётность за прошлый год (дата 31.12): видна анти-look-ahead логикой."""
+    y = datetime.now(timezone.utc).year - 1
+    return pd.DataFrame([{"date": f"{y}-12-31", "roe": roe, "book_value_per_share": bvps}])
+
+
+@pytest.mark.asyncio
+async def test_no_alert_when_data_fresh(monkeypatch):
+    storage.add_watchlist("FRESH")
+    storage.save_candles("FRESH", "1day", _fresh_candles())
+    storage.save_fundamentals("FRESH", _fund_at(10))
+
+    import app.data as data_module
+
+    monkeypatch.setattr(data_module, "fetch_history", lambda *a, **k: None)
+
+    sent_messages: list[str] = []
+
+    async def fake_send(text: str) -> bool:
+        sent_messages.append(text)
+        return True
+
+    monkeypatch.setattr(sn, "send_telegram_message", fake_send)
+    await sn.run_daily_scan()
+    assert [m for m in sent_messages if "ПРОБЛЕМА ДАННЫХ" in m] == []
+
+
+@pytest.mark.asyncio
+async def test_stale_and_update_failure_alert_sent_once(monkeypatch):
+    storage.add_watchlist("STALE")
+    storage.add_watchlist("FAIL")
+    # STALE: свечи двухлетней давности + старая отчётность
+    storage.save_candles("STALE", "1day", _candle_df([200.0] * 30))
+    storage.save_fundamentals("STALE", _fund_at(600))
+    # FAIL: данные свежие, но MOEX при обновлении падает
+    storage.save_candles("FAIL", "1day", _fresh_candles())
+    storage.save_fundamentals("FAIL", _fund_at(10))
+
+    import app.data as data_module
+
+    def boom(*a, **k):
+        raise RuntimeError("MOEX API недоступен")
+
+    monkeypatch.setattr(data_module, "fetch_history", boom)
+
+    sent_messages: list[str] = []
+
+    async def fake_send(text: str) -> bool:
+        sent_messages.append(text)
+        return True
+
+    monkeypatch.setattr(sn, "send_telegram_message", fake_send)
+    await sn.run_daily_scan()
+
+    alerts = [m for m in sent_messages if "ПРОБЛЕМА ДАННЫХ" in m]
+    assert len(alerts) == 1, f"ожидался ровно один алерт, пришло {len(alerts)}"
+    assert "STALE: свечи устарели" in alerts[0]
+    assert "FAIL: ошибка обновления свечей MOEX: MOEX API недоступен" in alerts[0]
+
+    # Повторный прогон в тот же день — алерт не дублируется.
+    before = len(sent_messages)
+    await sn.run_daily_scan()
+    assert len([m for m in sent_messages if "ПРОБЛЕМА ДАННЫХ" in m]) == 1
+    assert len(sent_messages) == before
+
+
+def test_freshness_issues_direct():
+    assert sn._freshness_issues("UNKNOWN") != []  # нет ни свечей, ни отчётности

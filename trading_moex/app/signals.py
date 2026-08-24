@@ -547,20 +547,31 @@ def roe_pb_position(
 
 def _forward_fill_fundamentals(prices: pd.Series, fundamentals: pd.DataFrame) -> pd.DataFrame:
     """Квартальные значения ROE/BV развёрнуты на каждый день prices (ffill)."""
-    ff = pd.DataFrame(index=prices.index)
-    ff["roe"] = np.nan
-    ff["book_value_per_share"] = np.nan
-    has_stability = "roe_stability" in fundamentals.columns
-    if has_stability:
-        ff["roe_stability"] = np.nan
+    cols = ["roe", "book_value_per_share"]
+    if "roe_stability" in fundamentals.columns:
+        cols.append("roe_stability")
     fund = fundamentals.copy()
     fund["date"] = pd.to_datetime(fund["date"])
-    for _, row in fund.sort_values("date").iterrows():
-        ff.loc[row["date"]:, "roe"] = row["roe"]
-        ff.loc[row["date"]:, "book_value_per_share"] = row["book_value_per_share"]
-        if has_stability:
-            ff.loc[row["date"]:, "roe_stability"] = row.get("roe_stability")
-    return ff.ffill()
+    # Векторный ffill вместо iterrows: pandas 3.x при iterrows() по смешанным
+    # колонкам (дата + float) превращает nan в NaT, что ломает присваивание
+    # во float64-колонку (LossySetitemError).
+    series = (
+        fund.sort_values("date")
+        .set_index("date")[cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .astype("float64")
+    )
+    idx = prices.index
+    filled = (
+        series.reindex(series.index.union(idx))
+        .sort_index()
+        .ffill()
+        .reindex(idx)
+    )
+    ff = pd.DataFrame(index=idx)
+    for c in cols:
+        ff[c] = filled[c].to_numpy(dtype=float)
+    return ff
 
 
 def _rolling_avg_roe_series(

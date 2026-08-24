@@ -3,6 +3,9 @@ services:
     build: ./trading_moex
     container_name: moex-trader
     restart: unless-stopped
+    # host-сеть: нужен доступ к локальному прокси 127.0.0.1:31533 для
+    # api.telegram.org (сигналы ROE). Порт 8081 слушается приложением напрямую.
+    network_mode: host
     env_file:
       - .env
     environment:
@@ -17,13 +20,12 @@ services:
       TINKOFF_SSL_RU_CA: "${TINKOFF_SSL_RU_CA:-true}"
       MOEX_LOGIN: "${MOEX_LOGIN:-}"
       MOEX_PASSWORD: "${MOEX_PASSWORD:-}"
-      # Переопределяем HTTP_PROXY из .env: контейнер в bridge-сети, адрес
-      # 127.0.0.1:31533 там недоступен, а MOEX/ЦБ блокировками не затронуты.
+      # Прокси только для Telegram-отправки сигналов; MOEX ходит напрямую.
+      TRADER_TG_PROXY: "${TRADER_TG_PROXY:-http://127.0.0.1:31533}"
+      # MOEX не заблокирован — глобальный прокси контейнеру не нужен.
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
       ALL_PROXY: ""
-    ports:
-      - "8081:8081"
     volumes:
       # Именованный volume: при первом запуске Docker копирует /app/data из
       # образа вместе с правами владельца (botuser), в отличие от bind-mount,

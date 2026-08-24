@@ -62,9 +62,20 @@ TRADER_SIGNALS_ENABLED: bool = os.environ.get("TRADER_SIGNALS_ENABLED", "true").
 # дубликаты исключены — первое наблюдение фиксируется как baseline без отправки).
 TRADER_SIGNALS_RUN_ON_STARTUP: bool = os.environ.get("TRADER_SIGNALS_RUN_ON_STARTUP", "true").lower() in ("1", "true")
 
+# Перед сканом докачивать хвост дневных свечей с MOEX (moexalgo) автоматически.
+TRADER_SIGNALS_AUTO_UPDATE: bool = os.environ.get("TRADER_SIGNALS_AUTO_UPDATE", "true").lower() in ("1", "true")
+# Свечи старше этого числа календарных дней считаются протухшими (выходные+праздники).
+# Протухание/ошибка обновления → Telegram-алерт раз в сутки.
+TRADER_SIGNALS_MAX_STALE_DAYS: int = int(os.environ.get("TRADER_SIGNALS_MAX_STALE_DAYS", "5"))
+# Отчётность старше этого возраста (дней) помечается предупреждением в алерте
+# (годовая отчётность выходит раз в год, поэтому порог щадящий).
+TRADER_SIGNALS_FUND_MAX_AGE_DAYS: int = int(os.environ.get("TRADER_SIGNALS_FUND_MAX_AGE_DAYS", "400"))
+
 # Telegram для сигналов: тот же бот, что и новостной (общий .env).
 TELEGRAM_BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("ADMIN_ID", "")
+# Локальный прокси для api.telegram.org (в host-сети контейнера); пусто = напрямую.
+TRADER_TG_PROXY: str = os.environ.get("TRADER_TG_PROXY", "")
 
 # ROE-signal parameters — tuned by backtests (CAGR 24.6%, DD 16% on 2021‑2024, 7 tickers).
 # Скоринг-режим (scoring=1) дал +21.2% trading part против +6.1% у AND-логики при rebalance=21д.
@@ -74,7 +85,7 @@ TRADER_ROE_MIN_SINGLE_ROE: float = float(os.environ.get("TRADER_ROE_MIN_SINGLE_R
 TRADER_ROE_PB_ENTRY: float = float(os.environ.get("TRADER_ROE_PB_ENTRY", "0.8"))  # вход: цена ≤ pb_entry × BVPS
 TRADER_ROE_PB_EXIT: float = float(os.environ.get("TRADER_ROE_PB_EXIT", "1.5"))  # выход: цена ≥ pb_exit × BVPS
 TRADER_ROE_ROE_EXIT: float = float(os.environ.get("TRADER_ROE_ROE_EXIT", "12.0"))  # выход: ROE < roe_exit
-TRADER_ROE_MIN_SCORE: float = float(os.environ.get("TRADER_ROE_MIN_SCORE", "0.4"))  # мин. composite score при scoring=1
+TRADER_ROE_MIN_SCORE: float = float(os.environ.get("TRADER_ROE_MIN_SCORE", "0.5"))  # мин. composite score при scoring=1 (0.5 — прибыльный вариант бэктеста SBER 2020–2026)
 TRADER_ROE_SCORING: int = int(os.environ.get("TRADER_ROE_SCORING", "1"))  # 1 = мульти-factor, 0 = AND-логика
 
 # Веса факторов при scoring=1 (сумма весов не обязана быть 1, используются как коэффициенты):

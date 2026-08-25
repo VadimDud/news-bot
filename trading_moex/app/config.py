@@ -108,3 +108,15 @@ TRADER_ROE_REBALANCE_DAYS: int = int(os.environ.get("TRADER_ROE_REBALANCE_DAYS",
 
 # Автозагрузка дивидендов с T-Bank Invest API при скане (0=выкл, 1=вкл).
 TRADER_SIGNALS_AUTO_DIVIDENDS: bool = os.environ.get("TRADER_SIGNALS_AUTO_DIVIDENDS", "true").lower() in ("1", "true")
+
+# ── Trading Skills: pre-trade gate ───────────────────────────────────────────
+# Включить pre-trade проверки перед выставлением ордеров (0=выкл, 1=вкл).
+TRADER_SKILLS_ENABLED: bool = os.environ.get("TRADER_SKILLS_ENABLED", "true").lower() in ("1", "true")
+# Режим гейта: shadow = только лог/дашборд, enforce = блокировка/резайз.
+TRADER_SKILLS_MODE: str = os.environ.get("TRADER_SKILLS_MODE", "shadow")
+# Минимальное R:R для входа (ниже — BLOCKED).
+TRADER_SKILLS_MIN_RR: float = float(os.environ.get("TRADER_SKILLS_MIN_RR", "1.5"))
+# Макс. % equity на одну позицию.
+TRADER_SKILLS_MAX_POSITION_PCT: float = float(os.environ.get("TRADER_SKILLS_MAX_POSITION_PCT", "50.0"))
+# Комиссия (одна сторона, %). 0.04% — типичный тариф MOEX.
+TRADER_SKILLS_COMMISSION_PCT: float = float(os.environ.get("TRADER_SKILLS_COMMISSION_PCT", "0.04"))

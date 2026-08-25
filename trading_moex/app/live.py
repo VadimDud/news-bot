@@ -17,6 +17,8 @@ from . import risk as risk_module
 from . import settings as app_settings
 from . import signals as sig
 from .strategies import STRATEGIES
+from .skills.context import TradeContext
+from .skills.pretrade import check_pretrade
 
 logger = logging.getLogger("moex_trader.live")
 
@@ -390,6 +392,50 @@ class LiveTrader:
             risk_module.position_size(self._equity, risk_pct, stop_dist, price), 1
         )
 
+    def _run_pretrade_gate(self, ticker: str, price: float, stop: float | None,
+                           target: float | None, figi: str):
+        """Запустить pre-trade проверку для тикера."""
+        from .news_guard import NewsGuard
+
+        risk_pct = float(self.strategy_params.get("risk_pct", 1.0) or 1.0)
+        atr_period = int(self.strategy_params.get("atr_period", 14) or 14)
+
+        # Проверка новостей
+        guard = NewsGuard()
+        news_blocked, news_reason = guard.is_blocked(ticker)
+
+        # Контекст сделки
+        ctx = TradeContext(
+            ticker=ticker,
+            direction="long",
+            entry=price,
+            stop=stop,
+            target=target,
+            equity=self._equity,
+            risk_pct=risk_pct,
+            atr_period=atr_period,
+        )
+
+        # Regime из локальных свечей (если есть в кэше)
+        regime_df = None
+        try:
+            from . import storage
+            candles = storage.get_candles(ticker, "1day")
+            if candles is not None and not candles.empty and len(candles) >= 50:
+                regime_df = candles
+        except Exception:  # noqa: BLE001
+            pass
+
+        return check_pretrade(
+            ctx,
+            regime_df=regime_df,
+            min_rr=config.TRADER_SKILLS_MIN_RR,
+            max_position_pct=config.TRADER_SKILLS_MAX_POSITION_PCT,
+            commission_pct=config.TRADER_SKILLS_COMMISSION_PCT,
+            news_blocked=news_blocked,
+            news_reason=news_reason,
+        )
+
     async def _act(self, client, account_id: str, figis: dict[str, str],
                    signals: dict[str, dict], positions: list[dict], prices: list[dict]) -> None:
         held_figis = {p["figi"] for p in positions}
@@ -419,7 +465,31 @@ class LiveTrader:
             if action == "buy":
                 if figi in held_figis:
                     continue
-                size = self._risk_size(price, info.get("stop"))
+                # Pre-trade gate: проверка перед входом
+                if config.TRADER_SKILLS_ENABLED:
+                    gate_report = self._run_pretrade_gate(
+                        ticker, price, info.get("stop"), info.get("target"), figi
+                    )
+                    if gate_report.verdict == "BLOCKED":
+                        self._log(
+                            f"[gate] {ticker}: BLOCKED — {gate_report.first_blocker}"
+                        )
+                        continue
+                    if gate_report.verdict == "RESIZE" and config.TRADER_SKILLS_MODE == "enforce":
+                        original_size = self._risk_size(price, info.get("stop"))
+                        gate_size = gate_report.checks.get("sizing", {}).get("size", original_size)
+                        size = min(original_size, gate_size)
+                        self._log(f"[gate] {ticker}: RESIZE → size={size}")
+                    else:
+                        size = self._risk_size(price, info.get("stop"))
+                    # В shadow-режиме логируем вердикт, но не блокируем
+                    if config.TRADER_SKILLS_MODE == "shadow":
+                        self._log(
+                            f"[gate:shadow] {ticker}: {gate_report.verdict}"
+                            + (f" — {gate_report.first_blocker}" if gate_report.first_blocker else "")
+                        )
+                else:
+                    size = self._risk_size(price, info.get("stop"))
                 await self._submit(client, account_id, figi, "buy", size, f"BUY {ticker} x{size}")
                 self.entries[ticker] = {
                     "entry_price": price,

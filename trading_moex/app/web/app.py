@@ -779,6 +779,67 @@ async def news_refresh(request: web.Request) -> web.Response:
     raise web.HTTPFound(f"/news?ticker={ticker}")
 
 
+async def pretrade_check(request: web.Request) -> web.Response:
+    """POST /api/pretrade/{ticker} — ручная pre-trade проверка (включая LLM-тейзис)."""
+    import json as json_mod
+
+    from ..skills.context import TradeContext
+    from ..skills.pretrade import check_pretrade
+    from ..skills.thesis import validate_thesis
+
+    ticker = request.match_info.get("ticker", "").strip().upper()
+    if not ticker:
+        return web.json_response({"error": "ticker required"}, status=400)
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    entry = float(body.get("entry", 0))
+    stop = body.get("stop")
+    target = body.get("target")
+    thesis_text = body.get("thesis", "")
+
+    ctx = TradeContext(
+        ticker=ticker,
+        direction="long",
+        entry=entry,
+        stop=float(stop) if stop else None,
+        target=float(target) if target else None,
+    )
+
+    # Regime из кэша
+    regime_df = None
+    try:
+        from .. import storage
+        candles = storage.get_candles(ticker, "1day")
+        if candles is not None and not candles.empty and len(candles) >= 50:
+            regime_df = candles
+    except Exception:  # noqa: BLE001
+        pass
+
+    report = check_pretrade(ctx, regime_df=regime_df)
+
+    # LLM-тейзис (ручной режим)
+    thesis_result = None
+    if thesis_text:
+        thesis_result = await validate_thesis(ctx, thesis_text)
+
+    result = report.as_dict()
+    if thesis_result:
+        result["thesis"] = {
+            "verdict": thesis_result.verdict,
+            "claim_clarity": thesis_result.claim_clarity,
+            "evidence_quality": thesis_result.evidence_quality,
+            "invalidation_clear": thesis_result.invalidation_clear,
+            "missing": thesis_result.missing,
+            "risk": thesis_result.risk,
+        }
+
+    return web.json_response(result)
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
@@ -817,5 +878,6 @@ def create_app() -> web.Application:
     app.router.add_get("/news", news_page)
     app.router.add_post("/news/override", news_override)
     app.router.add_post("/news/refresh", news_refresh)
+    app.router.add_post("/api/pretrade/{ticker}", pretrade_check)
     app.router.add_static("/static", Path(__file__).resolve().parent / "static")
     return app

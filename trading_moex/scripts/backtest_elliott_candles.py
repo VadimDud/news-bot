@@ -39,8 +39,23 @@ def load_df(ticker: str, period: str, start: date, end: date) -> pd.DataFrame | 
     try:
         return data.fetch_history(ticker, period, start, end)
     except Exception as e:
-        print(f"  ⚠ {ticker} {period}: {e}")
-        return None
+        print(f"  ⚠ {ticker} {period}: загрузка с MOEX не удалась ({e}), пробую кэш...")
+        try:
+            raw = storage.get_candles(ticker, period, start=start, end=end)
+            if raw.empty:
+                print(f"  ⚠ {ticker} {period}: кэш пуст")
+                return None
+            df = raw.copy()
+            df["begin"] = pd.to_datetime(df["begin"])
+            df = df.set_index("begin").sort_index()
+            df.index.name = "datetime"
+            df = df[["open", "high", "low", "close", "volume"]]
+            df = df[~df.index.duplicated(keep="last")]
+            print(f"  ✓ {ticker} {period}: загружено {len(df)} свечей из кэша")
+            return df
+        except Exception as e2:
+            print(f"  ⚠ {ticker} {period}: кэш тоже недоступен ({e2})")
+            return None
 
 
 def print_cycle_summary(cycle, idx: int):

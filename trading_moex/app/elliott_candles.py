@@ -166,14 +166,18 @@ def wave_quality_score(wave: Wave) -> dict:
             extension = 0.5  # near middle
 
     # --- 2. Not-shortest: middle impulse body is not the shortest ---
+    # Elliott rule: wave 3 is never the shortest of waves 1/3/5.
+    # Here "middle" impulse = analog of wave 3.
     not_shortest = 0.0
     if n_impulses >= 3:
         imp_bodies = sub.loc[impulse_mask, "body_abs"].values
         mid = len(imp_bodies) // 2
-        if imp_bodies[mid] >= min(imp_bodies):
-            not_shortest = 1.0
-        elif imp_bodies[mid] >= np.median(imp_bodies):
-            not_shortest = 0.5
+        others = np.delete(imp_bodies, mid)
+        min_others = others.min()
+        if imp_bodies[mid] > min_others:
+            not_shortest = 1.0   # strictly not the shortest
+        elif imp_bodies[mid] == min_others and np.sum(imp_bodies == min_others) > 1:
+            not_shortest = 0.5  # tied for shortest with at least one other
     elif n_impulses >= 2:
         not_shortest = 1.0  # can't be shortest with only 2
 
@@ -289,10 +293,10 @@ def _run_cycle(
     base_pct: float = 0.25,
     max_steps: int = 3,
     commission: float = 0.0005,
-) -> tuple[Cycle, float]:
+) -> tuple[Cycle, float, int]:
     """Execute a Martingale cycle starting after *wave*.
 
-    Returns (cycle, new_equity).
+    Returns (cycle, new_equity, last_consumed_idx).
     """
     fade_dir = "long" if wave.direction == "bear" else "short"
     cycle = Cycle(
@@ -306,6 +310,7 @@ def _run_cycle(
     cur_idx = wave.end_idx + 1
     equity_at_start = equity
     step = 0
+    last_consumed = cur_idx - 1
 
     while step < max_steps and cur_idx < len(df):
         # Skip doji candles — no trade on indecision
@@ -344,13 +349,14 @@ def _run_cycle(
             quality=cycle.quality,
         ))
         equity += pnl
+        last_consumed = cur_idx
 
         if pnl >= 0:
             break  # cycle won
 
         cur_idx += 1  # next candle for doubled position
 
-    return cycle, equity
+    return cycle, equity, last_consumed
 
 
 def run_backtest(
@@ -379,13 +385,18 @@ def run_backtest(
     equity = initial_equity
     all_cycles: list[Cycle] = []
     equity_curve: list[tuple[str, float]] = [(str(classified.index[0]), equity)]
+    busy_until = -1  # last index occupied by an ongoing cycle
 
     for wave in waves:
         if not wave.has_next_candle():
             continue
-        cycle, equity = _run_cycle(classified, wave, equity, base_pct, max_steps, commission)
+        # Skip if this wave overlaps with a previous cycle's active trades
+        if wave.end_idx <= busy_until:
+            continue
+        cycle, equity, last_consumed = _run_cycle(classified, wave, equity, base_pct, max_steps, commission)
         all_cycles.append(cycle)
         equity_curve.append((str(wave.next_open), round(equity, 2)))
+        busy_until = last_consumed
 
     all_trades = [t for c in all_cycles for t in c.trades]
     metrics = _compute_metrics(all_cycles, all_trades, initial_equity, equity, classified)
@@ -413,7 +424,6 @@ def _compute_metrics(
     losses = [p for p in pnls if p <= 0]
 
     # max drawdown from equity curve
-    vals = [initial] + [initial]  # placeholder, we'll recompute properly
     running = initial
     peak = running
     max_dd = 0.0
@@ -439,9 +449,9 @@ def _compute_metrics(
     # buy & hold
     bh_return = (float(df["close"].iloc[-1]) - float(df["close"].iloc[0])) / float(df["close"].iloc[0])
 
-    gross_pnl = sum(t.pnl for t in trades) + total_comm
-    gross_win = sum(t.pnl for t in trades if t.pnl > 0) + sum(t.commission for t in trades if t.pnl > 0)
-    gross_loss = abs(sum(t.pnl for t in trades if t.pnl <= 0)) + sum(t.commission for t in trades if t.pnl <= 0)
+    # profit factor: sum of net winning PnL / abs(sum of net losing PnL)
+    net_wins = sum(t.pnl for t in trades if t.pnl > 0)
+    net_losses = abs(sum(t.pnl for t in trades if t.pnl < 0))
 
     return {
         "total_cycles": len(cycles),
@@ -456,7 +466,7 @@ def _compute_metrics(
         "max_drawdown_pct": round(max_dd * 100, 2),
         "buy_hold_return_pct": round(bh_return * 100, 2),
         "total_commission": round(total_comm, 2),
-        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else float("inf"),
+        "profit_factor": round(net_wins / net_losses, 2) if net_losses > 0 else float("inf"),
         "step_distribution": step_dist,
         "avg_quality_winning": round(float(np.mean(win_q)), 4) if win_q else None,
         "avg_quality_losing": round(float(np.mean(loss_q)), 4) if loss_q else None,
@@ -469,11 +479,12 @@ def _compute_metrics(
 # ---------------------------------------------------------------------------
 
 def _count_ltf_waves(ltf_df: pd.DataFrame, start_dt, end_dt) -> list[dict]:
-    """Within [start_dt, end_dt) on the LTF, count alternating same-color runs (waves).
+    """Within [start_dt, end_dt] (inclusive both ends) on the LTF,
+    count alternating same-color runs (waves), excluding doji.
 
     Returns list of dicts: ``{color, length}``.
     """
-    window = ltf_df[(ltf_df.index >= start_dt) & (ltf_df.index < end_dt)]
+    window = ltf_df[(ltf_df.index >= start_dt) & (ltf_df.index <= end_dt)]
     if window.empty:
         return []
 
@@ -482,6 +493,9 @@ def _count_ltf_waves(ltf_df: pd.DataFrame, start_dt, end_dt) -> list[dict]:
     i = 0
     while i < len(colors):
         c = colors[i]
+        if c == "doji":
+            i += 1
+            continue
         j = i
         while j < len(colors) and colors[j] == c:
             j += 1

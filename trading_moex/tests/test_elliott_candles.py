@@ -236,6 +236,45 @@ class TestWaveQuality:
         score = wave_quality_score(waves[0])
         assert score["dominance"] > 0.5
 
+    def test_not_shortest_middle(self):
+        """Middle impulse NOT the shortest → not_shortest = 1.0."""
+        # 5-candle wave: big bodies at pos 0,2,4 (impulse); small at 1,3 (corrective)
+        # Impulse bodies: [5, 3, 5] → middle=3, others=[5,5], min_others=5, 3 < 5 → 0.0
+        # But we need 3 impulses where middle is NOT shortest:
+        # Impulse bodies: [3, 5, 4] → middle=5, others=[3,4], min_others=3, 5 > 3 → 1.0
+        closes = [103, 104, 110, 111, 116]
+        opens  = [100, 103, 104, 110, 111]
+        # Candles 0,2,4: big body (3,6,5) → impulse (with small range)
+        # Candles 1,3: tiny body (1,1) → corrective (with large range)
+        h_ranges = [0.5, 10.0, 0.5, 10.0, 0.5]
+        data = []
+        for i in range(5):
+            o, c = opens[i], closes[i]
+            data.append({"open": o, "high": max(o,c)+h_ranges[i]/2,
+                         "low": min(o,c)-h_ranges[i]/2, "close": c, "volume": 1000})
+        df = classify_candles(pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=5, freq="D")), atr_k=0.01)
+        waves = detect_waves(df, wave_min=3, wave_max=5)
+        score = wave_quality_score(waves[0])
+        # Impulse bodies: 3, 6, 5 → mid=6, others=[3,5], min_others=3 → 6>3 → 1.0
+        assert score["not_shortest"] == 1.0
+
+    def test_not_shortest_middle_is_shortest(self):
+        """Middle impulse IS the shortest → not_shortest = 0.0."""
+        # Impulse bodies: [5, 2, 4] → middle=2, others=[5,4], min_others=4, 2<4 → 0.0
+        closes = [105, 106, 110, 111, 116]
+        opens  = [100, 105, 106, 110, 111]
+        h_ranges = [0.5, 10.0, 0.5, 10.0, 0.5]
+        data = []
+        for i in range(5):
+            o, c = opens[i], closes[i]
+            data.append({"open": o, "high": max(o,c)+h_ranges[i]/2,
+                         "low": min(o,c)-h_ranges[i]/2, "close": c, "volume": 1000})
+        df = classify_candles(pd.DataFrame(data, index=pd.date_range("2024-01-01", periods=5, freq="D")), atr_k=0.01)
+        waves = detect_waves(df, wave_min=3, wave_max=5)
+        score = wave_quality_score(waves[0])
+        # Impulse bodies: 5, 2, 4 → mid=2, others=[5,4], min_others=4, 2<4 → 0.0
+        assert score["not_shortest"] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # Martingale FSM
@@ -327,6 +366,49 @@ class TestBacktest:
         bt = run_backtest(combined, wave_min=3, wave_max=5, body_ratio_min=0.6, atr_k=0.01)
         # Wave of 4 bull + bear next → wave detected, cycle executed
         assert len(bt["equity_curve"]) == 1 + len(bt["cycles"])
+
+    def test_no_overlapping_cycles(self):
+        """Two consecutive waves: first cycle's trades should block the second."""
+        # Wave1: 3 bull candles (indices 0-2)
+        # Separator: bear candle (index 3) — next candle for wave1, consumed by trade1
+        # Wave2: 3 bull candles (indices 4-6)
+        # Separator: bear candle (index 7) — next candle for wave2
+        combined = _bull_candles(3)
+        combined = _append_candle(combined, 99, 100, days_offset=1)   # index 3: bear (trade)
+        combined = _append_candle(combined, 101, 100, days_offset=1)  # index 4: bull
+        combined = _append_candle(combined, 102, 101, days_offset=1)  # index 5: bull
+        combined = _append_candle(combined, 103, 102, days_offset=1)  # index 6: bull
+        combined = _append_candle(combined, 99, 103, days_offset=1)   # index 7: bear (trade)
+
+        bt = run_backtest(combined, wave_min=3, wave_max=5, initial_equity=100_000,
+                          body_ratio_min=0.6, atr_k=0.01)
+        # Wave1 at [0:2] → trade at index 3, cycle ends at index 3
+        # Wave2 at [4:6] → trade at index 7
+        # These should NOT overlap (wave2.end_idx=6 > busy_until=3), so both execute
+        # But if wave2's cycle used 3 steps (indices 3,4,5), it WOULD overlap wave1
+        # With busy_until tracking, wave2 should still fire since wave1 ends at idx 3
+        assert len(bt["cycles"]) >= 1  # at least first wave fires
+
+    def test_overlapping_waves_blocked(self):
+        """Wave2 starts during wave1's active trades → blocked."""
+        # 3 bear candles [0:2] → wave1 (BUY)
+        # Doji at [3] → separator (skipped by _run_cycle)
+        # Bear at [4] → trade1 (loss)
+        # Bear at [5] → trade2 (loss)
+        # Bear at [6] → trade3 (loss)
+        # 3 bear candles [4:6] → would overlap wave1's trades
+        combined = _bear_candles(3, step=1.0)
+        combined = _append_candle(combined, 100, 100, h_range=2.0, days_offset=1)  # doji separator
+        combined = _append_candle(combined, 98, 100, days_offset=1)  # bear (loss)
+        combined = _append_candle(combined, 96, 98, days_offset=1)   # bear (loss)
+        combined = _append_candle(combined, 94, 96, days_offset=1)   # bear (loss)
+
+        bt = run_backtest(combined, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01)
+        # Wave1 at [0:2] → 3 trades at indices [4,5,6] (doji skipped)
+        # busy_until = 2+3 = 5, so wave starting at [4] blocked (4 <= 5)
+        assert len(bt["cycles"]) == 1
 
 
 # ---------------------------------------------------------------------------

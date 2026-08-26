@@ -44,6 +44,28 @@
   </div>
 </div>
 
+{% if result.elliott %}
+<div class="card">
+  <h2>Эллиотт: циклы и мартингейл</h2>
+  <div class="metrics">
+    <div class="metric"><div class="label">Циклов (win / loss)</div>
+      <div class="value">{{ result.elliott.total_cycles }} <span style="font-size:12px;color:var(--muted)">({{ result.elliott.win_cycles }} / {{ result.elliott.loss_cycles }})</span></div></div>
+    <div class="metric"><div class="label">Средний PNL цикла, ₽</div>
+      <div class="value {{ 'pos' if result.elliott.avg_cycle_pnl >= 0 else 'neg' }}">{{ '%+.2f' % result.elliott.avg_cycle_pnl }}</div></div>
+    <div class="metric"><div class="label">Buy &amp; Hold</div>
+      <div class="value {{ 'pos' if result.elliott.buy_hold_return_pct >= 0 else 'neg' }}">{{ '%+.2f' % result.elliott.buy_hold_return_pct }}%</div></div>
+    <div class="metric"><div class="label">Комиссии, ₽</div>
+      <div class="value">{{ '%.2f' % result.elliott.total_commission }}</div></div>
+    <div class="metric"><div class="label">Качество волн win / lose</div>
+      <div class="value" style="font-size:15px">{{ '%.2f' % (result.elliott.avg_quality_winning or 0) }} / {{ '%.2f' % (result.elliott.avg_quality_losing or 0) }}</div></div>
+    <div class="metric"><div class="label">Шаги мартингейла (сделок)</div>
+      <div class="value" style="font-size:15px">
+        {% for s in [1, 2, 3] %}{{ s }}: {{ result.elliott.step_distribution.get(s|string, 0) if result.elliott.step_distribution is mapping else 0 }}{% if not loop.last %} · {% endif %}{% endfor %}
+      </div></div>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Кривая капитала</h2>
   <canvas id="equity" height="120"></canvas>

@@ -203,6 +203,8 @@ def main():
                         help="Min body/range ratio for impulse candle (default: 0.6)")
     parser.add_argument("--atr-k", type=float, default=0.5,
                         help="Min body = k*ATR for impulse candle (default: 0.5)")
+    parser.add_argument("--quality-min", type=float, default=0.0,
+                        help="Skip waves with quality score below this, 0..1 (default: 0 = off)")
     parser.add_argument("--mtf", action="store_true",
                         help="Run multi-TF correction analytics")
     parser.add_argument("--mtf-htf", default="1day",
@@ -227,6 +229,7 @@ def main():
         "commission": args.commission,
         "body_ratio_min": args.body_ratio_min,
         "atr_k": args.atr_k,
+        "quality_min": args.quality_min,
     }
 
     print("Elliott Micro-Wave Candle Backtest")

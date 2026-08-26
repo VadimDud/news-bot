@@ -469,6 +469,8 @@ def test_backtest_smoke_with_risk_strategies():
         index=idx,
     )
     for key in STRATEGIES:
+        if STRATEGIES[key]["cls"] is None:
+            continue  # не-backtrader стратегии (elliott_candles покрыты отдельно)
         params = {p["key"]: p["default"] for p in STRATEGIES[key]["params"]}
         res = run_backtest(df, STRATEGIES[key]["cls"], params, cash=100_000, commission=0.0005)
         assert "profit_factor" in res

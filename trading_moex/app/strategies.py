@@ -1519,6 +1519,19 @@ STRATEGIES = {
             {"key": "stop_loss_pct", "label": "Стоп-лосс: 0 = выключен, иначе % от цены входа", "type": "float", "default": 0.0},
         ],
     },
+    "elliott_candles": {
+        "name": "Эллиотт микро-волны (контртренд + мартингейл)",
+        "cls": None,
+        "params": [
+            {"key": "wave_min", "label": "Мин. длина волны, свечей", "type": "int", "default": 3},
+            {"key": "wave_max", "label": "Макс. длина волны, свечей", "type": "int", "default": 5},
+            {"key": "body_ratio_min", "label": "Импульс: тело ≥ доли диапазона", "type": "float", "default": 0.6},
+            {"key": "atr_k", "label": "Импульс: тело ≥ k×ATR(14)", "type": "float", "default": 0.5},
+            {"key": "base_pct", "label": "Шаг 1 мартингейла, доля капитала", "type": "float", "default": 0.25},
+            {"key": "max_steps", "label": "Макс. шагов удвоения", "type": "int", "default": 3},
+            {"key": "quality_min", "label": "Фильтр качества волны 0..1 (0 = выкл)", "type": "float", "default": 0.0},
+        ],
+    },
 }
 
 

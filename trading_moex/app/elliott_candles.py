@@ -370,8 +370,12 @@ def run_backtest(
     atr_period: int = 14,
     atr_k: float = 0.5,
     initial_equity: float = 100_000,
+    quality_min: float = 0.0,
 ) -> dict:
     """Full back-test on a single ticker/period DataFrame.
+
+    ``quality_min > 0`` skips waves whose micro-Elliott quality score is
+    below the threshold (same semantics as the live notifier).
 
     Returns dict with ``cycles``, ``trades``, ``equity_curve``,
     ``metrics``.
@@ -392,6 +396,9 @@ def run_backtest(
             continue
         # Skip if this wave overlaps with a previous cycle's active trades
         if wave.end_idx <= busy_until:
+            continue
+        # Optional quality filter (unified with the live notifier threshold)
+        if quality_min > 0 and wave_quality_score(wave)["total"] < quality_min:
             continue
         cycle, equity, last_consumed = _run_cycle(classified, wave, equity, base_pct, max_steps, commission)
         all_cycles.append(cycle)

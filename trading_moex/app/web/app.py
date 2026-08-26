@@ -19,6 +19,7 @@ import jinja2
 from aiohttp import web
 
 from .. import config, data, fundamentals, settings, storage
+from .. import elliott_candles
 from ..backtest import run_backtest, run_portfolio_backtest
 from ..catalog import AVAILABLE_TICKERS
 from ..conomy import ConomyError, build_fundamentals
@@ -576,6 +577,14 @@ async def _run_backtest_job(
             result = await _run_roe_portfolio(
                 loop, tickers, period, params, cash, commission, start, end, set_progress
             )
+        elif strategy_key == "elliott_candles":
+            df = await loop.run_in_executor(
+                None, data.fetch_history, tickers[0], period, start, end, True, set_progress
+            )
+            job["percent"] = 90
+            result = await loop.run_in_executor(
+                None, _run_elliott_backtest, df, params, cash, commission
+            )
         else:
             df = await loop.run_in_executor(
                 None, data.fetch_history, tickers[0], period, start, end, True, set_progress
@@ -624,6 +633,74 @@ async def _run_roe_portfolio(loop, tickers, period, params, cash, commission, st
         commission,
         dividends_map,
     )
+
+
+def _run_elliott_backtest(df, params: dict, cash: float, commission: float) -> dict:
+    """Мост Elliott-движка в плоский формат страницы результата бэктеста."""
+    raw = elliott_candles.run_backtest(df, initial_equity=cash, commission=commission, **params)
+    m = raw["metrics"]
+    cycles = raw["cycles"]
+
+    pnls = [c.total_pnl for c in cycles]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    n = len(pnls)
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 0.0
+    wr = len(wins) / n if n else 0.0
+    expectancy = wr * avg_win - (1 - wr) * avg_loss
+
+    longest_win = longest_loss = cur_w = cur_l = 0
+    for p in pnls:
+        cur_w = cur_w + 1 if p > 0 else 0
+        cur_l = cur_l + 1 if p <= 0 else 0
+        longest_win = max(longest_win, cur_w)
+        longest_loss = max(longest_loss, cur_l)
+
+    pf = m.get("profit_factor")
+    # PF = inf (нет убыточных циклов) шаблон не отображает — подменяем крупным числом.
+    pf_display = 999.99 if (pf is None or pf == float("inf")) else pf
+    if not m.get("total_trades"):
+        pf_display = None
+
+    trade_rows = [
+        {
+            "traded": t.entry_dt[:16] if t.entry_dt else "",
+            "status": f"{'long' if t.direction == 'long' else 'short'} · шаг {t.step} ({t.size_pct:.0%})",
+            "pnl": round(t.pnl, 2),
+        }
+        for t in raw["trades"][-100:]
+    ]
+
+    return {
+        "total_return_pct": m.get("total_return_pct", 0.0),
+        "final_value": m.get("final_equity", cash),
+        "max_drawdown_pct": m.get("max_drawdown_pct", 0.0),
+        "profit_factor": pf_display,
+        "sharpe": None,
+        "trades_total": m.get("total_trades", 0),
+        "win_rate_pct": round(m.get("win_rate", 0.0) * 100, 1),
+        "expectancy": round(expectancy, 2),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "longest_win_streak": longest_win,
+        "longest_loss_streak": longest_loss,
+        "n_bars": len(df),
+        "dividends_income": None,
+        "trades": trade_rows,
+        "equity_curve": [[d, v] for d, v in raw["equity_curve"]],
+        "elliott": {
+            "total_cycles": m.get("total_cycles", 0),
+            "win_cycles": m.get("win_cycles", 0),
+            "loss_cycles": m.get("loss_cycles", 0),
+            "avg_cycle_pnl": m.get("avg_cycle_pnl", 0.0),
+            "step_distribution": m.get("step_distribution", {}),
+            "avg_quality_winning": m.get("avg_quality_winning"),
+            "avg_quality_losing": m.get("avg_quality_losing"),
+            "buy_hold_return_pct": m.get("buy_hold_return_pct", 0.0),
+            "total_commission": m.get("total_commission", 0.0),
+        },
+    }
 
 
 async def backtest_status(request: web.Request) -> web.Response:

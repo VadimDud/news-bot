@@ -140,6 +140,7 @@ class LiveTrader:
         self._lock = asyncio.Lock()
         self._equity = 100_000.0
         self.entries: dict[str, dict] = {}
+        self._restore_state()
         self.status: dict = {
             "running": False,
             "dry_run": self.dry_run,
@@ -151,6 +152,30 @@ class LiveTrader:
             "log": [],
             "last_error": None,
         }
+
+    def _restore_state(self) -> None:
+        """Восстановить сохранённые настройки (стратегия, dry_run, params) из БД."""
+        try:
+            saved = app_settings.load_live_state()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось загрузить live-состояние: %s", exc)
+            return
+        strategy = saved.get("strategy") or self.strategy
+        if strategy in STRATEGIES and strategy in LIVE_STRATEGIES:
+            self.strategy = strategy
+            defaults = {p["key"]: p["default"] for p in STRATEGIES[strategy]["params"]}
+            for key, value in (saved.get("strategy_params") or {}).items():
+                if key in defaults:
+                    spec = next(p for p in STRATEGIES[strategy]["params"] if p["key"] == key)
+                    try:
+                        value = int(value) if spec["type"] == "int" else float(value)
+                    except (TypeError, ValueError):
+                        value = defaults[key]
+                    defaults[key] = value
+            self.strategy_params = defaults
+        dry_run = saved.get("dry_run")
+        if isinstance(dry_run, bool):
+            self.dry_run = dry_run
 
     # ── Управление ───────────────────────────────────────────────────────────
 
@@ -164,9 +189,11 @@ class LiveTrader:
         self.strategy = key
         self.strategy_params = {p["key"]: p["default"] for p in STRATEGIES[key]["params"]}
         self.entries.clear()
+        app_settings.save_live_state(self.strategy, self.dry_run, self.strategy_params)
 
     def set_dry_run(self, dry_run: bool) -> None:
         self.dry_run = bool(dry_run)
+        app_settings.save_live_state(self.strategy, self.dry_run, self.strategy_params)
 
     async def start(self) -> None:
         async with self._lock:

@@ -404,7 +404,8 @@ async def screener_page(request: web.Request) -> web.Response:
 
     Авто-режим: по умолчанию включён авто-скан высококапитализационных бумаг
     (MOEX ISS); результат кэшируется в БД и показывается при повторных
-    заходах, пока не запущен новый отбор.
+    заходах, пока не запущен новый отбор. Фильтры сохраняются в БД и
+    восстанавливаются при повторном заходе/перезапуске.
     """
     form = await request.post() if request.method == "POST" else {}
 
@@ -415,13 +416,14 @@ async def screener_page(request: web.Request) -> web.Response:
         except (TypeError, ValueError):
             return default
 
-    min_avg_roe = fget("min_avg_roe", 15.0)
-    min_single_roe = fget("min_single_roe", 12.0)
-    pb_entry = fget("pb_entry", 0.8)
-    years = int(fget("years", 10))
+    saved_filters = settings.load_screener_filters() if not form else {}
+    min_avg_roe = fget("min_avg_roe", saved_filters.get("min_avg_roe", 15.0))
+    min_single_roe = fget("min_single_roe", saved_filters.get("min_single_roe", 12.0))
+    pb_entry = fget("pb_entry", saved_filters.get("pb_entry", 0.8))
+    years = int(fget("years", saved_filters.get("years", 10)))
     scan = bool(form.get("scan"))
-    min_market_cap = fget("min_market_cap", fundamentals.DEFAULT_MIN_MARKET_CAP)
-    min_volume_rub = fget("min_volume_rub", fundamentals.DEFAULT_MIN_VOLUME_RUB)
+    min_market_cap = fget("min_market_cap", saved_filters.get("min_market_cap", fundamentals.DEFAULT_MIN_MARKET_CAP))
+    min_volume_rub = fget("min_volume_rub", saved_filters.get("min_volume_rub", fundamentals.DEFAULT_MIN_VOLUME_RUB))
 
     candidates: list[dict] = []
     fresh = False
@@ -444,6 +446,18 @@ async def screener_page(request: web.Request) -> web.Response:
     else:
         # GET без POST — показываем последний результат отбора (если был)
         candidates = storage.load_screener_result()
+
+    if form:
+        settings.save_screener_filters(
+            {
+                "min_avg_roe": min_avg_roe,
+                "min_single_roe": min_single_roe,
+                "pb_entry": pb_entry,
+                "years": years,
+                "min_market_cap": min_market_cap,
+                "min_volume_rub": min_volume_rub,
+            }
+        )
 
     return aiohttp_jinja2.render_template(
         "screener.html",

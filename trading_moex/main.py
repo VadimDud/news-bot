@@ -39,7 +39,7 @@ async def main() -> None:
     logger.info("MOEX Trader dashboard: http://%s:%s", config.WEB_HOST, config.WEB_PORT)
     logger.info(
         "Dry-run=%s, poll=%ss, тикеры=%s, стратегия=%s",
-        config.DRY_RUN, config.POLL_INTERVAL, config.WATCH_TICKERS, live_trader.strategy,
+        live_trader.dry_run, config.POLL_INTERVAL, config.WATCH_TICKERS, live_trader.strategy,
     )
 
     if not app_settings.tinkoff_token():

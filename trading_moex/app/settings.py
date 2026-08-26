@@ -70,3 +70,72 @@ def mask(value: str) -> str:
     if len(value) <= 4:
         return "•" * 4
     return f"{value[:4]}•••"
+
+
+# ── Live-состояние (стратегия, dry_run, параметры) ───────────────────────────
+
+def save_live_state(strategy: str, dry_run: bool, strategy_params: dict) -> None:
+    """Сохранить настройки live-цикла в БД (переживают перезапуск)."""
+    import json
+    storage.set_setting("live_strategy", strategy)
+    storage.set_setting("live_dry_run", "1" if dry_run else "0")
+    storage.set_setting("live_strategy_params", json.dumps(strategy_params, ensure_ascii=False))
+
+
+def load_live_state() -> dict:
+    """Загрузить сохранённое live-состояние из БД.
+
+    Возвращает dict с ключами strategy, dry_run, strategy_params.
+    Если ничего не сохранено — значения из config.
+    """
+    import json
+    from . import config
+
+    strategy = storage.get_setting("live_strategy") or "sma_cross"
+    dry_run_raw = storage.get_setting("live_dry_run")
+    dry_run = (dry_run_raw == "1") if dry_run_raw is not None else config.DRY_RUN
+    params_raw = storage.get_setting("live_strategy_params")
+    if params_raw:
+        try:
+            strategy_params = json.loads(params_raw)
+        except (ValueError, TypeError):
+            strategy_params = {}
+    else:
+        strategy_params = {}
+    return {"strategy": strategy, "dry_run": dry_run, "strategy_params": strategy_params}
+
+
+# ── Скринер: фильтры ────────────────────────────────────────────────────────
+
+_SCREENER_DEFAULTS = {
+    "min_avg_roe": 15.0,
+    "min_single_roe": 12.0,
+    "pb_entry": 0.8,
+    "years": 10,
+    "min_market_cap": 10_000_000_000,
+    "min_volume_rub": 1_000_000,
+}
+
+
+def save_screener_filters(filters: dict) -> None:
+    """Сохранить фильтры скринера в БД (переживают перезапуск)."""
+    import json
+    storage.set_setting("screener_filters", json.dumps(filters, ensure_ascii=False))
+
+
+def load_screener_filters() -> dict:
+    """Загрузить сохранённые фильтры скринера из БД.
+
+    Возвращает dict с ключами min_avg_roe, min_single_roe, pb_entry, years,
+    min_market_cap, min_volume_rub. Если ничего не сохранено — дефолты.
+    """
+    import json
+    raw = storage.get_setting("screener_filters")
+    if raw:
+        try:
+            saved = json.loads(raw)
+            if isinstance(saved, dict):
+                return {**_SCREENER_DEFAULTS, **saved}
+        except (ValueError, TypeError):
+            pass
+    return dict(_SCREENER_DEFAULTS)

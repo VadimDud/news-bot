@@ -91,7 +91,7 @@ def load_live_state() -> dict:
     import json
     from . import config
 
-    strategy = storage.get_setting("live_strategy") or "sma_cross"
+    strategy = storage.get_setting("live_strategy") or "donchian"
     dry_run_raw = storage.get_setting("live_dry_run")
     dry_run = (dry_run_raw == "1") if dry_run_raw is not None else config.DRY_RUN
     params_raw = storage.get_setting("live_strategy_params")

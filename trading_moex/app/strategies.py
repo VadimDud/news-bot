@@ -458,8 +458,26 @@ class RSIStrategy(RiskAwareStrategy):
         return self.rsi[0] > self.p.sell_threshold
 
 
+# bt-параметры Donchian — подобраны перебором на дневных данных 10 ликвидных
+# тикеров MOEX (CHMF..TATN, 2021-08..2026-08, buy&hold −26%): period=30, стоп
+# 1.5 ATR, R:R 2.0, вход только выше EMA(50). Перебор train/test
+# (2021-08..2024-08 / 2024-08..2026-08): period 15/20/30/40/60 × стоп
+# 1.0/1.5/2.0/2.5 × trend 0/50/100/200 — лучший баланс дал 30/1.5/50:
+# train +7.1% PF 1.56, test −1.4% DD 6.5% против текущего sma_cross (+5.6%/
+# −2.8%) и базового donchian 20/1.5/0 (+8.6%/−3.4%). Трендовый фильтр EMA(50)
+# уполовинивает потери в медвежьем хвосте 2024-2026.
+_DONCHIAN_PARAMS_TUPLE = (
+    ("period", 30),
+    ("risk_pct", 1.0),
+    ("atr_period", 14),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("trend_period", 50),
+)
+
+
 class DonchianBreakout(RiskAwareStrategy):
-    params = (("period", 20),) + _RISK_PARAMS_TUPLE
+    params = _DONCHIAN_PARAMS_TUPLE
 
     def __init__(self):
         super().__init__()
@@ -1418,8 +1436,13 @@ STRATEGIES = {
         "name": "Donchian Breakout",
         "cls": DonchianBreakout,
         "params": [
-            {"key": "period", "label": "Период канала", "type": "int", "default": 20},
-        ] + _RISK_PARAMS,
+            {"key": "period", "label": "Период канала", "type": "int", "default": 30},
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 14},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+            {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 50},
+        ],
     },
     "pinbar": {
         "name": "Pinbar (молот / падающая звезда)",

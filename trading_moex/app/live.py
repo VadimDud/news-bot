@@ -133,7 +133,7 @@ class LiveTrader:
         self.dry_run = config.DRY_RUN
         self.tickers = list(config.WATCH_TICKERS)
         self.poll_interval = config.POLL_INTERVAL
-        self.strategy = "sma_cross"
+        self.strategy = "donchian"
         self.strategy_params: dict = {}
         self.quantity = int(getattr(config, "TRADER_QUANTITY", "1") or 1)
         self._task: asyncio.Task | None = None

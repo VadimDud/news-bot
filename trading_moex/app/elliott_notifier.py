@@ -44,6 +44,15 @@ _RU_DIR = {"buy": "ПОКУПКА", "sell": "ПРОДАЖА"}
 def _fmt_money(val: float | None) -> str:
     return "—" if val is None else f"{val:.2f} ₽"
 
+
+def _plural_candles(n: int) -> str:
+    """Русская форма: 3 свечи, 5 свечей, 21 свеча."""
+    if n % 10 == 1 and n % 100 != 11:
+        return "свеча"
+    if n % 10 in (2, 3, 4) and not 11 <= n % 100 <= 14:
+        return "свечи"
+    return "свечей"
+
 def _wave_pct(wave: elliott_candles.Wave) -> str:
     """Процентное изменение от начала до конца волны."""
     sub = wave.sub_candles()
@@ -77,28 +86,26 @@ def format_elliott_signal(
 
     wave_start = float(wave.sub_candles()["open"].iloc[0])
     wave_end = float(wave.df["close"].iloc[wave.end_idx])
+    sub = wave.sub_candles()
 
-    # Цели: абсолютные цены от текущего уровня
+    # Классический ретрейсмент: якорь — экстремум волны (low для медвежьей,
+    # high для бычьей), глубина — доли полного хода волны.
     if wave.direction == "bear":
-        # Покупка: коррекция вверх
-        entry = wave.next_open or wave_end
-        fib_prices = {
-            "38.2%": entry + fib["fib_382"],
-            "50.0%": entry + fib["fib_500"],
-            "61.8%": entry + fib["fib_618"],
-        }
+        anchor = float(sub["low"].min())
+        sign = 1
         plan = "вход на открытии следующей свечи (длинная позиция)"
     else:
-        # Продажа: коррекция вниз
-        entry = wave.next_open or wave_end
-        fib_prices = {
-            "38.2%": entry - fib["fib_382"],
-            "50.0%": entry - fib["fib_500"],
-            "61.8%": entry - fib["fib_618"],
-        }
+        anchor = float(sub["high"].max())
+        sign = -1
         plan = "вход на открытии следующей свечи (короткая позиция)"
 
-    stale_warn = "\n⚠️ Данные устарели —_MOEX_недоступен" if stale else ""
+    fib_prices = {
+        "38.2%": anchor + sign * fib["fib_382"],
+        "50.0%": anchor + sign * fib["fib_500"],
+        "61.8%": anchor + sign * fib["fib_618"],
+    }
+
+    stale_warn = "⚠️ Данные устарели — MOEX недоступен\n" if stale else ""
     q_total = quality["total"]
 
     fib_lines = "\n".join(f"     • {k}: {_fmt_money(v)}" for k, v in fib_prices.items())
@@ -106,15 +113,16 @@ def format_elliott_signal(
     return (
         f"{title}\n"
         f"Стратегия микро-волн Эллиотта • {now_msk} МСК\n"
-        f"{stale_warn}\n"
+        f"{stale_warn}"
         f"\n"
         f"Цена: {_fmt_money(wave_end)}\n"
         f"{'Медвежья' if wave.direction == 'bear' else 'Бычья'} волна: "
-        f"{wave.candle_count} свечи ({_fmt_money(wave_start)} → {_fmt_money(wave_end)}, {_wave_pct(wave)})\n"
+        f"{wave.candle_count} {_plural_candles(wave.candle_count)} "
+        f"({_fmt_money(wave_start)} → {_fmt_money(wave_end)}, {_wave_pct(wave)})\n"
         f"Качество волны: {q_total:.2f}/1.00\n"
         f"{_quality_line(quality)}\n"
         f"\n"
-        f"Цели коррекции (Фибо) от {_fmt_money(entry)}:\n"
+        f"Цели коррекции от экстремума волны ({_fmt_money(anchor)}):\n"
         f"{fib_lines}\n"
         f"\n"
         f"План: {plan}.\n"
@@ -195,8 +203,14 @@ async def _scan_ticker(ticker: str) -> dict | None:
         logger.debug("Сигнал для %s уже отправлен (wave_end=%s)", ticker, wave_end_str)
         return None
 
-    # Скоринг качества
+    # Скоринг качества; волны ниже порога не отправляем (шум) и не пишем в дедуп.
     quality = elliott_candles.wave_quality_score(wave)
+    if quality["total"] < trading_config.TRADER_ELLIOTT_MIN_QUALITY:
+        logger.debug(
+            "Волна %s отклонена: качество %.2f < %.2f",
+            ticker, quality["total"], trading_config.TRADER_ELLIOTT_MIN_QUALITY,
+        )
+        return None
     fib = elliott_candles.fibonacci_levels(wave)
     stale = _is_stale(df)
 
@@ -209,10 +223,18 @@ async def _scan_ticker(ticker: str) -> dict | None:
     return {"ticker": ticker, "direction": wave.direction, "sent": sent, "quality": quality["total"]}
 
 
+def _watchlist() -> list[str]:
+    """Тикеры скана: watchlist из БД, при пустом — fallback на WATCH_TICKERS."""
+    tickers = storage.list_watchlist()
+    if not tickers:
+        return list(trading_config.WATCH_TICKERS)
+    return list(tickers)
+
+
 async def run_elliott_scan() -> list[dict]:
     """Полный скан watchlist: детект волны → дедуп → Telegram."""
     sent: list[dict] = []
-    for ticker in storage.list_watchlist():
+    for ticker in _watchlist():
         try:
             result = await _scan_ticker(ticker)
             if result and result["sent"]:

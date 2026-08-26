@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import config as trading_config
 from app import storage
 from app.elliott_candles import Wave, classify_candles, detect_waves, wave_quality_score, fibonacci_levels
 from app.elliott_notifier import (
@@ -18,6 +19,7 @@ from app.elliott_notifier import (
     run_elliott_scan,
     _scan_ticker,
     _is_stale,
+    _plural_candles,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,7 +117,7 @@ class TestFormatElliotSignal:
         assert "SBER" in msg
         assert "Медвежья волна" in msg
         assert "Качество волны" in msg
-        assert "Фибо" in msg
+        assert "от экстремума" in msg
         assert "мартингейл" in msg.lower()
 
     def test_sell_signal_content(self):
@@ -176,7 +178,8 @@ class TestScanTicker:
         result = await _scan_ticker("NODATA")
         assert result is None
 
-    async def test_detects_and_sends_first_signal(self):
+    async def test_detects_and_sends_first_signal(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
         df = _bear_wave_df(5, start=100, drop=1.0)
         _save_candles("TEST", df)
 
@@ -187,7 +190,8 @@ class TestScanTicker:
             assert result["direction"] == "bear"
             mock_send.assert_called_once()
 
-    async def test_dedup_same_wave_not_sent(self):
+    async def test_dedup_same_wave_not_sent(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
         df = _bear_wave_df(5, start=100, drop=1.0)
         _save_candles("TEST", df)
 
@@ -198,7 +202,8 @@ class TestScanTicker:
             await _scan_ticker("TEST")
             assert mock_send.call_count == 1
 
-    async def test_new_wave_sent_after_old(self):
+    async def test_new_wave_sent_after_old(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
         df1 = _bear_wave_df(5, start=100, drop=1.0)
         _save_candles("TEST", df1)
         with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
@@ -246,14 +251,16 @@ class TestIsStale:
 # ---------------------------------------------------------------------------
 
 class TestRunElliotScan:
-    async def test_scan_empty_watchlist(self):
+    async def test_scan_empty_watchlist_and_env(self, monkeypatch):
         storage.set_watchlist([])
+        monkeypatch.setattr(trading_config, "WATCH_TICKERS", [])
         with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock) as mock_send:
             result = await run_elliott_scan()
             assert result == []
             mock_send.assert_not_called()
 
-    async def test_scan_with_candles(self):
+    async def test_scan_with_candles(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
         storage.set_watchlist(["TEST"])
         df = _bear_wave_df(5, start=100, drop=1.0)
         _save_candles("TEST", df)
@@ -268,3 +275,127 @@ class TestRunElliotScan:
         storage.set_watchlist(["TEST"])
         result = await run_elliott_scan()
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Quality filter (TRADER_ELLIOTT_MIN_QUALITY)
+# ---------------------------------------------------------------------------
+
+class TestQualityFilter:
+    async def test_low_quality_blocked(self, monkeypatch):
+        """Плоская волна (q≈0.05) ниже порога 0.4: без отправки и без записи в дедуп."""
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.4)
+        df = _bear_wave_df(5, start=100, drop=1.0)
+        _save_candles("TESTQ", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("TESTQ")
+            assert result is None
+            mock_send.assert_not_called()
+            # в дедуп ничего не записано — будущий порог не заблокирован навсегда
+            assert storage.get_elliott_signal("TESTQ")["wave_end"] is None
+
+    async def test_same_wave_passes_with_zero_threshold(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        df = _bear_wave_df(5, start=100, drop=1.0)
+        _save_candles("TESTQ0", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("TESTQ0")
+            assert result is not None
+            assert result["sent"] is True
+            mock_send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Fibonacci anchoring on wave extreme
+# ---------------------------------------------------------------------------
+
+class TestFibAnchor:
+    async def test_bear_targets_from_low(self):
+        opens = [104.0, 103.0, 102.0, 101.0, 100.0]
+        closes = [o - 1.0 for o in opens]
+        df = _make_df(closes, opens)
+        wave = detect_waves(classify_candles(df), 3, 5)[-1]
+        quality = wave_quality_score(wave)
+        fib = fibonacci_levels(wave)
+
+        anchor = float(min(df["low"]))   # 98.70
+        total = 104.0 - anchor           # 5.30
+        expected = {
+            "38.2%": anchor + total * 0.382,
+            "50.0%": anchor + total * 0.5,
+            "61.8%": anchor + total * 0.618,
+        }
+        msg = format_elliott_signal("SBER", wave, quality, fib, stale=False)
+
+        assert f"от экстремума волны ({anchor:.2f} ₽)" in msg
+        for lvl, price in expected.items():
+            assert f"{lvl}: {price:.2f} ₽" in msg
+
+    async def test_bull_targets_from_high(self):
+        opens = [97.0, 98.0, 99.0, 100.0, 101.0]
+        closes = [o + 1.0 for o in opens]
+        df = _make_df(closes, opens)
+        wave = detect_waves(classify_candles(df), 3, 5)[-1]
+        quality = wave_quality_score(wave)
+        fib = fibonacci_levels(wave)
+
+        anchor = float(max(df["high"]))  # 102 + 0.3 = 102.30
+        total = anchor - 97.0            # 5.30
+        expected_618 = anchor - total * 0.618
+
+        msg = format_elliott_signal("LKOH", wave, quality, fib, stale=False)
+        assert "СИГНАЛ ПРОДАЖА" in msg
+        assert f"от экстремума волны ({anchor:.2f} ₽)" in msg
+        assert f"61.8%: {expected_618:.2f} ₽" in msg
+
+
+# ---------------------------------------------------------------------------
+# Plural forms
+# ---------------------------------------------------------------------------
+
+class TestPluralCandles:
+    def test_forms(self):
+        assert _plural_candles(1) == "свеча"
+        assert _plural_candles(3) == "свечи"
+        assert _plural_candles(4) == "свечи"
+        assert _plural_candles(5) == "свечей"
+        assert _plural_candles(11) == "свечей"
+        assert _plural_candles(21) == "свеча"
+
+
+# ---------------------------------------------------------------------------
+# Watchlist fallback (DB → WATCH_TICKERS)
+# ---------------------------------------------------------------------------
+
+class TestWatchlistFallback:
+    async def test_empty_db_falls_back_to_env(self, monkeypatch):
+        storage.set_watchlist([])
+        monkeypatch.setattr(trading_config, "WATCH_TICKERS", ["ENVTK"])
+
+        called: list[str] = []
+
+        async def fake_scan(ticker):
+            called.append(ticker)
+            return None
+
+        with patch("app.elliott_notifier._scan_ticker", side_effect=fake_scan):
+            await run_elliott_scan()
+
+        assert called == ["ENVTK"]
+
+    async def test_db_watchlist_preferred_over_env(self, monkeypatch):
+        storage.set_watchlist(["DBT"])
+        monkeypatch.setattr(trading_config, "WATCH_TICKERS", ["ENVTK"])
+
+        called: list[str] = []
+
+        async def fake_scan(ticker):
+            called.append(ticker)
+            return None
+
+        with patch("app.elliott_notifier._scan_ticker", side_effect=fake_scan):
+            await run_elliott_scan()
+
+        assert called == ["DBT"]

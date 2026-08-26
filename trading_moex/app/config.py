@@ -130,3 +130,5 @@ TRADER_ELLIOTT_WAVE_MIN: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MIN", "3"
 TRADER_ELLIOTT_WAVE_MAX: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MAX", "5"))
 TRADER_ELLIOTT_BODY_RATIO_MIN: float = float(os.environ.get("TRADER_ELLIOTT_BODY_RATIO_MIN", "0.6"))
 TRADER_ELLIOTT_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_ATR_K", "0.5"))
+# Мин. качество волны (0..1) для отправки сигнала; волны ниже порога считаются шумом.
+TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.4"))

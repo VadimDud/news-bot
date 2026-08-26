@@ -58,6 +58,19 @@ async def main() -> None:
     else:
         logger.info("Signal notifier disabled via TRADER_SIGNALS_ENABLED")
 
+    # Запустить фоновый сканер Elliott micro-wave сигналов (ежедневно вечером)
+    elliott_task: asyncio.Task | None = None
+    if config.TRADER_ELLIOTT_ENABLED:
+        from app.elliott_notifier import elliott_scan_loop
+
+        logger.info(
+            "Starting Elliott signal notifier (scan daily at %02d:%02d UTC)",
+            config.TRADER_ELLIOTT_SCAN_HOUR, config.TRADER_ELLIOTT_SCAN_MINUTE,
+        )
+        elliott_task = asyncio.create_task(elliott_scan_loop())
+    else:
+        logger.info("Elliott notifier disabled via TRADER_ELLIOTT_ENABLED")
+
     try:
         while True:
             await asyncio.sleep(3600)
@@ -66,6 +79,10 @@ async def main() -> None:
             signal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await signal_task
+        if elliott_task is not None:
+            elliott_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await elliott_task
         await runner.cleanup()
 
 

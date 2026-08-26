@@ -120,3 +120,13 @@ TRADER_SKILLS_MIN_RR: float = float(os.environ.get("TRADER_SKILLS_MIN_RR", "1.5"
 TRADER_SKILLS_MAX_POSITION_PCT: float = float(os.environ.get("TRADER_SKILLS_MAX_POSITION_PCT", "50.0"))
 # Комиссия (одна сторона, %). 0.04% — типичный тариф MOEX.
 TRADER_SKILLS_COMMISSION_PCT: float = float(os.environ.get("TRADER_SKILLS_COMMISSION_PCT", "0.04"))
+
+# ── Elliott micro-wave signal notifier ──────────────────────────────────────
+TRADER_ELLIOTT_ENABLED: bool = os.environ.get("TRADER_ELLIOTT_ENABLED", "true").lower() in ("1", "true")
+TRADER_ELLIOTT_SCAN_HOUR: int = int(os.environ.get("TRADER_ELLIOTT_SCAN_HOUR", "16"))   # UTC ≈ 19:00 MSK
+TRADER_ELLIOTT_SCAN_MINUTE: int = int(os.environ.get("TRADER_ELLIOTT_SCAN_MINUTE", "10"))
+TRADER_ELLIOTT_RUN_ON_STARTUP: bool = os.environ.get("TRADER_ELLIOTT_RUN_ON_STARTUP", "true").lower() in ("1", "true")
+TRADER_ELLIOTT_WAVE_MIN: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MIN", "3"))
+TRADER_ELLIOTT_WAVE_MAX: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MAX", "5"))
+TRADER_ELLIOTT_BODY_RATIO_MIN: float = float(os.environ.get("TRADER_ELLIOTT_BODY_RATIO_MIN", "0.6"))
+TRADER_ELLIOTT_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_ATR_K", "0.5"))

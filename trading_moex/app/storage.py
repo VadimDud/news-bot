@@ -117,6 +117,17 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS elliott_signals (
+                ticker TEXT PRIMARY KEY,
+                wave_end TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                quality REAL,
+                notified_at TEXT
+            )
+            """
+        )
         # graceful-миграция: старые таблицы dividends могли не иметь buy_before
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(dividends)").fetchall()]
@@ -269,6 +280,30 @@ def set_signal_state(ticker: str, position: int, notified_at: str | None = None)
             "INSERT INTO signal_state (ticker, position, notified_at) VALUES (?, ?, ?)"
             " ON CONFLICT(ticker) DO UPDATE SET position = excluded.position, notified_at = excluded.notified_at",
             (ticker, position, notified_at),
+        )
+
+
+def get_elliott_signal(ticker: str) -> dict:
+    """Последний отправленный Elliott-сигнал для тикера."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT ticker, wave_end, direction, quality, notified_at FROM elliott_signals WHERE ticker = ?",
+            (ticker,),
+        ).fetchone()
+    if row is None:
+        return {"ticker": ticker, "wave_end": None, "direction": None, "quality": None, "notified_at": None}
+    return {"ticker": row[0], "wave_end": row[1], "direction": row[2], "quality": row[3], "notified_at": row[4]}
+
+
+def save_elliott_signal(ticker: str, wave_end: str, direction: str, quality: float | None = None) -> None:
+    """Сохранить Elliott-сигнал для дедупликации."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO elliott_signals (ticker, wave_end, direction, quality, notified_at) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(ticker) DO UPDATE SET wave_end=excluded.wave_end, direction=excluded.direction,"
+            " quality=excluded.quality, notified_at=excluded.notified_at",
+            (ticker, wave_end, direction, quality, now),
         )
 
 

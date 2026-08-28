@@ -44,4 +44,62 @@
      hx-get="/live/data" hx-trigger="every 5s" hx-swap="innerHTML">
   {% include "_live_status.html" %}
 </div>
+
+<script>
+(function() {
+  const STALE_MS = 10000;
+  function checkStaleness() {
+    const el = document.getElementById('live-status');
+    if (!el) return;
+    const old = el.querySelector('.chip-stale');
+    if (old) old.remove();
+    const chips = el.querySelectorAll('.chip');
+    for (const chip of chips) {
+      const txt = chip.textContent.trim();
+      if (!txt.startsWith('обновление:')) continue;
+      const ts = txt.replace('обновление:', '').trim();
+      if (!ts || ts === '—') continue;
+      const dt = new Date(ts.replace(' ', 'T') + (ts.includes('Z') || ts.includes('+') ? '' : 'Z'));
+      const diff = Date.now() - dt.getTime();
+      if (diff > STALE_MS) {
+        const badge = document.createElement('span');
+        badge.className = 'chip warn chip-stale';
+        badge.textContent = 'данные устарели (' + Math.round(diff / 1000) + 'с назад)';
+        chip.parentNode.insertBefore(badge, chip.nextSibling);
+      }
+      break;
+    }
+  }
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'live-status') {
+      checkStaleness();
+    }
+  });
+  checkStaleness();
+
+  function setupLogFilters(root) {
+    root.querySelectorAll('.log-filter').forEach(chip => {
+      chip.addEventListener('click', () => {
+        root.querySelectorAll('.log-filter').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        const f = chip.dataset.filter;
+        const table = chip.closest('.card').querySelector('table');
+        if (!table) return;
+        table.querySelectorAll('tbody tr').forEach(row => {
+          const msg = row.textContent.toLowerCase();
+          if (f === 'all') { row.style.display = ''; return; }
+          if (f === 'error') { row.style.display = msg.includes('ошибк') ? '' : 'none'; return; }
+          if (f === 'signal') { row.style.display = (msg.includes('buy') || msg.includes('sell') || msg.includes('сигнал') || msg.includes('signal')) ? '' : 'none'; }
+        });
+      });
+    });
+  }
+  setupLogFilters(document.getElementById('live-status'));
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'live-status') {
+      checkStaleness();
+      setupLogFilters(e.detail.target);
+    }
+  });
+})();
 {% endblock %}

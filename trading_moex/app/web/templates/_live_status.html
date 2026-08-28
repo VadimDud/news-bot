@@ -13,13 +13,14 @@
 <div class="card">
   <h3>Котировки и сигналы</h3>
   {% if status.prices %}
+  <div class="table-wrap">
   <table>
     <thead><tr><th>Тикер</th><th>Цена</th><th>Сигнал</th><th>SL</th><th>TP</th></tr></thead>
     <tbody>
       {% for p in status.prices %}
       {% set s = status.signals.get(p.ticker, {}) %}
       <tr>
-        <td>{{ p.ticker }}</td>
+        <td><a href="/?ticker={{ p.ticker }}" style="color:var(--text);text-decoration:none;border-bottom:1px dashed var(--accent)">{{ p.ticker }}</a></td>
         <td>{{ p.price }}</td>
         <td>
           {% if s.action == 'buy' %}<span class="chip ok">BUY</span>
@@ -32,6 +33,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Нет данных (запустите цикл).</div>
   {% endif %}
@@ -40,6 +42,7 @@
 <div class="card">
   <h3>Открытые входы (SL/TP)</h3>
   {% if status.entries %}
+  <div class="table-wrap">
   <table>
     <thead><tr><th>Тикер</th><th>Вход</th><th>Стоп</th><th>Тейк</th></tr></thead>
     <tbody>
@@ -53,6 +56,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Открытых входов нет.</div>
   {% endif %}
@@ -61,6 +65,7 @@
 <div class="card">
   <h3>Позиции</h3>
   {% if status.portfolio %}
+  <div class="table-wrap">
   <table>
     <thead><tr><th>FIGI</th><th>Кол-во</th><th>Цена</th><th>PNL, ₽</th></tr></thead>
     <tbody>
@@ -74,6 +79,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Позиций нет.</div>
   {% endif %}
@@ -82,6 +88,12 @@
 <div class="card">
   <h3>Журнал</h3>
   {% if status.log %}
+  <div style="display:flex;gap:6px;margin-bottom:10px;">
+    <span class="chip log-filter active" data-filter="all">все</span>
+    <span class="chip log-filter" data-filter="error">ошибки</span>
+    <span class="chip log-filter" data-filter="signal">сигналы</span>
+  </div>
+  <div class="table-wrap">
   <table>
     <thead><tr><th>Время</th><th>Событие</th></tr></thead>
     <tbody>
@@ -90,6 +102,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Журнал пуст.</div>
   {% endif %}

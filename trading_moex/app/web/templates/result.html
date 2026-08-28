@@ -74,6 +74,7 @@
 <div class="card">
   <h2>Последние сделки</h2>
   {% if result.trades %}
+  <div class="table-wrap">
   <table>
     <thead><tr><th>#</th><th>Дата</th><th>Статус</th><th>PNL, ₽</th></tr></thead>
     <tbody>
@@ -87,6 +88,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Сделок не было.</div>
   {% endif %}

@@ -55,6 +55,7 @@
 <div class="card">
   <h2>Загруженная отчётность</h2>
   {% if rows %}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Тикер</th><th>Строк</th><th>Период</th><th>ROE (посл.), %</th><th>BVPS (посл.), ₽</th><th></th></tr>
@@ -77,6 +78,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Отчётность ещё не загружена. Импортируйте CSV выше.</div>
   {% endif %}

@@ -52,6 +52,7 @@
 <div class="card">
   <h2>Результаты</h2>
   <div id="save-msg" style="margin:6px 0;"></div>
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -85,6 +86,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
     <button class="secondary" type="button" id="save-wl-btn">Сохранить отмеченные в watchlist (для live)</button>
   </div>
@@ -191,6 +193,42 @@ qsForm.addEventListener("submit", async (e) => {
   };
   poll();
 });
+
+(function() {
+  function sortTable(table, col, asc) {
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a, b) => {
+      const cellA = a.children[col];
+      const cellB = b.children[col];
+      if (!cellA || !cellB) return 0;
+      let vA = cellA.textContent.trim();
+      let vB = cellB.textContent.trim();
+      const nA = parseFloat(vA.replace(/[^-\d.,]/g, '').replace(',', '.'));
+      const nB = parseFloat(vB.replace(/[^-\d.,]/g, '').replace(',', '.'));
+      if (!isNaN(nA) && !isNaN(nB)) return asc ? nA - nB : nB - nA;
+      return asc ? vA.localeCompare(vB, 'ru') : vB.localeCompare(vA, 'ru');
+    });
+    rows.forEach(r => tbody.appendChild(r));
+  }
+  document.querySelectorAll('table thead').forEach(thead => {
+    const table = thead.closest('table');
+    const ths = thead.querySelectorAll('th');
+    ths.forEach((th, i) => {
+      if (th.querySelector('input') || th.querySelector('button')) return;
+      th.style.cursor = 'pointer';
+      th.title = 'Нажмите для сортировки';
+      let asc = true;
+      th.addEventListener('click', () => {
+        ths.forEach(h => { if (h !== th) h.removeAttribute('data-sort'); });
+        th.setAttribute('data-sort', asc ? 'asc' : 'desc');
+        sortTable(table, i, asc);
+        asc = !asc;
+      });
+    });
+  });
+})();
 </script>
 {% else %}
 <div class="empty">Запустите отбор — результаты появятся здесь.</div>

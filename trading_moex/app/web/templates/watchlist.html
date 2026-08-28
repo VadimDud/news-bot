@@ -20,6 +20,7 @@
 <div class="card">
   <h2>Текущий список</h2>
   {% if current %}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>Тикер</th><th></th></tr>
@@ -38,6 +39,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Список пуст — live-цикл использует тикеры из .env (TRADER_WATCH_TICKERS).</div>
   {% endif %}

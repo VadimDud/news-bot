@@ -107,6 +107,18 @@ sel.addEventListener("change", () => {
 tickerInput.addEventListener("change", reloadDefaults);
 showParams();
 
+(function() {
+  const p = new URLSearchParams(window.location.search);
+  const t = p.get('ticker');
+  if (t) {
+    tickerInput.value = t.toUpperCase();
+    tickerInput.dispatchEvent(new Event('change'));
+    tickerInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    tickerInput.style.outline = '2px solid var(--accent)';
+    setTimeout(() => { tickerInput.style.outline = ''; }, 2000);
+  }
+})();
+
 const btForm = document.getElementById("bt-form");
 const btBtn = document.getElementById("bt-btn");
 const btProgress = document.getElementById("bt-progress");
@@ -168,6 +180,7 @@ btForm.addEventListener("submit", async (e) => {
 <div class="card">
   <h2>История бэктестов</h2>
   {% if runs %}
+  <div class="table-wrap">
   <table>
     <thead>
       <tr><th>ID</th><th>Тикер</th><th>Таймфрейм</th><th>Стратегия</th><th>Статус</th><th>Доходность</th><th>Дата</th></tr>
@@ -195,6 +208,7 @@ btForm.addEventListener("submit", async (e) => {
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <div class="empty">Бэктесты ещё не запускались.</div>
   {% endif %}

@@ -128,6 +128,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fib_signals (
+                ticker TEXT PRIMARY KEY,
+                setup_id TEXT NOT NULL,
+                swing_low REAL,
+                swing_high REAL,
+                retrace REAL,
+                factors INTEGER,
+                notified_at TEXT
+            )
+            """
+        )
         # graceful-миграция: старые таблицы dividends могли не иметь buy_before
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(dividends)").fetchall()]
@@ -304,6 +317,43 @@ def save_elliott_signal(ticker: str, wave_end: str, direction: str, quality: flo
             " ON CONFLICT(ticker) DO UPDATE SET wave_end=excluded.wave_end, direction=excluded.direction,"
             " quality=excluded.quality, notified_at=excluded.notified_at",
             (ticker, wave_end, direction, quality, now),
+        )
+
+
+def get_fib_signal(ticker: str) -> dict:
+    """Последний отправленный Fib-сигнал для тикера (дедупликация)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT ticker, setup_id, swing_low, swing_high, retrace, factors, notified_at"
+            " FROM fib_signals WHERE ticker = ?",
+            (ticker,),
+        ).fetchone()
+    if row is None:
+        return {
+            "ticker": ticker, "setup_id": None, "swing_low": None,
+            "swing_high": None, "retrace": None, "factors": None, "notified_at": None,
+        }
+    return {
+        "ticker": row[0], "setup_id": row[1], "swing_low": row[2],
+        "swing_high": row[3], "retrace": row[4], "factors": row[5], "notified_at": row[6],
+    }
+
+
+def save_fib_signal(
+    ticker: str, setup_id: str, swing_low: float | None = None,
+    swing_high: float | None = None, retrace: float | None = None,
+    factors: int | None = None,
+) -> None:
+    """Сохранить Fib-сигнал для дедупликации (сигнал отправляется один раз)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO fib_signals (ticker, setup_id, swing_low, swing_high, retrace, factors, notified_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(ticker) DO UPDATE SET setup_id=excluded.setup_id,"
+            " swing_low=excluded.swing_low, swing_high=excluded.swing_high,"
+            " retrace=excluded.retrace, factors=excluded.factors, notified_at=excluded.notified_at",
+            (ticker, setup_id, swing_low, swing_high, retrace, factors, now),
         )
 
 

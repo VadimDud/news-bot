@@ -7,8 +7,10 @@ Price Action: лот от % риска, стоп-лосс по ATR, тейк п�
 import logging
 
 import backtrader as bt
+import numpy as np
 import pandas as pd
 
+from . import fib_pullback as fibp
 from . import risk as risk_module
 from . import signals as sig
 from .news_guard import NewsGuard
@@ -936,6 +938,173 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
             self._search_retest()
 
 
+# bt-параметры Фибоначчи-ретрейсмента (трендовое продолжение). Логика повторяет
+# ``fib_pullback``: вход по откату в зону [fib_in_low..fib_in_high] от импульса
+# swing low → swing high при тренде вверх, с конфлюэнцией (зона + свеча + RSI)
+# и фильтром market regime (EMA-тренд, потолок волатильности ATR, опц. ADX).
+# Режим по умолчанию универсален; per-ticker рецепт подбирается перебором в
+# TICKER_OVERRIDES по аналогии с pinbar/другими стратегиями.
+_FIB_PULLBACK_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("trend_period", 200),
+    ("swing_bars", 10),
+    ("min_swing_dist_atr", 2.0),
+    ("fib_in_low", 0.50),
+    ("fib_in_high", 0.618),
+    ("fib_tp", 0.0),
+    ("confluence_min", 2),
+    ("confirm_candle", 1),
+    ("rsi_period", 14),
+    ("rsi_oversold", 40.0),
+    ("rsi_overbought", 85.0),
+    ("regime_adx_min", 0.0),
+    ("regime_atr_vol_max", 0.0),
+    ("use_htf", 0),
+    ("htf_trend_period", 50),
+    ("sl_beyond_swing", 1),
+    ("min_rr", 1.5),
+    ("daily_drawdown_pct", 0.0),
+)
+
+
+class FibPullbackStrategy(RiskAwareStrategy):
+    """Фибоначчи ретрейсмент (трендовое продолжение) на структуре рынка.
+
+    Длинный вход на откате к зоне 50–61.8 % от последнего импульса (swing low →
+    swing high) при восходящем тренде и конфлюэнции факторов:
+    зона Фибо + свечной паттерн (пинбар/поглощение) + RSI перепроданность.
+
+    Риск-менеджмент: стоп за экстремум swing low (``sl_beyond_swing``) либо по
+    ATR; лот от ``risk_pct``; вход отменяется, если RRR ниже ``min_rr``;
+    ``daily_drawdown_pct`` (0=выкл) блокирует новые входы при дневной просадке.
+
+    Расчёт состояния полностью переиспользует чистые функции ``fib_pullback``
+    на окне свечей (паритет с live/pandas-сигналом и юнит-тестами).
+    """
+
+    params = _FIB_PULLBACK_PARAMS_TUPLE
+
+    def __init__(self):
+        super().__init__()
+        self._last_state: dict = {}
+        self._last_swing_low: float | None = None
+        self._day_peak: float | None = None
+        self._day_date = None
+        # Окно истории для расчёта пивотов: по сути всей доступной истории
+        # (кап — только чтобы сдерживать расход памяти). Пивоты — подтверждённые
+        # локальные экстремумы, зависящие от прошлого; усечённое окно (например,
+        # 2*swing_bars) не воспроизводит их и расходится с live-сигналом.
+        self._window = 1000
+
+    # ── Окно свечей → чистое состояние fib_pullback ─────────────────────────
+    def _fib_frame(self) -> pd.DataFrame:
+        m = min(int(self.data.buflen()), int(self._window))
+        m = max(m, 2)
+
+        def col(name):
+            line = getattr(self.data, name)
+            return [float(line[-k]) for k in range(m - 1, -1, -1)]
+
+        return pd.DataFrame(
+            {
+                "open": col("open"),
+                "high": col("high"),
+                "low": col("low"),
+                "close": col("close"),
+                "volume": col("volume"),
+            },
+            index=range(m),
+        )
+
+    def _fib_state(self) -> dict:
+        df = self._fib_frame()
+        params = {
+            "swing_bars": int(self.p.swing_bars),
+            "min_swing_dist_atr": float(self.p.min_swing_dist_atr),
+            "trend_period": int(self.p.trend_period),
+            "htf_trend_period": int(self.p.htf_trend_period),
+            "use_htf": int(getattr(self.p, "use_htf", 0)),
+            "regime_adx_min": float(getattr(self.p, "regime_adx_min", 0.0)),
+            "regime_atr_vol_max": float(getattr(self.p, "regime_atr_vol_max", 0.0)),
+            "fib_in_low": float(self.p.fib_in_low),
+            "fib_in_high": float(self.p.fib_in_high),
+            "fib_tp": float(getattr(self.p, "fib_tp", 0.0)),
+            "confluence_min": int(self.p.confluence_min),
+            "confirm_candle": int(getattr(self.p, "confirm_candle", 1)),
+            "rsi_period": int(getattr(self.p, "rsi_period", 14)),
+            "rsi_oversold": float(self.p.rsi_oversold),
+            "rsi_overbought": float(self.p.rsi_overbought),
+        }
+        st = fibp._compute_arrays(df, None, **params)
+        i = len(df) - 1
+        st["close"] = df["close"].values
+        st["idx"] = i
+        self._last_state = st
+        sl = st["swing_low"][i]
+        self._last_swing_low = None if (isinstance(sl, float) and sl != sl) or sl is None else float(sl)
+        if isinstance(sl, float) and sl != sl:
+            self._last_swing_low = None
+        return st
+
+    def _entry_ok(self) -> bool:
+        st = self._last_state
+        i = st["idx"]
+        # RRR-гейт: цель (0 %) vs стоп — минимум min_rr.
+        price = float(self.data.close[0])
+        stop_dist = self._stop_distance()
+        tgt = st["target"][i]
+        if not (np.isnan(tgt) or tgt <= price):
+            reward = tgt - price
+            if stop_dist > 0 and reward / stop_dist < float(self.p.min_rr):
+                return False
+        return fibp._entry_ok(st, i)
+
+    def _buy_signal(self) -> bool:
+        if self._drawdown_blocked():
+            return False
+        self._fib_state()
+        return self._entry_ok()
+
+    def _sell_signal(self) -> bool:
+        if not self._last_state:
+            self._fib_state()
+        return fibp._exit_ok(self._last_state, self._last_state["idx"])
+
+    # ── Структурный стоп за экстремум swing low ─────────────────────────────
+    def _stop_distance(self) -> float:
+        if int(getattr(self.p, "sl_beyond_swing", 1)) and self._last_swing_low is not None:
+            price = float(self.data.close[0])
+            if price > self._last_swing_low:
+                dist = price - self._last_swing_low
+                if dist >= price * 0.002:
+                    return dist
+        return super()._stop_distance()
+
+    # ── Дневной drawdown cutoff ──────────────────────────────────────────────
+    def _drawdown_blocked(self) -> bool:
+        limit = float(getattr(self.p, "daily_drawdown_pct", 0.0) or 0.0)
+        if limit <= 0 or self._day_peak is None or self._day_peak <= 0:
+            return False
+        dd = (self._day_peak - float(self.broker.getvalue())) / self._day_peak
+        return dd >= limit / 100.0
+
+    def _update_day_peak(self) -> None:
+        value = float(self.broker.getvalue())
+        dt = self.data.datetime.date(0)
+        if self._day_date != dt:
+            self._day_date = dt
+            self._day_peak = value
+        else:
+            self._day_peak = max(self._day_peak, value)
+
+    def next(self):
+        self._update_day_peak()
+        super().next()
+
+
 # Параметры фундаментальной портфельной стратегии ROE + P/B. Логика повторяет
 # ``signals.roe_pb_signal``, но мульти-дата: портфель (несколько тикеров)
 # с равными долями. Вход при цене <= 0.8 стоимости капитала и высоком среднем
@@ -1540,6 +1709,34 @@ STRATEGIES = {
             {"key": "momentum_months", "label": "Скоринг: период моментума, мес", "type": "int", "default": 6},
             {"key": "news_guard", "label": "News Guard: блокировка входа при негативных новостях (1 = вкл)", "type": "int", "default": 0},
             {"key": "stop_loss_pct", "label": "Стоп-лосс: 0 = выключен, иначе % от цены входа", "type": "float", "default": 0.0},
+        ],
+    },
+    "fib_pullback": {
+        "name": "Фибоначчи ретрейсмент (трендовое продолжение)",
+        "cls": FibPullbackStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "swing_bars", "label": "Свинг-пивоты: окно N свечей", "type": "int", "default": 10},
+            {"key": "min_swing_dist_atr", "label": "Мин. ход импульса, x ATR", "type": "float", "default": 2.0},
+            {"key": "fib_in_low", "label": "Зона отката: нижняя граница (0.5 = 50%)", "type": "float", "default": 0.50},
+            {"key": "fib_in_high", "label": "Зона отката: верхняя граница (0.618 = 61.8%)", "type": "float", "default": 0.618},
+            {"key": "fib_tp", "label": "Цель: доля хода от 0% (0 = экстремум)", "type": "float", "default": 0.0},
+            {"key": "confluence_min", "label": "Конфлюэнция: мин. факторов (1 зона, 2 свеча, 3 RSI)", "type": "int", "default": 2},
+            {"key": "confirm_candle", "label": "Свечное подтверждение (пинбар/поглощение) (1 = да)", "type": "int", "default": 1},
+            {"key": "rsi_period", "label": "Период RSI", "type": "int", "default": 14},
+            {"key": "rsi_oversold", "label": "RSI охлаждения моментума (вход ниже)", "type": "float", "default": 40.0},
+            {"key": "rsi_overbought", "label": "RSI перекупленности (выход)", "type": "float", "default": 85.0},
+            {"key": "regime_adx_min", "label": "Market regime: мин. ADX (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "regime_atr_vol_max", "label": "Market regime: потолок ATR/цена (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "use_htf", "label": "Фильтр тренда старшего ТФ (1 = да)", "type": "int", "default": 0},
+            {"key": "htf_trend_period", "label": "HTF: период EMA тренда", "type": "int", "default": 50},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR (резервный)", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+            {"key": "trend_period", "label": "Трендовый EMA (0 = выкл; длинный фильтр, напр. 200 SMA)", "type": "int", "default": 200},
+            {"key": "sl_beyond_swing", "label": "Стоп за экстремум swing low (1 = да)", "type": "int", "default": 1},
+            {"key": "min_rr", "label": "Мин. риск/доход для входа (RR)", "type": "float", "default": 1.5},
+            {"key": "daily_drawdown_pct", "label": "Дневная просадка-блокировка, % (0 = выкл)", "type": "float", "default": 0.0},
         ],
     },
     "elliott_candles": {

@@ -71,6 +71,19 @@ async def main() -> None:
     else:
         logger.info("Elliott notifier disabled via TRADER_ELLIOTT_ENABLED")
 
+    # Запустить фоновый сканер Fibonacci-re-tracement сигналов (ежедневно вечером)
+    fib_task: asyncio.Task | None = None
+    if config.TRADER_FIB_ENABLED:
+        from app.fib_notifier import fib_scan_loop
+
+        logger.info(
+            "Starting Fibonacci signal notifier (scan daily at %02d:%02d UTC)",
+            config.TRADER_FIB_SCAN_HOUR, config.TRADER_FIB_SCAN_MINUTE,
+        )
+        fib_task = asyncio.create_task(fib_scan_loop())
+    else:
+        logger.info("Fibonacci notifier disabled via TRADER_FIB_ENABLED")
+
     try:
         while True:
             await asyncio.sleep(3600)
@@ -83,6 +96,10 @@ async def main() -> None:
             elliott_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await elliott_task
+        if fib_task is not None:
+            fib_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await fib_task
         await runner.cleanup()
 
 

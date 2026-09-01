@@ -85,9 +85,13 @@ def _signal_kwargs(func, params: dict) -> dict:
     """Отфильтровать параметры стратегии под сигнатуру pandas-функции.
 
     В ``strategy_params`` лежат и риск-параметры, которые сигнал-функции
-    не принимают — их нужно отсечь, иначе TypeError.
+    не принимают — их нужно отсечь, иначе TypeError. Если функция объявляет
+    ``**kwargs`` (VAR_KEYWORD, напр. ``fib_pullback_signal``), пропускаем все
+    параметры — она принимает их сама.
     """
     sig_par = inspect.signature(func).parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_par.values()):
+        return {k: v for k, v in params.items() if k != "df"}
     return {k: v for k, v in params.items() if k in sig_par and k != "df"}
 
 
@@ -392,6 +396,20 @@ class LiveTrader:
                     from . import storage
 
                     kwargs["fundamentals"] = storage.load_fundamentals(ticker)
+                elif self.strategy == "fib_pullback" and int(
+                    self.strategy_params.get("use_htf", 0)
+                ):
+                    # Глобальный тренд (принцип 5): LTF-вход только в направлении
+                    # тренда старшего таймфрейма (дневные свечи из БД).
+                    try:
+                        from . import storage
+                        from . import fib_pullback as fib_module
+
+                        htf_raw = storage.get_candles(ticker, "1day")
+                        if not htf_raw.empty:
+                            kwargs["htf_df"] = fib_module.prepare_ohlc(htf_raw)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Не удалось получить дневные свечи для %s: %s", ticker, exc)
                 position = func(df, **kwargs)
                 if position.empty:
                     entry["action"] = "hold"

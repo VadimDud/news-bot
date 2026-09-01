@@ -132,3 +132,21 @@ TRADER_ELLIOTT_BODY_RATIO_MIN: float = float(os.environ.get("TRADER_ELLIOTT_BODY
 TRADER_ELLIOTT_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_ATR_K", "0.5"))
 # Мин. качество волны (0..1) для отправки сигнала; волны ниже порога считаются шумом.
 TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.4"))
+
+# ── Fibonacci retracement (трендовое продолжение) signal notifier ───────────
+TRADER_FIB_ENABLED: bool = os.environ.get("TRADER_FIB_ENABLED", "true").lower() in ("1", "true")
+TRADER_FIB_SCAN_HOUR: int = int(os.environ.get("TRADER_FIB_SCAN_HOUR", "16"))   # UTC ≈ 19:00 MSK
+TRADER_FIB_SCAN_MINUTE: int = int(os.environ.get("TRADER_FIB_SCAN_MINUTE", "30"))
+TRADER_FIB_RUN_ON_STARTUP: bool = os.environ.get("TRADER_FIB_RUN_ON_STARTUP", "true").lower() in ("1", "true")
+# Параметры setup-а для ежедневного сканера (дефолты совпадают с fib_pullback).
+TRADER_FIB_SWING_BARS: int = int(os.environ.get("TRADER_FIB_SWING_BARS", "10"))
+TRADER_FIB_FIB_IN_LOW: float = float(os.environ.get("TRADER_FIB_FIB_IN_LOW", "0.50"))
+TRADER_FIB_FIB_IN_HIGH: float = float(os.environ.get("TRADER_FIB_FIB_IN_HIGH", "0.618"))
+TRADER_FIB_TREND_PERIOD: int = int(os.environ.get("TRADER_FIB_TREND_PERIOD", "200"))
+TRADER_FIB_CONFLUENCE_MIN: int = int(os.environ.get("TRADER_FIB_CONFLUENCE_MIN", "2"))
+TRADER_FIB_RSI_OVERSOLD: float = float(os.environ.get("TRADER_FIB_RSI_OVERSOLD", "40.0"))
+TRADER_FIB_MIN_RR: float = float(os.environ.get("TRADER_FIB_MIN_RR", "1.5"))
+TRADER_FIB_DAILY_DRAWDOWN_PCT: float = float(os.environ.get("TRADER_FIB_DAILY_DRAWDOWN_PCT", "0.0"))
+TRADER_FIB_REGIME_ADX_MIN: float = float(os.environ.get("TRADER_FIB_REGIME_ADX_MIN", "0.0"))
+TRADER_FIB_REGIME_ATR_VOL_MAX: float = float(os.environ.get("TRADER_FIB_REGIME_ATR_VOL_MAX", "0.0"))
+TRADER_FIB_USE_HTF: int = int(os.environ.get("TRADER_FIB_USE_HTF", "1"))

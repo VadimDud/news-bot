@@ -762,6 +762,19 @@ def roe_score_breakdown(
     }
 
 
+def _fib_pullback_signal(df: pd.DataFrame, **kwargs):
+    """Обёртка fib-сигнала: подключение чистой логики из ``fib_pullback``.
+
+    Сигнатура соответствует остальным SIGNAL_FUNCS (df + параметры), а
+    опциональный старший таймфрейм (``htf_df``) live-цикл подставляет отдельно —
+    здесь он из kwargs убирается, чтобы не ломать общий контракт.
+    """
+    from . import fib_pullback
+
+    htf_df = kwargs.pop("htf_df", None)
+    return fib_pullback.fib_pullback_signal(df, htf_df=htf_df, **kwargs)
+
+
 def signal_from_position(pos: pd.Series) -> str:
     """Вернуть действие по последней паре баров: buy / sell / hold."""
     if len(pos) < 2:
@@ -780,4 +793,5 @@ SIGNAL_FUNCS = {
     "pinbar": pinbar_position,
     "engulfing": engulfing_position,
     "roe_portfolio": roe_pb_position,
+    "fib_pullback": _fib_pullback_signal,
 }

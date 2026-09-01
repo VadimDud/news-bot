@@ -124,9 +124,17 @@ docker compose up -d
 T-Bank Invest API (`tinkoff-invest`).
 
 - **Бэктест**: `GET/POST` в веб-дашборде — тикер (SBER, LKOH, ...), таймфрейм,
-  период, стратегия (SMA Cross / RSI / Donchian / Pinbar / Engulfing), капитал
-  и комиссия. Результат: доходность, max просадка, Sharpe, Profit Factor,
-  Expectancy, список сделок, кривая капитала (Chart.js).
+  период, стратегия   (SMA Cross / RSI / Donchian / Pinbar / Engulfing / MA-trend / Vol Breakdown /
+  **Fibonacci retracement**), капитал и комиссия. Результат: доходность,
+  max просадка, Sharpe, Profit Factor, Expectancy, список сделок, кривая
+  капитала (Chart.js).
+- **Fibonacci retracement** (`fib_pullback`) — трендовое продолжение: вход на
+  откате в зону 50–61.8% от последнего импульса (swing low → swing high) при
+  восходящем тренде, с конфлюэнцией (зона + свечной паттерн + RSI),
+  структурным стопом за экстремум и дневной блокировкой просадки. Чистая
+  логика в `fib_pullback.py`, ежедневный Telegram-скан — `fib_notifier.py`
+  (`TRADER_FIB_*`). Дефолты/перетекст подбираются grid-поиском в
+  `trading_moex/scripts/backtest_fib_pullback.py`.
 - **Скачивание данных**: карточка на главной — свечи MOEX любого тикера в CSV
   (`datetime,open,high,low,close,volume`) за выбранный диапазон. Свечи хранятся
   в базе SQLite (`candles`): при повторном запросе докачивается только новая

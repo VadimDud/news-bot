@@ -2,11 +2,13 @@
 
 Ежедневно после закрытия рынка сканирует watchlist: на последней свече ищет
 готовый setup — откат в зону 50–61.8 % от последнего импульса (swing low →
-swing high) при восходящем тренде и конфлюэнции факторов. Найденный setup
-отправляется админу в Telegram с уровнями Фибо и факторной оценкой.
+swing high) при восходящем тренде и конфлюэнции факторов для лонга, либо
+откат вверх в премиальную зону при нисходящем тренде для шорта. Найденный
+setup отправляется админу в Telegram с уровнями Фибо и факторной оценкой.
 
-Дедупликация: ``fib_signals`` (PK по тикеру) хранит setup_id и время;
-сигнал уходит один раз на уникальную пару swing low → swing high.
+Дедупликация: ``fib_signals`` (long) и ``fib_short_signals`` (short) — PK по
+тикеру, хранят setup_id и время; сигнал уходит один раз на уникальную пару
+swing low → swing high.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ logger = logging.getLogger("moex_trader.fib_notifier")
 
 MSK = timezone(timedelta(hours=3))
 
-_RU_DIR = {"buy": "ПОКУПКА", "sell": "ПРОДАЖА"}
+_RU_DIR = {"buy": "ПОКУПКА", "sell": "ПРОДАЖА", "short": "ПРОДАЖА"}
 
 
 # ── Telegram (переиспользуем send_telegram_message из signal_notifier) ──────
@@ -52,7 +54,7 @@ def _pad_label(label: str, width: int = 12) -> str:
 
 
 def format_fib_signal(
-    ticker: str, info: dict, stale: bool = False,
+    ticker: str, info: dict, stale: bool = False, short: bool = False,
 ) -> str:
     """Текст Telegram-сообщения о Fib-setup (прогнозное продолжение тренда)."""
     now_msk = datetime.now(MSK).strftime("%H:%M %d.%m.%Y")
@@ -60,8 +62,9 @@ def format_fib_signal(
     sw_low = info.get("swing_low")
     sw_high = info.get("swing_high")
     rsi = info.get("rsi")
-    factors = info.get("factors")
+    factors = info.get("factors_short") if short else info.get("factors")
     trend_up = info.get("trend_up")
+    in_premium = bool(info.get("in_premium"))
 
     def _pct(a: float | None, b: float | None) -> str:
         if not a or not b or a <= 0:
@@ -70,8 +73,23 @@ def format_fib_signal(
 
     stale_warn = "⚠️ Данные устарели — MOEX недоступен\n" if stale else ""
 
+    direction_word = "ПРОДАЖА" if short else "ПОКУПКА"
+    signal_dir = "📉" if short else "📈"
+
+    if short:
+        # Лонг-импульс (swing low → swing high), шорт уходит в premium-зону.
+        seg_price = info.get("segment")
+        retrace_center = 0.5
+        if seg_price is not None and sw_low is not None:
+            zone_top = sw_low + retrace_center * seg_price
+        else:
+            zone_top = None
+        zone_label = f"Откат вверх: ~{_fmt_money(zone_top)} — в премиальной зоне 50–61.8 %"
+    else:
+        zone_label = f"Откат: {_fmt_money(info.get('target_in_price'))} — в зоне 50–61.8 %"
+
     lines = [
-        f"📐 СИГНАЛ ПОКУПКА — {ticker}",
+        f"{signal_dir} СИГНАЛ {direction_word} — {ticker}",
         f"Фибоначчи-ретрейсмент (трендовое продолжение) • {now_msk} МСК",
         f"{stale_warn}",
         f"Цена: {_fmt_money(close)}",
@@ -79,22 +97,32 @@ def format_fib_signal(
             f"Импульс: swing low {_fmt_money(sw_low)} → swing high "
             f"{_fmt_money(sw_high)} ({_pct(sw_low, sw_high)})"
         ),
-        f"Откат: {_fmt_money(info.get('target_in_price'))} — в зоне 50–61.8 %",
+        zone_label,
         f"Тренд вверх: {'да' if trend_up else 'нет'} | RSI: "
         f"{'—' if rsi is None else f'{rsi:.1f}'} | Факторов: {factors}",
         "",
     ]
 
-    levels = info.get("levels")
+    levels = info.get("levels_short") if short else info.get("levels")
     if levels:
-        lines.append("Уровни Фибо (от swing high):")
+        title = "Уровни Фибо (откат вверх, цель — swing low):" if short else "Уровни Фибо (от swing high):"
+        lines.append(title)
         for lbl, price in levels.items():
             lines.append(f"{_pad_label(lbl)}: {_fmt_money(price)}")
 
+    if short:
+        plan = (
+            f"План: шорт по завершении отката вверх в зону 50–61.8 % (конфлюэнция "
+            f"зона+свеча+RSI). Стоп за swing high, цель — 0 % (swing low)."
+        )
+    else:
+        plan = (
+            f"План: вход по завершении отката в зону 50–61.8 % (конфлюэнция "
+            f"зона+свеча+RSI). Стоп за swing low, цель — 0 % (swing high)."
+        )
     lines += [
         "",
-        f"План: вход по завершении отката в зону 50–61.8 % (конфлюэнция "
-        f"зона+свеча+RSI). Стоп за swing low, цель — 0 % (swing high).",
+        plan,
         f"⚠️ Не является индивидуальной инвестиционной рекомендацией.",
     ]
     return "\n".join(lines)
@@ -162,22 +190,41 @@ def _setup_id(info: dict) -> str | None:
 
 
 async def _scan_ticker(ticker: str) -> dict | None:
-    """Сканировать один тикер: детект setup-а, дедуп, отправка."""
+    """Сканировать один тикер: детект setup-а (long и short), дедуп, отправка."""
     df = _load_daily_candles(ticker)
     if df is None:
         return None
 
     params = _params_from_config()
     htf = _load_htf(ticker) if int(trading_config.TRADER_FIB_USE_HTF) else None
-    info = fib_pullback.detect_latest_setup(df, htf_df=htf, **params)
-    if info is None:
-        logger.debug("Нет завершённого Fib-setup по %s", ticker)
-        return None
+    retrace_center = (trading_config.TRADER_FIB_FIB_IN_LOW + trading_config.TRADER_FIB_FIB_IN_HIGH) / 2.0
 
+    # Лонг-setup
+    info = fib_pullback.detect_latest_setup(df, htf_df=htf, **params)
+    if info is not None:
+        result = await _dispatch_setup(ticker, df, info, params, short=False,
+                                       retrace_center=retrace_center)
+        if result is not None:
+            return result
+
+    # Шорт-setup
+    info = fib_pullback.detect_latest_short_setup(df, htf_df=htf, **params)
+    if info is not None:
+        return await _dispatch_setup(ticker, df, info, params, short=True,
+                                     retrace_center=retrace_center)
+
+    logger.debug("Нет завершённого Fib-setup (long/short) по %s", ticker)
+    return None
+
+
+async def _dispatch_setup(ticker: str, df: pd.DataFrame, info: dict, params: dict, *,
+                          short: bool, retrace_center: float) -> dict | None:
+    """Дедупликация и отправка одного setup-а (long или short)."""
     setup_id = _setup_id(info)
     if setup_id is None:
         return None
-    prev = storage.get_fib_signal(ticker)
+    prev = (storage.get_fib_short_signal(ticker) if short
+            else storage.get_fib_signal(ticker))
     if prev["setup_id"] == setup_id:
         logger.debug("Сигнал для %s уже отправлен (setup_id=%s)", ticker, setup_id)
         return None
@@ -185,26 +232,36 @@ async def _scan_ticker(ticker: str) -> dict | None:
     # Детали для сообщения: retrace-зона и целевая цена.
     close = info.get("close")
     sw_high = info.get("swing_high")
+    sw_low = info.get("swing_low")
     seg = info.get("segment")
-    retrace_center = (trading_config.TRADER_FIB_FIB_IN_LOW + trading_config.TRADER_FIB_FIB_IN_HIGH) / 2.0
-    info["target_in_price"] = (
-        sw_high - retrace_center * seg
-        if (sw_high is not None and seg is not None and seg > 0)
-        else None
-    )
+    if short:
+        info["target_in_price"] = (
+            sw_low + retrace_center * seg
+            if (sw_low is not None and seg is not None and seg > 0)
+            else None
+        )
+    else:
+        info["target_in_price"] = (
+            sw_high - retrace_center * seg
+            if (sw_high is not None and seg is not None and seg > 0)
+            else None
+        )
 
     stale = _is_stale(df)
-    msg = format_fib_signal(ticker, info, stale=stale)
+    msg = format_fib_signal(ticker, info, stale=stale, short=short)
     sent = await _send_tg(msg)
 
     if sent:
-        storage.save_fib_signal(
+        save = storage.save_fib_short_signal if short else storage.save_fib_signal
+        save(
             ticker, setup_id,
             swing_low=info.get("swing_low"), swing_high=info.get("swing_high"),
-            retrace=info.get("retrace"), factors=info.get("factors"),
+            retrace=info.get("retrace"),
+            factors=info.get("factors_short") if short else info.get("factors"),
         )
-        logger.info("Fib-сигнал отправлен: %s (setup_id=%s)", ticker, setup_id)
-    return {"ticker": ticker, "sent": sent, "setup_id": setup_id}
+        logger.info("Fib-%s сигнал отправлен: %s (setup_id=%s)",
+                    "short" if short else "long", ticker, setup_id)
+    return {"ticker": ticker, "sent": sent, "setup_id": setup_id, "short": short}
 
 
 def _watchlist() -> list[str]:

@@ -20,6 +20,7 @@ from app.fib_notifier import (  # noqa: E402
     _setup_id,
     _is_stale,
     _params_from_config,
+    _dispatch_setup,
 )
 
 
@@ -86,6 +87,22 @@ class TestFormat:
         assert "Фибоначчи" in msg
         assert "191.39" in msg
         assert "0% (цель)" in msg
+
+    def test_short_message_mentions_sale_and_short_levels(self):
+        info = {
+            "close": 179.66, "swing_low": 150.0, "swing_high": 215.0,
+            "segment": 65.0, "atr": 2.86, "rsi": 70.0, "factors": 2,
+            "factors_short": 3, "trend_up": False, "in_premium": True,
+            "target_in_price": 182.5,
+            "levels_short": {"50.0%": 182.5, "0% (цель)": 150.0},
+        }
+        msg = format_fib_signal("GAZP", info, short=True)
+        assert "ПРОДАЖА" in msg
+        assert "GAZP" in msg
+        assert "swing high" in msg
+        assert "182.5" in msg
+        assert "swing low" in msg
+        assert "Факторов: 3" in msg
 
     def test_stale_flag_output(self):
         info = {"close": 100, "trend_up": True, "factors": 1,
@@ -177,3 +194,53 @@ class TestRunFibScan:
             mock_send.reset_mock()
             assert await _scan_ticker("TEST") is None
             mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_short_setup_sends_and_dedups(self):
+        # Лонг-setup нет, шорт-setup есть — сигнал шорт уходит и пишется в
+        # fib_short_signals (отдельный дедуп от лонга).
+        df = _make_df(np.linspace(150, 100, 60), freq="h")
+        info = {
+            "close": 105.0, "swing_low": 90.0, "swing_high": 130.0,
+            "segment": 40.0, "atr": 1.5, "rsi": 72.0, "factors": 2,
+            "factors_short": 3, "trend_up": False, "in_premium": True,
+            "levels": {"50.0%": 110.0, "0% (цель)": 90.0},
+            "levels_short": {"50.0%": 110.0, "0% (цель)": 90.0},
+        }
+        storage.set_watchlist(["TEST2"])
+        with patch("app.fib_notifier._load_daily_candles", return_value=df), \
+             patch("app.fib_notifier._load_htf", return_value=None), \
+             patch("app.fib_notifier.fib_pullback.detect_latest_setup", return_value=None), \
+             patch("app.fib_notifier.fib_pullback.detect_latest_short_setup", return_value=info), \
+             patch("app.fib_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("TEST2")
+            assert result is not None and result["sent"] is True and result["short"] is True
+            mock_send.assert_awaited_once()
+            assert storage.get_fib_short_signal("TEST2")["setup_id"] == "90.0000->130.0000"
+            # дедуп шорт-сигнала
+            mock_send.reset_mock()
+            assert await _scan_ticker("TEST2") is None
+            mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_short_does_not_cross_dedup_with_long(self):
+        # Один и тот же setup_id в short-таблице не блокирует long-сигнал.
+        df = _make_df(np.linspace(100, 150, 60), freq="h")
+        long_info = {
+            "close": 130.0, "swing_low": 110.0, "swing_high": 150.0,
+            "segment": 40.0, "atr": 1.0, "rsi": 25.0, "factors": 2,
+            "trend_up": True, "in_discount": True,
+            "levels": {"50.0%": 130.0, "0% (цель)": 150.0},
+        }
+        storage.set_watchlist(["TEST3"])
+        storage.save_fib_short_signal(
+            "TEST3", "110.0000->150.0000",
+            swing_low=110.0, swing_high=150.0, retrace=40.0, factors=2,
+        )
+        with patch("app.fib_notifier._load_daily_candles", return_value=df), \
+             patch("app.fib_notifier._load_htf", return_value=None), \
+             patch("app.fib_notifier.fib_pullback.detect_latest_setup", return_value=long_info), \
+             patch("app.fib_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("TEST3")
+            assert result is not None and result["sent"] is True
+            assert storage.get_fib_signal("TEST3")["setup_id"] == "110.0000->150.0000"

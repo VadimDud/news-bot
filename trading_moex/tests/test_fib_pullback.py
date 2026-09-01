@@ -17,6 +17,9 @@ from app.fib_pullback import (  # noqa: E402
     detect_latest_setup,
     prepare_ohlc,
 )
+from app.backtest import run_backtest  # noqa: E402
+from app.strategies import FibPullbackStrategy, _FIB_PULLBACK_PARAMS_TUPLE  # noqa: E402
+from app import signals as sig_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +53,20 @@ def _uptrend_pullbacks(n_cycles=12, up_bars=48, dn_bars=14, seed=3):
             p += 1.0 + rng.normal(0, 0.2)
         else:
             p -= 2.7
+    return prices
+
+
+def _downtrend_pullbacks(n_cycles=12, dn_bars=48, up_bars=14, seed=5):
+    """Downtrend with periodic bounces up (short retracements)."""
+    rng = np.random.default_rng(seed)
+    p, prices = 200.0, []
+    for i in range((dn_bars + up_bars) * n_cycles):
+        prices.append(p)
+        m = i % (dn_bars + up_bars)
+        if m < dn_bars:
+            p -= 1.0 + rng.normal(0, 0.2)
+        else:
+            p += 2.7
     return prices
 
 
@@ -182,3 +199,106 @@ def test_detect_latest_setup_consistent_with_signal_pos():
                                trend_period=200)
     if info is not None:
         assert info["in_discount"] is True
+
+
+# ---------------------------------------------------------------------------
+# Backtrader-стратегия: направление и шорт
+# ---------------------------------------------------------------------------
+
+def _backtest_params(**overrides):
+    """Стандартные ослабленные параметры + переопределения (для стратегии)."""
+    params = dict((k, v) for k, v in _FIB_PULLBACK_PARAMS_TUPLE)
+    params.update(
+        dict(confluence_min=1, rsi_oversold=50, rsi_overbought=85,
+             trend_period=100, swing_bars=5, rr_ratio=2.0)
+    )
+    params.update(overrides)
+    return params
+
+
+def _trend_series(start, step, n=500, direction=1):
+    """Ряд с откатами: растущий (вверх+откаты) или падающий (вниз+отскоки)."""
+    prices = _uptrend_pullbacks() if direction > 0 else _downtrend_pullbacks()
+    return _make_candles(prices)
+
+
+def test_strategy_short_only_trades_on_downtrend():
+    df = _trend_series(200.0, -0.2, direction=-1)
+    r = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=-1))
+    assert r["trades_total"] > 0, "short-only должен торговать на падении"
+
+
+def test_strategy_short_only_silent_on_uptrend():
+    df = _trend_series(100.0, 0.2, direction=1)
+    r = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=-1))
+    # Трендовый фильтр не пускает шорт в чистый аптренд
+    assert r["trades_total"] == 0
+
+
+def test_strategy_long_only_trades_on_uptrend():
+    df = _trend_series(100.0, 0.2, direction=1)
+    r = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=1))
+    assert r["trades_total"] > 0
+    assert r["trades_won"] == r["trades_total"]
+
+
+def test_strategy_long_only_silent_on_downtrend():
+    df = _trend_series(200.0, -0.2, direction=-1)
+    r = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=1))
+    assert r["trades_total"] == 0
+
+
+def test_strategy_both_picks_long_in_uptrend():
+    df = _trend_series(100.0, 0.2, direction=1)
+    r = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=0))
+    assert r["trades_total"] > 0
+    assert r["win_rate_pct"] == 100.0
+
+
+def test_strategy_both_picks_short_in_downtrend():
+    df = _trend_series(200.0, -0.2, direction=-1)
+    # В режиме both появляются шорты: убыточный лонг-канал → часть сделок — шорты,
+    # чистый аптренд-канал так не торговал бы. Достаточно ненулевой активности.
+    long_only = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=1))
+    both = run_backtest(df, FibPullbackStrategy, _backtest_params(direction=0))
+    assert both["trades_total"] > 0
+    assert both["trades_total"] != long_only["trades_total"]
+
+
+def test_strategy_default_direction_is_long():
+    df = _trend_series(100.0, 0.2, direction=1)
+    r = run_backtest(df, FibPullbackStrategy, _backtest_params())
+    assert r["trades_total"] > 0
+    df2 = _trend_series(200.0, -0.2, direction=-1)
+    r2 = run_backtest(df2, FibPullbackStrategy, _backtest_params())
+    assert r2["trades_total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# signal_from_position / apply_trend_filter: шорт-переходы
+# ---------------------------------------------------------------------------
+
+def test_signal_from_position_short_transitions():
+    assert sig_mod.signal_from_position(pd.Series([0, -1])) == "short"
+    assert sig_mod.signal_from_position(pd.Series([-1, 0])) == "cover"
+    assert sig_mod.signal_from_position(pd.Series([0, 1])) == "buy"
+    assert sig_mod.signal_from_position(pd.Series([1, 0])) == "sell"
+    assert sig_mod.signal_from_position(pd.Series([-1, -1])) == "hold"
+    assert sig_mod.signal_from_position(pd.Series([0])) == "hold"
+
+
+def test_apply_trend_filter_direction_aware():
+    # Лонги ниже EMA обнуляются, шорты выше EMA обнуляются, лонги выше/шорты ниже — остаются.
+    close = pd.Series([10.0, 11.0, 12.0, 13.0, 14.0, 13.5, 12.0, 11.0])
+    pos = pd.Series([1, 1, -1, 1, -1, -1, 0, 1])
+    flt = sig_mod.apply_trend_filter(pos, close, trend_period=4)
+    # шорт ниже EMA (вблизи конца) допустим; лонг выше EMA допустим
+    assert flt[(pos > 0) & (close > close.ewm(span=4, adjust=False).mean())].all()
+    assert flt[(pos < 0) & (close < close.ewm(span=4, adjust=False).mean())].all()
+
+
+def test_apply_trend_filter_disabled_when_period_zero():
+    close = pd.Series([10.0, 9.0, 8.0, 7.0])
+    pos = pd.Series([1, 1, -1, 1])
+    flt = sig_mod.apply_trend_filter(pos, close, trend_period=0)
+    assert flt.tolist() == pos.tolist()

@@ -38,6 +38,16 @@ GRID = {
     "rsi_oversold": [40.0, 50.0],
     "min_rr": [1.0, 1.5],
 }
+# Наборы параметров под шорт (direction=-1): те же ключи, другие кандидаты.
+GRID_SHORT = {
+    "trend_period": [50, 100, 200],
+    "swing_bars": [5, 10, 20],
+    "confluence_min": [1, 2],
+    "fib_in_low": [0.382, 0.5],
+    "fib_in_high": [0.618, 0.786],
+    "rsi_overbought": [70.0, 80.0],
+    "min_rr": [1.0, 1.5],
+}
 
 
 def load_df(ticker: str, period: str, start: date, end: date) -> pd.DataFrame | None:
@@ -60,8 +70,12 @@ def load_df(ticker: str, period: str, start: date, end: date) -> pd.DataFrame | 
             return None
 
 
-def base_params() -> dict:
-    return {p["key"]: p["default"] for p in STRATEGIES["fib_pullback"]["params"]}
+def base_params(direction: int = 1) -> dict:
+    p = {pkey["key"]: pkey["default"] for pkey in STRATEGIES["fib_pullback"]["params"]}
+    p["direction"] = direction
+    if "min_swing_dist_atr" not in p:
+        p["min_swing_dist_atr"] = 2.0
+    return p
 
 
 def print_metrics(m: dict, tag: str):
@@ -89,6 +103,8 @@ def main():
     parser.add_argument("--end", default=None, help="YYYY-MM-DD")
     parser.add_argument("--grid", action="store_true", help="перебор параметров")
     parser.add_argument("--csv", default=None, help="сохранить результаты в CSV")
+    parser.add_argument("--direction", type=int, default=1,
+                        help="1=только лонг (default), -1=только шорт, 0=оба")
     args = parser.parse_args()
 
     start = pd.Timestamp(args.start).date() if args.start else date.today() - timedelta(days=args.days)
@@ -105,17 +121,18 @@ def main():
                 continue
             print(f"\n=== {ticker} {period} ({start}..{end}, {len(df)} bars) ===")
             if not args.grid:
-                m = run_one(df, base_params())
+                m = run_one(df, base_params(args.direction))
                 print_metrics(m, "defaults")
                 continue
 
             # ── Grid-search ────────────────────────────────────────────────
             best: list[tuple[dict, dict]] = []
             import itertools
-            keys = list(GRID.keys())
-            combos = list(itertools.product(*[GRID[k] for k in keys]))
+            grid = GRID_SHORT if args.direction <= 0 else GRID
+            keys = list(grid.keys())
+            combos = list(itertools.product(*[grid[k] for k in keys]))
             for combo in combos:
-                p = base_params()
+                p = base_params(args.direction)
                 for k, v in zip(keys, combo):
                     p[k] = v
                 m = run_one(df, p)

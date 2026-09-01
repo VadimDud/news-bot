@@ -68,16 +68,17 @@ def donchian_position(df: pd.DataFrame, period: int = 20) -> pd.Series:
 def apply_trend_filter(
     position: pd.Series, close: pd.Series, trend_period: int = 200
 ) -> pd.Series:
-    """Торговать только по тренду: длинные позиции разрешены выше EMA.
+    """Торговать только по тренду: лонги выше EMA, шорты ниже.
 
     ``trend_period <= 0`` — фильтр выключен. Правило Карен Фу: покупки только
-    выше скользящей средней (по умолчанию EMA 200).
+    выше скользящей средней (по умолчанию EMA 200), продажи/шорты — ниже.
     """
     if not trend_period or trend_period <= 0:
         return position
     ema = close.ewm(span=trend_period, adjust=False).mean()
     filtered = position.copy()
-    filtered[close < ema] = 0
+    filtered[(position > 0) & (close < ema)] = 0
+    filtered[(position < 0) & (close > ema)] = 0
     return filtered
 
 
@@ -776,13 +777,18 @@ def _fib_pullback_signal(df: pd.DataFrame, **kwargs):
 
 
 def signal_from_position(pos: pd.Series) -> str:
-    """Вернуть действие по последней паре баров: buy / sell / hold."""
+    """Вернуть действие по последней паре баров: buy / sell / short / cover / hold."""
     if len(pos) < 2:
         return "hold"
-    if pos.iloc[-1] == 1 and pos.iloc[-2] == 0:
+    last, prev = pos.iloc[-1], pos.iloc[-2]
+    if last == 1 and prev == 0:
         return "buy"
-    if pos.iloc[-1] == 0 and pos.iloc[-2] == 1:
+    if last == 0 and prev == 1:
         return "sell"
+    if last == -1 and prev == 0:
+        return "short"
+    if last == 0 and prev == -1:
+        return "cover"
     return "hold"
 
 

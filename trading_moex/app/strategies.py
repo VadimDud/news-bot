@@ -946,6 +946,7 @@ class VolProfileBreakdownStrategy(TradeRecordingStrategy):
 # TICKER_OVERRIDES по аналогии с pinbar/другими стратегиями.
 _FIB_PULLBACK_PARAMS_TUPLE = (
     ("risk_pct", 1.0),
+    ("direction", 1),
     ("atr_period", 20),
     ("atr_stop_mult", 1.5),
     ("rr_ratio", 2.0),
@@ -991,6 +992,7 @@ class FibPullbackStrategy(RiskAwareStrategy):
         super().__init__()
         self._last_state: dict = {}
         self._last_swing_low: float | None = None
+        self._last_swing_high: float | None = None
         self._day_peak: float | None = None
         self._day_date = None
         # Окно истории для расчёта пивотов: по сути всей доступной истории
@@ -1047,6 +1049,8 @@ class FibPullbackStrategy(RiskAwareStrategy):
         self._last_swing_low = None if (isinstance(sl, float) and sl != sl) or sl is None else float(sl)
         if isinstance(sl, float) and sl != sl:
             self._last_swing_low = None
+        sh = st["swing_high"][i]
+        self._last_swing_high = None if (isinstance(sh, float) and sh != sh) or sh is None else float(sh)
         return st
 
     def _entry_ok(self) -> bool:
@@ -1072,6 +1076,41 @@ class FibPullbackStrategy(RiskAwareStrategy):
         if not self._last_state:
             self._fib_state()
         return fibp._exit_ok(self._last_state, self._last_state["idx"])
+
+    # ── Шорт-плечо (direction=-1 / 0) ────────────────────────────────────────
+    def _short_entry_ok(self) -> bool:
+        st = self._last_state
+        i = st["idx"]
+        # RRR-гейт для шорта: цель (swing low) vs стоп — минимум min_rr.
+        price = float(self.data.close[0])
+        stop_dist = self._short_stop_distance()
+        tgt = st["target_short"][i]
+        if not (np.isnan(tgt) or tgt >= price):
+            reward = price - tgt
+            if stop_dist > 0 and reward / stop_dist < float(self.p.min_rr):
+                return False
+        return fibp._entry_ok_short(st, i)
+
+    def _short_signal(self) -> bool:
+        if self._drawdown_blocked():
+            return False
+        self._fib_state()
+        return self._short_entry_ok()
+
+    def _cover_signal(self) -> bool:
+        if not self._last_state:
+            self._fib_state()
+        return fibp._exit_ok_short(self._last_state, self._last_state["idx"])
+
+    # ── Структурный стоп для шорта (за экстремум swing high) ────────────────
+    def _short_stop_distance(self) -> float:
+        if int(getattr(self.p, "sl_beyond_swing", 1)) and self._last_swing_high is not None:
+            price = float(self.data.close[0])
+            if self._last_swing_high > price:
+                dist = self._last_swing_high - price
+                if dist >= price * 0.002:
+                    return dist
+        return super()._stop_distance()
 
     # ── Структурный стоп за экстремум swing low ─────────────────────────────
     def _stop_distance(self) -> float:
@@ -1100,9 +1139,103 @@ class FibPullbackStrategy(RiskAwareStrategy):
         else:
             self._day_peak = max(self._day_peak, value)
 
+    # ── Шорт-ордера (вход sell, закрытие buy) ────────────────────────────────
+    def _open_short(self) -> None:
+        if self._trend_up():
+            return
+        stop_dist = self._short_stop_distance()
+        price = float(self.data.close[0])
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), self._risk_fraction(), stop_dist, price
+        )
+        if size <= 0:
+            return
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        size = max(min(size, max_by_cash), 1) if max_by_cash > 0 else size
+        if size > 0:
+            self.sell(size=size)  # SL/TP выставляются в notify_order после исполнения
+
+    def _place_short_bracket(self) -> None:
+        if self.position.size >= 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = self._short_stop_distance()
+        if stop_dist <= 0:
+            return
+        stop = price + stop_dist  # стоп выше входа
+        target = price - stop_dist * float(self.p.rr_ratio)  # тейк ниже входа
+        size = abs(self.position.size)
+        self._sl_order = self.buy(exectype=bt.Order.Stop, price=stop, size=size)
+        self._tp_order = self.buy(exectype=bt.Order.Limit, price=target, size=size)
+
+    def _cover(self) -> None:
+        self._cancel_bracket()
+        if self.position.size < 0:
+            self.close()
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            self._avg_orders = [o for o in self._avg_orders if o is not order]
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        size = self.position.size
+        if order.isbuy():
+            if size > 0:
+                # вход в лонг исполнился — выставить брекет
+                self._sl_order = None
+                self._tp_order = None
+                self._place_bracket()
+            elif size == 0:
+                # выход из шорта (покрытие/стоп/тейк) — снять лишнее
+                for pending in (self._sl_order, self._tp_order):
+                    if pending is not None and pending is not order:
+                        self.cancel(pending)
+                self._sl_order = None
+                self._tp_order = None
+        else:
+            # sell
+            if size < 0:
+                # вход в шорт исполнился — выставить шорт-брекет
+                self._sl_order = None
+                self._tp_order = None
+                self._place_short_bracket()
+            elif size == 0:
+                # выход из лонга — снять лишнее
+                for pending in (self._sl_order, self._tp_order):
+                    if pending is not None and pending is not order:
+                        self.cancel(pending)
+                self._sl_order = None
+                self._tp_order = None
+
     def next(self):
         self._update_day_peak()
-        super().next()
+        direction = int(getattr(self.p, "direction", 1))
+        size = self.position.size
+        if size > 0:  # в лонге
+            exit_sig = self._sell_signal()
+            if direction <= 0:
+                self._fib_state()
+                exit_sig = exit_sig or self._short_entry_ok()
+            if exit_sig:
+                self._exit()
+        elif size < 0:  # в шорте
+            cover_sig = self._cover_signal()
+            if direction >= 0:
+                self._fib_state()
+                cover_sig = cover_sig or self._entry_ok()
+            if cover_sig:
+                self._cover()
+        else:  # без позиции
+            if self._drawdown_blocked():
+                return
+            self._fib_state()
+            if direction >= 0 and self._entry_ok():
+                self._open_long()
+            elif direction <= 0 and self._short_entry_ok():
+                self._open_short()
 
 
 # Параметры фундаментальной портфельной стратегии ROE + P/B. Логика повторяет
@@ -1737,6 +1870,7 @@ STRATEGIES = {
             {"key": "sl_beyond_swing", "label": "Стоп за экстремум swing low (1 = да)", "type": "int", "default": 1},
             {"key": "min_rr", "label": "Мин. риск/доход для входа (RR)", "type": "float", "default": 1.5},
             {"key": "daily_drawdown_pct", "label": "Дневная просадка-блокировка, % (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "direction", "label": "Направление: 1=только лонг, -1=только шорт, 0=оба", "type": "int", "default": 1},
         ],
     },
     "elliott_candles": {

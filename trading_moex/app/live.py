@@ -392,6 +392,13 @@ class LiveTrader:
             df = await self._candles_df(client, figi)
             if not df.empty and len(df) >= 2:
                 kwargs = _signal_kwargs(func, self.strategy_params)
+                # Per-ticker overrides (TICKER_OVERRIDES) применяются поверх
+                # глобальных параметров стратегии (например, direction/шорт).
+                from .strategies import TICKER_OVERRIDES as _TO
+
+                ticker_over = _TO.get((self.strategy, ticker.upper()), {})
+                if ticker_over:
+                    kwargs = {**kwargs, **ticker_over}
                 if self.strategy == "roe_portfolio":
                     from . import storage
 
@@ -417,7 +424,8 @@ class LiveTrader:
                     if trend_period:
                         position = sig.apply_trend_filter(position, df["close"], trend_period)
                     entry["action"] = sig.signal_from_position(position)
-                    if bool(position.iloc[-1]):
+                    last_pos = bool(position.iloc[-1])
+                    if last_pos:
                         # позиция удерживается — считаем уровни SL/TP, чтобы
                         # отслеживать их на каждом цикле (а не только на входе)
                         last = df.iloc[-1]
@@ -425,8 +433,13 @@ class LiveTrader:
                         if atr_val != atr_val or atr_val <= 0:  # NaN / вырожденные данные
                             atr_val = 0.0
                         stop_dist = max(atr_val * atr_mult, float(last["close"]) * 0.005)
-                        entry["stop"] = round(float(last["close"]) - stop_dist, 4)
-                        entry["target"] = round(float(last["close"]) + stop_dist * rr_ratio, 4)
+                        if int(position.iloc[-1]) < 0:
+                            # шорт: стоп выше входа, цель ниже
+                            entry["stop"] = round(float(last["close"]) + stop_dist, 4)
+                            entry["target"] = round(float(last["close"]) - stop_dist * rr_ratio, 4)
+                        else:
+                            entry["stop"] = round(float(last["close"]) - stop_dist, 4)
+                            entry["target"] = round(float(last["close"]) + stop_dist * rr_ratio, 4)
             out[ticker] = entry
         return out
 
@@ -438,7 +451,7 @@ class LiveTrader:
         )
 
     def _run_pretrade_gate(self, ticker: str, price: float, stop: float | None,
-                           target: float | None, figi: str):
+                           target: float | None, figi: str, direction: str = "long"):
         """Запустить pre-trade проверку для тикера."""
         from .news_guard import NewsGuard
 
@@ -452,7 +465,7 @@ class LiveTrader:
         # Контекст сделки
         ctx = TradeContext(
             ticker=ticker,
-            direction="long",
+            direction=direction,
             entry=price,
             stop=stop,
             target=target,
@@ -491,29 +504,40 @@ class LiveTrader:
             info = signals.get(ticker, {}) or {}
             action = info.get("action", "hold")
             price = price_map.get(ticker, 0.0)
+            held = self.entries.get(ticker, {})
+            cur_dir = held.get("direction", "long")
 
             # 1) Выход по стоп-лоссу / тейк-профиту
-            if info.get("stop") is not None and price > 0 and figi in held_figis:
-                if price <= info["stop"]:
-                    await self._submit(client, account_id, figi, "sell",
+            if info.get("stop") is not None and price > 0 and (figi in held_figis or "stop" in held):
+                if cur_dir == "short":
+                    hit_stop = price >= info["stop"]
+                    hit_target = info.get("target") is not None and price <= info["target"]
+                    close_action, close_label = "buy", "COVER"
+                else:
+                    hit_stop = price <= info["stop"]
+                    hit_target = info.get("target") is not None and price >= info["target"]
+                    close_action, close_label = "sell", "CLOSE"
+                if hit_stop:
+                    await self._submit(client, account_id, figi, close_action,
                                        held_qty.get(figi, self.quantity), f"SL {ticker} по {price}")
                     self.entries.pop(ticker, None)
                     continue
-                if info.get("target") is not None and price >= info["target"]:
-                    await self._submit(client, account_id, figi, "sell",
+                if hit_target:
+                    await self._submit(client, account_id, figi, close_action,
                                        held_qty.get(figi, self.quantity), f"TP {ticker} по {price}")
                     self.entries.pop(ticker, None)
                     continue
 
             if action == "hold":
                 continue
-            if action == "buy":
-                if figi in held_figis:
+            if action in ("buy", "short"):
+                if figi in held_figis or "stop" in held:
                     continue
+                direction = "long" if action == "buy" else "short"
                 # Pre-trade gate: проверка перед входом
                 if config.TRADER_SKILLS_ENABLED:
                     gate_report = self._run_pretrade_gate(
-                        ticker, price, info.get("stop"), info.get("target"), figi
+                        ticker, price, info.get("stop"), info.get("target"), figi, direction
                     )
                     if gate_report.verdict == "BLOCKED":
                         self._log(
@@ -535,18 +559,22 @@ class LiveTrader:
                         )
                 else:
                     size = self._risk_size(price, info.get("stop"))
-                await self._submit(client, account_id, figi, "buy", size, f"BUY {ticker} x{size}")
+                await self._submit(client, account_id, figi, "sell" if action == "short" else "buy",
+                                   size, f"{'SHORT' if action == 'short' else 'BUY'} {ticker} x{size}")
                 self.entries[ticker] = {
                     "entry_price": price,
                     "stop": info.get("stop"),
                     "target": info.get("target"),
                     "size": size,
+                    "direction": direction,
                 }
-            else:  # sell
-                if figi not in held_figis:
+            else:  # sell / cover
+                if figi not in held_figis and "stop" not in held:
                     continue
-                await self._submit(client, account_id, figi, "sell",
-                                   held_qty.get(figi, self.quantity), f"SELL {ticker}")
+                close_action = "buy" if action == "cover" else "sell"
+                await self._submit(client, account_id, figi, close_action,
+                                   held_qty.get(figi, self.quantity),
+                                   f"{action.upper()} {ticker}")
                 self.entries.pop(ticker, None)
 
     async def _submit(self, client, account_id: str, figi: str, action: str,

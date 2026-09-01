@@ -126,6 +126,22 @@ def _bullish_confirmation(o, h, l, c, po, pc, confirm_candle: int) -> bool:
     return pc < po and c > o and min(o, c) < min(po, pc) and max(o, c) > max(po, pc)
 
 
+def _bearish_confirmation(o, h, l, c, po, pc, confirm_candle: int) -> bool:
+    """Паттерн подтверждения для шорт-входа: пинбар-шорт или медвежье поглощение."""
+    if not confirm_candle:
+        return False
+    body = abs(c - o)
+    rng = h - l
+    if rng > 0 and body > 0:
+        upper = h - max(o, c)
+        lower = min(o, c) - l
+        # пинбар-шорт: длинная верхняя тень, тело в нижней части
+        if upper >= 2.0 * body and lower <= body:
+            return True
+    # медвежье поглощение
+    return po < pc and c < o and max(o, c) > max(po, pc) and min(o, c) < min(po, pc)
+
+
 # ── Предрасчёт всех массивов сигнала ─────────────────────────────────────────
 
 def _compute_arrays(
@@ -196,6 +212,7 @@ def _compute_arrays(
     )
 
     in_discount = np.zeros(n, dtype=bool)
+    in_premium = np.zeros(n, dtype=bool)
     rsi_s = None
     if rsi_period and rsi_period > 0:
         delta = df["close"].diff()
@@ -209,19 +226,29 @@ def _compute_arrays(
 
     # Ретрейсмент (глубина отката от экстремума): 0% — цена на swing high,
     # 100% — на swing low. Discount-зона (по видеокурсу) — глубина 50–61.8 %.
+    # Премиальная зона для шорта — зеркально: откат вверх от swing low на 50–61.8 %.
     retrace = np.full(n, np.nan)
+    retrace_up = np.full(n, np.nan)
     target = np.full(n, np.nan)
+    target_short = np.full(n, np.nan)
     for i in range(n):
         if not np.isnan(seg[i]) and seg[i] > 0:
             r = (swing_high[i] - close[i]) / seg[i]
+            r_up = (close[i] - swing_low[i]) / seg[i]
             retrace[i] = r
+            retrace_up[i] = r_up
             if fib_in_low <= r <= fib_in_high:
                 in_discount[i] = True
+            if fib_in_low <= r_up <= fib_in_high:
+                in_premium[i] = True
             # Цель: притягательная зона 0 % (swing high) минус ``fib_tp`` долей.
             target[i] = swing_high[i] - fib_tp * seg[i]
+            # Шорт-цель: swing low плюс ``fib_tp`` долей (зеркально).
+            target_short[i] = swing_low[i] + fib_tp * seg[i]
 
     # Конфлюэнция (фактор F1 — зона, всегда требуется; F2 — свеча; F3 — RSI)
     factors = np.zeros(n, dtype=int)
+    factors_short = np.zeros(n, dtype=int)
     o = df["open"].values
     h = df["high"].values
     l = df["low"].values
@@ -233,6 +260,12 @@ def _compute_arrays(
         if rsi_arr[i] <= rsi_oversold:
             f += 1
         factors[i] = f
+        fs = 1  # зона Фибо (вход всегда от неё)
+        if _bearish_confirmation(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1], confirm_candle):
+            fs += 1
+        if rsi_arr[i] >= rsi_overbought:
+            fs += 1
+        factors_short[i] = fs
 
     return {
         "trend_up": trend_up,
@@ -242,12 +275,16 @@ def _compute_arrays(
         "swing_high": swing_high,
         "seg": seg,
         "in_discount": in_discount,
+        "in_premium": in_premium,
         "retrace": retrace,
+        "retrace_up": retrace_up,
         "rsi": rsi_arr,
         "factors": factors,
+        "factors_short": factors_short,
         "atr": atr_arr,
         "vol_ratio": vol_ratio,
         "target": target,
+        "target_short": target_short,
         "adx": adx_s,
         "ema": ema_own.values,
         "min_swing_dist_atr": min_swing_dist_atr,
@@ -291,6 +328,36 @@ def _exit_ok(st: dict, i: int) -> bool:
     return False
 
 
+def _entry_ok_short(st: dict, i: int) -> bool:
+    """Положительное решение о шорт-входе на баре ``i`` (без учёта позиции)."""
+    if bool(st["trend_up"][i]) or not bool(st["vol_ok"][i]) or not bool(st["adx_ok"][i]):
+        return False
+    if not st["in_premium"][i]:
+        return False
+    seg = st["seg"][i]
+    if np.isnan(seg) or seg <= 0:
+        return False
+    atr = st["atr"][i]
+    if np.isnan(atr) or atr <= 0:
+        return False
+    if seg < st["min_swing_dist_atr"] * atr:
+        return False
+    return int(st["factors_short"][i]) >= int(st["confluence_min"])
+
+
+def _exit_ok_short(st: dict, i: int) -> bool:
+    """Положительное решение о выходе из шорта (тренд вверх / тейк / RSI перепроданности)."""
+    if bool(st["trend_up"][i]):
+        return True
+    tgt = st["target_short"][i]
+    if not np.isnan(tgt) and st.get("close") is not None and st["close"][i] <= tgt:
+        return True
+    rsi = st["rsi"][i]
+    if not np.isnan(rsi) and rsi <= st["rsi_oversold"]:
+        return True
+    return False
+
+
 # ── Фильтр параметров (реестр стратегии шлёт и риск-параметры) ───────────────
 
 def _detector_params(params: dict) -> dict:
@@ -311,15 +378,17 @@ def fib_pullback_signal(
     htf_df: pd.DataFrame | None = None,
     **params,
 ) -> pd.Series:
-    """Серия позиций (1=long, 0=flat) по Фибо-ретрейсменту (трендовое продолжение).
+    """Серия позиций по Фибо-ретрейсменту (трендовое продолжение).
 
-    OHLCV-DataFrame ``df`` — рабочий таймфрейм (LTF); ``htf_df`` — старший
-    таймфрейм для фильтра глобального тренда (опционально, при ``use_htf``).
+    ``direction`` задаётся через kwargs: 1=long only (default), -1=short only,
+    0=both. OHLCV-DataFrame ``df`` — рабочий таймфрейм (LTF); ``htf_df`` —
+    старший таймфрейм для фильтра глобального тренда (опц., при ``use_htf``).
 
     Ключевые параметры: ``swing_bars`` (пивоты), ``fib_in_low``/``fib_in_high``
     (зона отката), ``confluence_min`` (мин. факторов), ``trend_period`` (EMA),
     ``regime_atr_vol_max`` (потолок волатильности), ``rsi_oversold``/``rsi_overbought``.
     """
+    direction = int(params.pop("direction", 1))
     df = prepare_ohlc(df)
     if htf_df is not None and not htf_df.empty:
         htf_df = prepare_ohlc(htf_df)
@@ -330,10 +399,15 @@ def fib_pullback_signal(
     cur = 0
     for i in range(n):
         if cur == 0:
-            if _entry_ok(st, i):
+            if direction >= 0 and _entry_ok(st, i):
                 cur = 1
-        else:
-            if _exit_ok(st, i):
+            elif direction <= 0 and _entry_ok_short(st, i):
+                cur = -1
+        elif cur == 1:
+            if _exit_ok(st, i) or (direction <= 0 and _entry_ok_short(st, i)):
+                cur = 0
+        else:  # short position
+            if _exit_ok_short(st, i) or (direction >= 0 and _entry_ok(st, i)):
                 cur = 0
         pos[i] = cur
     return pd.Series(pos, index=df.index)
@@ -373,10 +447,12 @@ def fib_score_breakdown(
         "segment": None if np.isnan(seg) else float(seg),
         "atr": None if np.isnan(atr) else float(atr),
         "in_discount": bool(st["in_discount"][i]),
+        "in_premium": bool(st["in_premium"][i]),
         "rsi": None if np.isnan(st["rsi"][i]) else round(float(st["rsi"][i]), 1),
         "adx": None if np.isnan(st["adx"].iloc[i]) else round(float(st["adx"].iloc[i]), 1),
         "vol_ratio": None if np.isnan(st["vol_ratio"][i]) else round(float(st["vol_ratio"][i]) * 100.0, 2),
         "factors": int(st["factors"][i]),
+        "factors_short": int(st["factors_short"][i]),
         "trend_up": bool(st["trend_up"][i]),
         "in_zone": bool(st["in_discount"][i]),
     }
@@ -389,6 +465,14 @@ def fib_score_breakdown(
             "61.8%": round(float(swing_high - 0.618 * seg), 4),
             "78.6%": round(float(swing_high - 0.786 * seg), 4),
             "0% (цель)": round(float(swing_high), 4),
+        }
+        # Шорт-уровни: глубина отката вверх от swing low.
+        out["levels_short"] = {
+            "38.2%": round(float(swing_low + 0.382 * seg), 4),
+            "50.0%": round(float(swing_low + 0.500 * seg), 4),
+            "61.8%": round(float(swing_low + 0.618 * seg), 4),
+            "78.6%": round(float(swing_low + 0.786 * seg), 4),
+            "0% (цель)": round(float(swing_low), 4),
         }
     return out
 
@@ -414,4 +498,29 @@ def detect_latest_setup(
         return None
     breakdown["index"] = int(i)
     breakdown["open_next"] = None
+    return breakdown
+
+
+def detect_latest_short_setup(
+    df: pd.DataFrame,
+    htf_df: pd.DataFrame | None = None,
+    **params,
+) -> dict | None:
+    """Вернуть шорт-setup входа, если последний бар его закрывает (иначе None).
+
+    Зеркало ``detect_latest_setup``: тренд вниз + премиальная зона Фибо +
+    конфлюэнция. Для нотификатора шорт-сигналов.
+    """
+    df = prepare_ohlc(df)
+    breakdown = fib_score_breakdown(df, htf_df, **params)
+    if not breakdown or not breakdown["in_premium"] or breakdown["trend_up"]:
+        return None
+    i = len(df) - 1
+    st = _compute_arrays(df, htf_df, **_detector_params(params))
+    st["close"] = df["close"].values
+    if not _entry_ok_short(st, i):
+        return None
+    breakdown["index"] = int(i)
+    breakdown["open_next"] = None
+    breakdown["direction"] = -1
     return breakdown

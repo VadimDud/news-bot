@@ -21,6 +21,7 @@ from app.fib_notifier import (  # noqa: E402
     _is_stale,
     _params_from_config,
     _dispatch_setup,
+    ticker_settings,
 )
 
 
@@ -151,6 +152,46 @@ class TestParams:
                 "swing_bars", "fib_in_low", "fib_in_high", "trend_period",
                 "confluence_min", "rsi_oversold", "regime_adx_min", "regime_atr_vol_max",
             }
+
+
+# ---------------------------------------------------------------------------
+# Per-ticker settings (БД → TICKER_OVERRIDES → конфиг)
+# ---------------------------------------------------------------------------
+
+class TestTickerSettings:
+    def test_default_direction_zero_and_config_params(self):
+        storage.delete_fib_ticker_setting("ZZZZ")
+        s = ticker_settings("ZZZZ")
+        assert s["direction"] == 0
+        assert "swing_bars" in s["params"]
+
+    def test_saved_setting_overrides_override_and_config(self):
+        storage.save_fib_ticker_setting("MTSS", -1, {"swing_bars": 7, "confluence_min": 3})
+        s = ticker_settings("MTSS")
+        assert s["direction"] == -1
+        assert s["params"]["swing_bars"] == 7
+        assert s["params"]["confluence_min"] == 3
+        storage.delete_fib_ticker_setting("MTSS")
+
+    def test_code_override_applied_without_db_row(self):
+        storage.delete_fib_ticker_setting("TATN")
+        s = ticker_settings("TATN")
+        assert s["direction"] == -1  # из TICKER_OVERRIDES
+        assert s["params"]["confluence_min"] == 2
+
+    def test_delete_restores_code_override(self):
+        storage.save_fib_ticker_setting("GAZP", 1, {"trend_period": 50})
+        assert ticker_settings("GAZP")["direction"] == 1
+        storage.delete_fib_ticker_setting("GAZP")
+        assert ticker_settings("GAZP")["direction"] == -1  # вернулся код-оверрайд
+
+    def test_list_settings_roundtrip(self):
+        storage.save_fib_ticker_setting("TESTFIB", 1, {"a": 1.5})
+        all_s = storage.list_fib_ticker_settings()
+        assert all_s["TESTFIB"]["direction"] == 1
+        assert all_s["TESTFIB"]["params"] == {"a": 1.5}
+        storage.delete_fib_ticker_setting("TESTFIB")
+        assert "TESTFIB" not in storage.list_fib_ticker_settings()
 
 
 # ---------------------------------------------------------------------------

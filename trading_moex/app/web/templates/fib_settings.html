@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Fib-сканер — MOEX Trader{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Per-ticker настройки Fib-сканера</h2>
+  <p class="hint">Для каждой бумаги можно задать направление (1 = лонг, −1 = шорт, 0 = оба) и
+  параметры детектора. Приоритет: сохранённое здесь → TICKER_OVERRIDES → глобальный конфиг.
+  Сигнал в Telegram уходит уже настроенный под бумагу.</p>
+  {% if notice %}<p class="ok">{{ notice }}</p>{% endif %}
+</div>
+
+<div class="card">
+  <h3>Добавить / изменить настройку</h3>
+  <form method="post" action="/fib/save">
+    <div class="grid">
+      <div>
+        <label for="ticker">Тикер</label>
+        <input type="text" id="ticker" name="ticker" placeholder="SBER" maxlength="12" required>
+      </div>
+      <div>
+        <label for="direction">Направление</label>
+        <select id="direction" name="direction">
+          <option value="0">0 — оба (лонг + шорт)</option>
+          <option value="1">1 — только лонг</option>
+          <option value="-1">−1 — только шорт</option>
+        </select>
+      </div>
+    </div>
+    <label for="params_json">Параметры (JSON, необязательно)</label>
+    <input type="text" id="params_json" name="params_json"
+           placeholder='{"swing_bars": 10, "trend_period": 100, "confluence_min": 1, "fib_in_low": 0.5, "fib_in_high": 0.618}'>
+    <button type="submit" style="margin-top:12px">Сохранить</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Сохранённые настройки</h2>
+  {% if rows %}
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Тикер</th><th>Направление</th><th>Параметры</th><th>Сохранено</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.ticker }}</strong></td>
+        <td>
+          {% if r.eff_direction == -1 %}🔻 шорт
+          {% elif r.eff_direction == 1 %}🔺 лонг
+          {% else %}⚖️ оба{% endif %}
+        </td>
+        <td style="font-size:12px">
+          {% for k, v in r.eff_params.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
+        </td>
+        <td>
+          {% if r.saved %}{{ r.saved.updated_at[:16]|replace('T',' ') }}{% else %}<span class="hint">из кода/конфига</span>{% endif %}
+        </td>
+        <td style="text-align:right">
+          {% if r.saved %}
+          <form method="post" action="/fib/delete" style="margin:0">
+            <input type="hidden" name="ticker" value="{{ r.ticker }}">
+            <button type="submit" class="btn secondary" style="margin:0">Сбросить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="empty">Нет сохранённых настроек — сканер использует TICKER_OVERRIDES и глобальный конфиг.</div>
+  {% endif %}
+</div>
+{% endblock %}

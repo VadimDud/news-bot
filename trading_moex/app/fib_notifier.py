@@ -168,6 +168,31 @@ def _params_from_config() -> dict:
     }
 
 
+def ticker_settings(ticker: str) -> dict:
+    """Настройки сканера для бумаги: {direction, params}.
+
+    Приоритет: сохранённые per-ticker настройки из БД → TICKER_OVERRIDES →
+    глобальные параметры из конфига. Параметры сливаются поверх базовых.
+    """
+    params = _params_from_config()
+    direction = 0  # 0 — оба направления (лонг и шорт)
+
+    from .strategies import TICKER_OVERRIDES as _TO
+
+    over = _TO.get(("fib_pullback", ticker.upper()), {})
+    if over:
+        params = {**params, **{k: v for k, v in over.items() if k != "direction"}}
+        direction = int(over.get("direction", direction))
+
+    saved = storage.get_fib_ticker_setting(ticker)
+    if saved is not None:
+        if saved.get("params"):
+            params = {**params, **saved["params"]}
+        direction = int(saved.get("direction", direction))
+
+    return {"direction": direction, "params": params}
+
+
 def _is_stale(df: pd.DataFrame) -> bool:
     if df.empty:
         return True
@@ -190,20 +215,19 @@ def _setup_id(info: dict) -> str | None:
 
 
 async def _scan_ticker(ticker: str) -> dict | None:
-    """Сканировать один тикер: детект setup-а (long и short), дедуп, отправка."""
+    """Сканировать один тикер: детект setup-а (long и short), дедуп, отправка.
+
+    Параметры и направление берутся из per-ticker настроек (БД →
+    TICKER_OVERRIDES → глобальный конфиг), чтобы сигнал был уже настроен
+    под характер бумаги.
+    """
     df = _load_daily_candles(ticker)
     if df is None:
         return None
 
-    params = _params_from_config()
-    # Per-ticker overrides: параметры + направление под конкретную бумагу
-    # (напр. MTSS/GAZP/CHMF/NVTK торгуют в шорт, остальные — лонг).
-    from .strategies import TICKER_OVERRIDES as _TO
-
-    over = _TO.get(("fib_pullback", ticker.upper()), {})
-    if over:
-        params = {**params, **{k: v for k, v in over.items() if k != "direction"}}
-    direction = int(over.get("direction", 0) or 0)  # 0 — оба (по умолчанию)
+    settings = ticker_settings(ticker)
+    params = settings["params"]
+    direction = settings["direction"]
     htf = _load_htf(ticker) if int(trading_config.TRADER_FIB_USE_HTF) else None
     retrace_center = (trading_config.TRADER_FIB_FIB_IN_LOW + trading_config.TRADER_FIB_FIB_IN_HIGH) / 2.0
 

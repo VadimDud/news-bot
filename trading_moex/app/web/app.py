@@ -287,6 +287,94 @@ async def settings_save(request: web.Request) -> web.Response:
     return resp
 
 
+async def fib_settings_page(request: web.Request) -> web.Response:
+    """Страница per-ticker настроек Fib-сканера (направление + параметры)."""
+    from .. import storage as st
+    from ..fib_notifier import ticker_settings
+
+    saved = st.list_fib_ticker_settings()
+    # Список бумаг: сохранённые + те, где есть TICKER_OVERRIDES/дефолт
+    from ..strategies import TICKER_OVERRIDES as _TO
+
+    over_tickers = {t for (k, t) in _TO if k == "fib_pullback"}
+    all_tickers = sorted(set(saved) | over_tickers | set(st.list_watchlist()))
+    rows = []
+    for ticker in all_tickers:
+        eff = ticker_settings(ticker)
+        rows.append({
+            "ticker": ticker,
+            "saved": saved.get(ticker),
+            "eff_direction": eff["direction"],
+            "eff_params": eff["params"],
+        })
+    return aiohttp_jinja2.render_template(
+        "fib_settings.html",
+        request,
+        {"rows": rows, "notice": ""},
+    )
+
+
+async def fib_settings_save(request: web.Request) -> web.Response:
+    """Сохранить per-ticker настройку Fib-сканера."""
+    from .. import storage as st
+
+    form = await request.post()
+    ticker = (form.get("ticker") or "").strip().upper()
+    if not ticker:
+        return web.HTTPFound("/fib")
+    direction = int(form.get("direction", "0") or 0)
+    params: dict = {}
+    raw = (form.get("params_json") or "").strip()
+    if raw:
+        try:
+            import json as _json
+
+            parsed = _json.loads(raw)
+            if isinstance(parsed, dict):
+                params = parsed
+        except ValueError:
+            pass
+    st.save_fib_ticker_setting(ticker, direction, params)
+
+    resp = aiohttp_jinja2.render_template(
+        "fib_settings.html",
+        request,
+        {"rows": _fib_rows(), "notice": f"Настройка {ticker} сохранена."},
+    )
+    return resp
+
+
+def _fib_rows() -> list[dict]:
+    from .. import storage as st
+    from ..fib_notifier import ticker_settings
+    from ..strategies import TICKER_OVERRIDES as _TO
+
+    saved = st.list_fib_ticker_settings()
+    over_tickers = {t for (k, t) in _TO if k == "fib_pullback"}
+    all_tickers = sorted(set(saved) | over_tickers | set(st.list_watchlist()))
+    rows = []
+    for ticker in all_tickers:
+        eff = ticker_settings(ticker)
+        rows.append({
+            "ticker": ticker,
+            "saved": saved.get(ticker),
+            "eff_direction": eff["direction"],
+            "eff_params": eff["params"],
+        })
+    return rows
+
+
+async def fib_settings_delete(request: web.Request) -> web.Response:
+    """Удалить per-ticker настройку (вернуться к оверрайдам/дефолту)."""
+    from .. import storage as st
+
+    form = await request.post()
+    ticker = (form.get("ticker") or "").strip().upper()
+    if ticker:
+        st.delete_fib_ticker_setting(ticker)
+    return web.HTTPFound("/fib")
+
+
 async def fundamentals_page(request: web.Request) -> web.Response:
     """Страница загрузки/списка фундаментальной отчётности по тикерам."""
     tickers = storage.list_tickers_with_fundamentals()
@@ -954,6 +1042,9 @@ def create_app() -> web.Application:
     app.router.add_post("/screener/save", screener_save)
     app.router.add_get("/settings", settings_page)
     app.router.add_post("/settings", settings_save)
+    app.router.add_get("/fib", fib_settings_page)
+    app.router.add_post("/fib/save", fib_settings_save)
+    app.router.add_post("/fib/delete", fib_settings_delete)
     app.router.add_get("/", index)
     app.router.add_get("/strategy/defaults", strategy_defaults_api)
     app.router.add_post("/backtest/run", backtest_run)

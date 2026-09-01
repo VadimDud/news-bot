@@ -306,6 +306,7 @@ async def fib_settings_page(request: web.Request) -> web.Response:
             "saved": saved.get(ticker),
             "eff_direction": eff["direction"],
             "eff_params": eff["params"],
+            "eff_timeframe": eff.get("timeframe", "4h"),
         })
     return aiohttp_jinja2.render_template(
         "fib_settings.html",
@@ -323,6 +324,7 @@ async def fib_settings_save(request: web.Request) -> web.Response:
     if not ticker:
         return web.HTTPFound("/fib")
     direction = int(form.get("direction", "0") or 0)
+    timeframe = (form.get("timeframe") or "").strip() or None
     params: dict = {}
     raw = (form.get("params_json") or "").strip()
     if raw:
@@ -334,7 +336,7 @@ async def fib_settings_save(request: web.Request) -> web.Response:
                 params = parsed
         except ValueError:
             pass
-    st.save_fib_ticker_setting(ticker, direction, params)
+    st.save_fib_ticker_setting(ticker, direction, params, timeframe=timeframe)
 
     resp = aiohttp_jinja2.render_template(
         "fib_settings.html",
@@ -360,6 +362,7 @@ def _fib_rows() -> list[dict]:
             "saved": saved.get(ticker),
             "eff_direction": eff["direction"],
             "eff_params": eff["params"],
+            "eff_timeframe": eff.get("timeframe", "4h"),
         })
     return rows
 

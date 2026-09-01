@@ -138,6 +138,15 @@ TRADER_FIB_ENABLED: bool = os.environ.get("TRADER_FIB_ENABLED", "true").lower() 
 TRADER_FIB_SCAN_HOUR: int = int(os.environ.get("TRADER_FIB_SCAN_HOUR", "16"))   # UTC ≈ 19:00 MSK
 TRADER_FIB_SCAN_MINUTE: int = int(os.environ.get("TRADER_FIB_SCAN_MINUTE", "30"))
 TRADER_FIB_RUN_ON_STARTUP: bool = os.environ.get("TRADER_FIB_RUN_ON_STARTUP", "true").lower() in ("1", "true")
+# Рабочий таймфрейм сканера (4h по умолчанию; per-ticker можно задать 1day).
+TRADER_FIB_TIMEFRAME: str = os.environ.get("TRADER_FIB_TIMEFRAME", "4h")
+# Дополнительные времена скана в течение дня (UTC, ЧЧ:ММ через запятую) —
+# для 4h-баров сканер запускается после закрытия каждого бара. Основное время
+# остаётся TRADER_FIB_SCAN_HOUR/MINUTE. Пример: "21:00,01:00,05:00,09:00".
+TRADER_FIB_EXTRA_SCANS: list[tuple[int, int]] = [
+    (int(h), int(m))
+    for h, m in (p.split(":") for p in os.environ.get("TRADER_FIB_EXTRA_SCANS", "").split(",") if p.strip())
+]
 # Параметры setup-а для ежедневного сканера (дефолты совпадают с fib_pullback).
 TRADER_FIB_SWING_BARS: int = int(os.environ.get("TRADER_FIB_SWING_BARS", "10"))
 TRADER_FIB_FIB_IN_LOW: float = float(os.environ.get("TRADER_FIB_FIB_IN_LOW", "0.50"))

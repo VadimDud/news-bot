@@ -3,9 +3,9 @@
 {% block content %}
 <div class="card">
   <h2>Per-ticker настройки Fib-сканера</h2>
-  <p class="hint">Для каждой бумаги можно задать направление (1 = лонг, −1 = шорт, 0 = оба) и
-  параметры детектора. Приоритет: сохранённое здесь → TICKER_OVERRIDES → глобальный конфиг.
-  Сигнал в Telegram уходит уже настроенный под бумагу.</p>
+  <p class="hint">Для каждой бумаги можно задать направление (1 = лонг, −1 = шорт, 0 = оба),
+  таймфрейм скана (4h по умолчанию) и параметры детектора. Приоритет: сохранённое здесь →
+  TICKER_OVERRIDES → глобальный конфиг. Сигнал в Telegram уходит уже настроенный под бумагу.</p>
   {% if notice %}<p class="ok">{{ notice }}</p>{% endif %}
 </div>
 
@@ -25,6 +25,14 @@
           <option value="-1">−1 — только шорт</option>
         </select>
       </div>
+      <div>
+        <label for="timeframe">Таймфрейм</label>
+        <select id="timeframe" name="timeframe">
+          <option value="">по умолчанию (4h)</option>
+          <option value="4h">4h</option>
+          <option value="1day">1day</option>
+        </select>
+      </div>
     </div>
     <label for="params_json">Параметры (JSON, необязательно)</label>
     <input type="text" id="params_json" name="params_json"
@@ -39,7 +47,7 @@
   <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>Тикер</th><th>Направление</th><th>Параметры</th><th>Сохранено</th><th></th></tr>
+      <tr><th>Тикер</th><th>Направление</th><th>ТФ</th><th>Параметры</th><th>Сохранено</th><th></th></tr>
     </thead>
     <tbody>
       {% for r in rows %}
@@ -50,6 +58,7 @@
           {% elif r.eff_direction == 1 %}🔺 лонг
           {% else %}⚖️ оба{% endif %}
         </td>
+        <td>{{ r.eff_timeframe }}</td>
         <td style="font-size:12px">
           {% for k, v in r.eff_params.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
         </td>

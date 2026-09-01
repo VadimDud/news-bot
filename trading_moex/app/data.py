@@ -24,6 +24,7 @@ PERIODS = {
     "15min": "15min",
     "30min": "30min",
     "60min": "1h",
+    "4h": "1h",
     "1day": "1D",
     "1week": "1W",
     "1month": "1M",
@@ -38,6 +39,10 @@ _MAX_BATCH = 5000
 # Поэтому для них запрашиваем нативные 1min и ресэмплим сами через pandas.
 RESAMPLE_FROM_1MIN = {"5min": "5min", "15min": "15min", "30min": "30min"}
 
+# Таймфреймы, которые собираем ресамплом из нативных часовых свечей (1h).
+# 4h не имеет нативного интервала у moexalgo — качаем 1h и склеиваем по 4.
+RESAMPLE_FROM_1H = {"4h": "4h"}
+
 # Известные переименования/делистинги (подсказка в тексте ошибки).
 # Проверено 2026-08: FIVE (X5 Group) и остальные тикеры каталога торгуются.
 DELISTED_HINTS = {
@@ -49,7 +54,7 @@ DELISTED_HINTS = {
 # а кусок помещается в один батч (< _MAX_BATCH).
 DOWNLOAD_CHUNK_DAYS = {
     "1min": 7, "5min": 7, "15min": 7, "30min": 7,
-    "60min": 31, "1day": 183, "1week": 365, "1month": 365,
+    "60min": 31, "4h": 31, "1day": 183, "1week": 365, "1month": 365,
 }
 
 
@@ -129,7 +134,7 @@ def _fetch_ranges(
 
     ranges: list[tuple[datetime, datetime]] = []
     last_ts = pd.Timestamp(last)
-    if period in RESAMPLE_FROM_1MIN:
+    if period in RESAMPLE_FROM_1MIN or period in RESAMPLE_FROM_1H:
         tail_start = last_ts.to_pydatetime()
     else:
         tail_start = (last_ts + pd.Timedelta(seconds=1)).to_pydatetime()
@@ -214,6 +219,8 @@ def fetch_history(
         df = pd.DataFrame(new_rows)
         if period in RESAMPLE_FROM_1MIN:
             df = _resample_candles(df, RESAMPLE_FROM_1MIN[period])
+        elif period in RESAMPLE_FROM_1H:
+            df = _resample_candles(df, RESAMPLE_FROM_1H[period])
         added = storage.save_candles(ticker, period, df)
         logger.info("Синхронизировано: добавлено %s свечей %s %s", added, ticker, period)
 

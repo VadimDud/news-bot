@@ -84,6 +84,13 @@ async def main() -> None:
     else:
         logger.info("Fibonacci notifier disabled via TRADER_FIB_ENABLED")
 
+    # Доскачивание 4h-свечей для watchlist (кроме исключений) перед первым сканом
+    fib_data_task: asyncio.Task | None = None
+    if config.TRADER_FIB_ENABLED:
+        from app.fib_notifier import fib_data_sync_task
+
+        fib_data_task = asyncio.create_task(fib_data_sync_task())
+
     try:
         while True:
             await asyncio.sleep(3600)
@@ -100,6 +107,10 @@ async def main() -> None:
             fib_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await fib_task
+        if fib_data_task is not None:
+            fib_data_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await fib_data_task
         await runner.cleanup()
 
 

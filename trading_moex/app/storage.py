@@ -162,10 +162,18 @@ def init_db() -> None:
                 ticker TEXT PRIMARY KEY,
                 direction INTEGER NOT NULL DEFAULT 0,
                 params TEXT,
+                timeframe TEXT,
                 updated_at TEXT
             )
             """
         )
+        # graceful-миграция: у старых таблиц может не быть колонки timeframe
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(fib_ticker_settings)").fetchall()]
+            if cols and "timeframe" not in cols:
+                conn.execute("ALTER TABLE fib_ticker_settings ADD COLUMN timeframe TEXT")
+        except sqlite3.Error:  # pragma: no cover — таблица может быть недоступна
+            pass
         # graceful-миграция: старые таблицы dividends могли не иметь buy_before
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(dividends)").fetchall()]
@@ -422,13 +430,13 @@ def save_fib_short_signal(
 # ── Per-ticker настройки Fib-сканера ────────────────────────────────────────
 
 def list_fib_ticker_settings() -> dict[str, dict]:
-    """Все сохранённые per-ticker настройки: {ticker: {direction, params, updated_at}}."""
+    """Все сохранённые per-ticker настройки: {ticker: {direction, params, timeframe, updated_at}}."""
     out: dict[str, dict] = {}
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT ticker, direction, params, updated_at FROM fib_ticker_settings"
+            "SELECT ticker, direction, params, timeframe, updated_at FROM fib_ticker_settings"
         ).fetchall()
-    for ticker, direction, params, updated_at in rows:
+    for ticker, direction, params, timeframe, updated_at in rows:
         parsed: dict = {}
         if params:
             try:
@@ -438,6 +446,7 @@ def list_fib_ticker_settings() -> dict[str, dict]:
         out[ticker] = {
             "direction": int(direction or 0),
             "params": parsed,
+            "timeframe": timeframe,
             "updated_at": updated_at,
         }
     return out
@@ -448,16 +457,19 @@ def get_fib_ticker_setting(ticker: str) -> dict | None:
     return list_fib_ticker_settings().get(ticker.upper())
 
 
-def save_fib_ticker_setting(ticker: str, direction: int, params: dict) -> None:
-    """Сохранить per-ticker настройку Fib-сканера (direction + параметры)."""
+def save_fib_ticker_setting(
+    ticker: str, direction: int, params: dict, timeframe: str | None = None,
+) -> None:
+    """Сохранить per-ticker настройку Fib-сканера (direction + параметры + ТФ)."""
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO fib_ticker_settings (ticker, direction, params, updated_at)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO fib_ticker_settings (ticker, direction, params, timeframe, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(ticker) DO UPDATE SET direction=excluded.direction,"
-            " params=excluded.params, updated_at=excluded.updated_at",
-            (ticker.upper(), int(direction), json.dumps(params, ensure_ascii=False), now),
+            " params=excluded.params, timeframe=excluded.timeframe,"
+            " updated_at=excluded.updated_at",
+            (ticker.upper(), int(direction), json.dumps(params, ensure_ascii=False), timeframe, now),
         )
 
 

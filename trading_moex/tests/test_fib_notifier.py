@@ -177,7 +177,8 @@ class TestTickerSettings:
         storage.delete_fib_ticker_setting("TATN")
         s = ticker_settings("TATN")
         assert s["direction"] == -1  # из TICKER_OVERRIDES
-        assert s["params"]["confluence_min"] == 2
+        assert s["params"]["confluence_min"] == 1
+        assert s["timeframe"] == "4h"
 
     def test_delete_restores_code_override(self):
         storage.save_fib_ticker_setting("GAZP", 1, {"trend_period": 50})
@@ -192,6 +193,21 @@ class TestTickerSettings:
         assert all_s["TESTFIB"]["params"] == {"a": 1.5}
         storage.delete_fib_ticker_setting("TESTFIB")
         assert "TESTFIB" not in storage.list_fib_ticker_settings()
+
+    def test_timeframe_override_sber_stays_1day(self):
+        storage.delete_fib_ticker_setting("SBER")
+        s = ticker_settings("SBER")
+        assert s["timeframe"] == "1day"  # на 4h шорт убыточен — код-оверрайд
+
+    def test_timeframe_db_override_wins(self):
+        storage.save_fib_ticker_setting("GAZP", -1, {}, timeframe="1day")
+        assert ticker_settings("GAZP")["timeframe"] == "1day"
+        storage.delete_fib_ticker_setting("GAZP")
+        assert ticker_settings("GAZP")["timeframe"] == "4h"  # вернулся дефолт
+
+    def test_default_timeframe_4h(self):
+        storage.delete_fib_ticker_setting("ZZZZ")
+        assert ticker_settings("ZZZZ")["timeframe"] == "4h"
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +239,7 @@ class TestRunFibScan:
             "levels": {"50.0%": 130.0, "61.8%": 125.28, "0% (цель)": 150.0},
         }
         storage.set_watchlist(["TEST"])
-        with patch("app.fib_notifier._load_daily_candles", return_value=df), \
+        with patch("app.fib_notifier._load_candles", return_value=df), \
              patch("app.fib_notifier._load_htf", return_value=None), \
              patch("app.fib_notifier.fib_pullback.detect_latest_setup", return_value=info), \
              patch("app.fib_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
@@ -249,7 +265,7 @@ class TestRunFibScan:
             "levels_short": {"50.0%": 110.0, "0% (цель)": 90.0},
         }
         storage.set_watchlist(["TEST2"])
-        with patch("app.fib_notifier._load_daily_candles", return_value=df), \
+        with patch("app.fib_notifier._load_candles", return_value=df), \
              patch("app.fib_notifier._load_htf", return_value=None), \
              patch("app.fib_notifier.fib_pullback.detect_latest_setup", return_value=None), \
              patch("app.fib_notifier.fib_pullback.detect_latest_short_setup", return_value=info), \
@@ -278,7 +294,7 @@ class TestRunFibScan:
             "TEST3", "110.0000->150.0000",
             swing_low=110.0, swing_high=150.0, retrace=40.0, factors=2,
         )
-        with patch("app.fib_notifier._load_daily_candles", return_value=df), \
+        with patch("app.fib_notifier._load_candles", return_value=df), \
              patch("app.fib_notifier._load_htf", return_value=None), \
              patch("app.fib_notifier.fib_pullback.detect_latest_setup", return_value=long_info), \
              patch("app.fib_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:

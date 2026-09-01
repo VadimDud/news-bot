@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
 
@@ -131,11 +131,15 @@ def format_fib_signal(
 # ── Скан ─────────────────────────────────────────────────────────────────────
 
 
-def _load_daily_candles(ticker: str) -> pd.DataFrame | None:
-    """Дневные свечи из БД как индексированный OHLCV или None."""
-    df_raw = storage.get_candles(ticker, "1day")
+def _load_candles(ticker: str, period: str = "4h") -> pd.DataFrame | None:
+    """Свечи из БД как индексированный OHLCV или None.
+
+    Рабочий таймфрейм сканера — ``4h`` (ресемпл из 1h); дефолт можно
+    переопределить per-ticker настройкой ``timeframe`` (напр. ``1day``).
+    """
+    df_raw = storage.get_candles(ticker, period)
     if df_raw.empty or len(df_raw) < 5:
-        logger.info("Недостаточно свечей по %s (%d), пропуск", ticker, len(df_raw))
+        logger.info("Недостаточно свечей %s по %s (%d), пропуск", period, ticker, len(df_raw))
         return None
     try:
         return fib_pullback.prepare_ohlc(df_raw)
@@ -145,8 +149,8 @@ def _load_daily_candles(ticker: str) -> pd.DataFrame | None:
 
 
 def _load_htf(ticker: str) -> pd.DataFrame | None:
-    """Старший таймфрейм (неделя) для фильтра глобального тренда, если есть."""
-    df_raw = storage.get_candles(ticker, "1week")
+    """Старший таймфрейм (день) для фильтра глобального тренда, если есть."""
+    df_raw = storage.get_candles(ticker, "1day")
     if df_raw.empty or len(df_raw) < 20:
         return None
     try:
@@ -169,28 +173,33 @@ def _params_from_config() -> dict:
 
 
 def ticker_settings(ticker: str) -> dict:
-    """Настройки сканера для бумаги: {direction, params}.
+    """Настройки сканера для бумаги: {direction, params, timeframe}.
 
     Приоритет: сохранённые per-ticker настройки из БД → TICKER_OVERRIDES →
     глобальные параметры из конфига. Параметры сливаются поверх базовых.
+    ``timeframe`` — рабочий таймфрейм сканера (по умолчанию ``4h``); в БД и
+    кодовых оверрайдах можно задать per-ticker (напр. ``1day`` для SBER).
     """
     params = _params_from_config()
     direction = 0  # 0 — оба направления (лонг и шорт)
+    timeframe = "4h"  # сканер по умолчанию работает на 4h
 
     from .strategies import TICKER_OVERRIDES as _TO
 
     over = _TO.get(("fib_pullback", ticker.upper()), {})
     if over:
-        params = {**params, **{k: v for k, v in over.items() if k != "direction"}}
+        params = {**params, **{k: v for k, v in over.items() if k not in ("direction", "timeframe")}}
         direction = int(over.get("direction", direction))
+        timeframe = str(over.get("timeframe", timeframe))
 
     saved = storage.get_fib_ticker_setting(ticker)
     if saved is not None:
         if saved.get("params"):
             params = {**params, **saved["params"]}
         direction = int(saved.get("direction", direction))
+        timeframe = str(saved.get("timeframe", timeframe))
 
-    return {"direction": direction, "params": params}
+    return {"direction": direction, "params": params, "timeframe": timeframe}
 
 
 def _is_stale(df: pd.DataFrame) -> bool:
@@ -221,13 +230,15 @@ async def _scan_ticker(ticker: str) -> dict | None:
     TICKER_OVERRIDES → глобальный конфиг), чтобы сигнал был уже настроен
     под характер бумаги.
     """
-    df = _load_daily_candles(ticker)
-    if df is None:
-        return None
-
     settings = ticker_settings(ticker)
     params = settings["params"]
     direction = settings["direction"]
+    timeframe = settings.get("timeframe", "4h")
+
+    df = _load_candles(ticker, period=timeframe)
+    if df is None:
+        return None
+
     htf = _load_htf(ticker) if int(trading_config.TRADER_FIB_USE_HTF) else None
     retrace_center = (trading_config.TRADER_FIB_FIB_IN_LOW + trading_config.TRADER_FIB_FIB_IN_HIGH) / 2.0
 
@@ -305,6 +316,55 @@ def _watchlist() -> list[str]:
     return list(tickers)
 
 
+# ── Доскачивание данных рабочего ТФ (4h) ─────────────────────────────────────
+
+# Бумаги, для которых 4h-данные НЕ качаем (работают на другом ТФ, напр. SBER=1day)
+_FIB_4H_EXCLUDE = frozenset({"SBER"})
+
+_FIB_4H_SYNC_HOURS = 6  # период повторной синхронизации 4h-данных
+
+
+def _ticker_timeframe(ticker: str) -> str:
+    """Рабочий ТФ бумаги из per-ticker настроек (4h по умолчанию)."""
+    return ticker_settings(ticker).get("timeframe", "4h")
+
+
+def _needs_4h_sync(ticker: str, timeframe: str) -> bool:
+    if timeframe != "4h" or ticker.upper() in _FIB_4H_EXCLUDE:
+        return False
+    last = storage.last_candle_time(ticker, "4h")
+    if last is None:
+        return True
+    last_dt = datetime.fromisoformat(last)
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_dt) > timedelta(hours=_FIB_4H_SYNC_HOURS)
+
+
+async def fib_data_sync_task() -> None:
+    """Фоновая синхронизация 4h-свечей watchlist с MOEX (кроме исключений)."""
+    from . import data as data_module
+
+    while True:
+        try:
+            for ticker in _watchlist():
+                timeframe = _ticker_timeframe(ticker)
+                if not _needs_4h_sync(ticker, timeframe):
+                    continue
+                try:
+                    end = date.today()
+                    start = end - timedelta(days=400)
+                    await asyncio.to_thread(data_module.fetch_history, ticker, "4h", start, end)
+                    logger.info("4h-свечи синхронизированы: %s", ticker)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Синхронизация 4h по %s не удалась: %s", ticker, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка цикла синхронизации 4h: %s", exc)
+        await asyncio.sleep(3600)
+
+
 async def run_fib_scan() -> list[dict]:
     """Полный скан watchlist: детект setup → дедуп → Telegram."""
     sent: list[dict] = []
@@ -324,23 +384,27 @@ async def run_fib_scan() -> list[dict]:
 
 
 def _next_scan_delay(now: datetime | None = None) -> float:
+    """До ближайшего времени скана (основное + дополнительные 4h-бары)."""
     now = now or datetime.now(timezone.utc)
-    target = datetime.combine(
-        now.date(),
-        time(trading_config.TRADER_FIB_SCAN_HOUR, trading_config.TRADER_FIB_SCAN_MINUTE),
-        tzinfo=timezone.utc,
-    )
-    if now >= target:
-        target += timedelta(days=1)
-    return max((target - now).total_seconds(), 0.0)
+    targets: list[datetime] = []
+    for hour, minute in [(trading_config.TRADER_FIB_SCAN_HOUR, trading_config.TRADER_FIB_SCAN_MINUTE), *trading_config.TRADER_FIB_EXTRA_SCANS]:
+        t = datetime.combine(
+            now.date(), time(hour, minute), tzinfo=timezone.utc
+        )
+        if now >= t:
+            t += timedelta(days=1)
+        targets.append(t)
+    return max((min(targets) - now).total_seconds(), 0.0)
 
 
 async def fib_scan_loop() -> None:
-    """Ежедневно вечером после закрытия рынка: sleep → run_fib_scan."""
+    """Скан после закрытия каждого бара рабочего ТФ (4h → несколько раз в день)."""
     logger.info(
-        "Сканер Fib-сигналов запущен: ежедневно %02d:%02d UTC%s",
+        "Сканер Fib-сигналов запущен: основные %02d:%02d UTC%s, ТФ=%s%s",
         trading_config.TRADER_FIB_SCAN_HOUR,
         trading_config.TRADER_FIB_SCAN_MINUTE,
+        f", доп. времена: {trading_config.TRADER_FIB_EXTRA_SCANS}" if trading_config.TRADER_FIB_EXTRA_SCANS else "",
+        trading_config.TRADER_FIB_TIMEFRAME,
         ", стартовый прогон включён" if trading_config.TRADER_FIB_RUN_ON_STARTUP else "",
     )
     if trading_config.TRADER_FIB_RUN_ON_STARTUP:

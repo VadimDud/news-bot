@@ -135,6 +135,8 @@ T-Bank Invest API (`tinkoff-invest`).
   логика в `fib_pullback.py`, ежедневный Telegram-скан — `fib_notifier.py`
   (`TRADER_FIB_*`). Дефолты/перетекст подбираются grid-поиском в
   `trading_moex/scripts/backtest_fib_pullback.py`.
+  **Подробная инструкция по использованию, настройке и совершению сделок —
+  в [`trading_moex/INSTRUCTIONS.md`](trading_moex/INSTRUCTIONS.md).**
 - **Скачивание данных**: карточка на главной — свечи MOEX любого тикера в CSV
   (`datetime,open,high,low,close,volume`) за выбранный диапазон. Свечи хранятся
   в базе SQLite (`candles`): при повторном запросе докачивается только новая

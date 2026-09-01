@@ -1918,6 +1918,85 @@ STRATEGIES = {
 # SBER Pinbar — перебор (wick 3.5, стоп 5 ATR, R:R 2.5, объём 40/2.0, быки 0.5,
 # HVN bins 50): полн. год 30m +2.9% PF 2.7, 60m +1.7% PF 2.7 (против −5.0%/−1.2%
 # глобальных). Глобальные (YDEX) дефолты эти параметры не заменяют.
+# Fib pullback short — отобранные бумаги (grid 2021-2026, дневки, тейк=swing low).
+# Только эти бумаги торгуют в шорт; остальные остаются на глобальном дефолте
+# direction=1 (лонг). Результаты бэктеста (эксп. на сделку, tot 100k/1% риска):
+#   MTSS  +406 (n=12, win 67%, tot +4872)   — conf=1 базовый
+#   TATN  +1376 (n=4, win 75%, tot +5506)  — глубокая зона + conf=2
+#   SBER  +501 (n=6, win 67%, tot +3009)   — tp=200
+#   GAZP  +286 (n=14, win 64%, tot +4011)
+#   CHMF  +163 (n=22, win 59%, tot +3582)
+#   NVTK  +140 (n=19, win 58%, tot +2660)
+# Лонг-перебор прибыльных конфигов не дал (0 сделок/убытки в верификации).
+_FIB_SHORT_OVERRIDES = {
+    "MTSS": {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    "GAZP": {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    "CHMF": {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    "NVTK": {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    "TATN": {
+        "direction": -1,
+        "confluence_min": 2,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 75.0,
+        "trend_period": 200,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.618,
+        "fib_in_high": 0.786,
+    },
+    "SBER": {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 200,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+}
+
 TICKER_OVERRIDES: dict[tuple[str, str], dict] = {
     ("pinbar", "SBER"): {
         "wick_ratio": 3.5,
@@ -1932,54 +2011,7 @@ TICKER_OVERRIDES: dict[tuple[str, str], dict] = {
         "profile_period": 100,
         "profile_mult": 1.2,
     },
-    # Fib pullback short — отобранные бумаги (перебор 2021-2026, дневки,
-    # confluence_min=1, fib 0.5-0.618, teйк=swing low). Только эти бумаги торгуют
-    # в шорт; остальные остаются на глобальном дефолте direction=1 (лонг).
-    # Результаты (эксп. на сделку): MTSS +406, GAZP +286, CHMF +163, NVTK +140.
-    ("fib_pullback", "MTSS"): {
-        "direction": -1,
-        "confluence_min": 1,
-        "rsi_oversold": 40.0,
-        "rsi_overbought": 80.0,
-        "trend_period": 100,
-        "swing_bars": 10,
-        "min_rr": 1.0,
-        "fib_in_low": 0.50,
-        "fib_in_high": 0.618,
-    },
-    ("fib_pullback", "GAZP"): {
-        "direction": -1,
-        "confluence_min": 1,
-        "rsi_oversold": 40.0,
-        "rsi_overbought": 80.0,
-        "trend_period": 100,
-        "swing_bars": 10,
-        "min_rr": 1.0,
-        "fib_in_low": 0.50,
-        "fib_in_high": 0.618,
-    },
-    ("fib_pullback", "CHMF"): {
-        "direction": -1,
-        "confluence_min": 1,
-        "rsi_oversold": 40.0,
-        "rsi_overbought": 80.0,
-        "trend_period": 100,
-        "swing_bars": 10,
-        "min_rr": 1.0,
-        "fib_in_low": 0.50,
-        "fib_in_high": 0.618,
-    },
-    ("fib_pullback", "NVTK"): {
-        "direction": -1,
-        "confluence_min": 1,
-        "rsi_oversold": 40.0,
-        "rsi_overbought": 80.0,
-        "trend_period": 100,
-        "swing_bars": 10,
-        "min_rr": 1.0,
-        "fib_in_low": 0.50,
-        "fib_in_high": 0.618,
-    },
+    **{("fib_pullback", t): p for t, p in _FIB_SHORT_OVERRIDES.items()},
 }
 
 

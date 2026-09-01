@@ -196,22 +196,32 @@ async def _scan_ticker(ticker: str) -> dict | None:
         return None
 
     params = _params_from_config()
+    # Per-ticker overrides: параметры + направление под конкретную бумагу
+    # (напр. MTSS/GAZP/CHMF/NVTK торгуют в шорт, остальные — лонг).
+    from .strategies import TICKER_OVERRIDES as _TO
+
+    over = _TO.get(("fib_pullback", ticker.upper()), {})
+    if over:
+        params = {**params, **{k: v for k, v in over.items() if k != "direction"}}
+    direction = int(over.get("direction", 0) or 0)  # 0 — оба (по умолчанию)
     htf = _load_htf(ticker) if int(trading_config.TRADER_FIB_USE_HTF) else None
     retrace_center = (trading_config.TRADER_FIB_FIB_IN_LOW + trading_config.TRADER_FIB_FIB_IN_HIGH) / 2.0
 
     # Лонг-setup
-    info = fib_pullback.detect_latest_setup(df, htf_df=htf, **params)
-    if info is not None:
-        result = await _dispatch_setup(ticker, df, info, params, short=False,
-                                       retrace_center=retrace_center)
-        if result is not None:
-            return result
+    if direction >= 0:
+        info = fib_pullback.detect_latest_setup(df, htf_df=htf, **params)
+        if info is not None:
+            result = await _dispatch_setup(ticker, df, info, params, short=False,
+                                           retrace_center=retrace_center)
+            if result is not None:
+                return result
 
     # Шорт-setup
-    info = fib_pullback.detect_latest_short_setup(df, htf_df=htf, **params)
-    if info is not None:
-        return await _dispatch_setup(ticker, df, info, params, short=True,
-                                     retrace_center=retrace_center)
+    if direction <= 0:
+        info = fib_pullback.detect_latest_short_setup(df, htf_df=htf, **params)
+        if info is not None:
+            return await _dispatch_setup(ticker, df, info, params, short=True,
+                                         retrace_center=retrace_center)
 
     logger.debug("Нет завершённого Fib-setup (long/short) по %s", ticker)
     return None

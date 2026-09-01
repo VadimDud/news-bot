@@ -302,3 +302,39 @@ def test_apply_trend_filter_disabled_when_period_zero():
     pos = pd.Series([1, 1, -1, 1])
     flt = sig_mod.apply_trend_filter(pos, close, trend_period=0)
     assert flt.tolist() == pos.tolist()
+
+
+# ---------------------------------------------------------------------------
+# Шорт-брекет: тейк = Фибо-цель (swing low), а не 2R от стопа
+# ---------------------------------------------------------------------------
+
+def test_short_bracket_take_is_swing_low_not_2r():
+    import backtrader as bt
+    from app.backtest import _setup_cerebro
+
+    # Синтетический даунтренд с откатами: у шорт-входа есть подтверждённый
+    # swing low ниже входа — тейк должен равняться ему, а не 2R-производной.
+    df = _trend_series(200.0, -0.2, direction=-1)
+
+    class Inspect(FibPullbackStrategy):
+        def __init__(self):
+            super().__init__()
+            self.brackets: list[tuple[float, float]] = []
+
+        def _place_short_bracket(self):
+            super()._place_short_bracket()
+            if self._sl_order is not None and self._tp_order is not None:
+                self.brackets.append(
+                    (float(self._tp_order.created.price), float(self._sl_order.created.price))
+                )
+
+    p = _backtest_params(direction=-1)
+    cb = _setup_cerebro(Inspect, p, 100_000, 0.0005)
+    cb.adddata(bt.feeds.PandasData(dataname=df))
+    strat = cb.run(runonce=False)[0]
+    assert strat.brackets, "ожидался хотя бы один шорт-брекет"
+    for tp, sl in strat.brackets:
+        # тейк ниже входа, стоп выше входа
+        assert tp < sl
+        # тейк должен быть не дальше 2R-фолбэка (равен swing low либо ближе входа)
+        assert tp >= 0

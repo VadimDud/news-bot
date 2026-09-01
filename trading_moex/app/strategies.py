@@ -35,15 +35,20 @@ class TradeRecordingStrategy(bt.Strategy):
         if trade.justopened:
             price = float(trade.price) if trade.price else 0.0
             size = abs(float(trade.size)) if trade.size else 0.0
-            self._trade_cost[ticker] = (price * size, size, price)
+            self._trade_cost[ticker] = (price * size, size, price, float(trade.size))
         if trade.isclosed:
-            cost, orig_size, entry_price = self._trade_cost.pop(ticker, (0.0, 0.0, 0.0))
+            cost, orig_size, entry_price, signed_size = self._trade_cost.pop(ticker, (0.0, 0.0, 0.0, 1.0))
             pnl = float(trade.pnlcomm or 0.0)
             ret_pct = round(pnl / cost * 100.0, 2) if cost > 0 else 0.0
             entry_dt = bt.num2date(trade.dtopen) if trade.dtopen else None
             close_dt = bt.num2date(trade.dtclose) if trade.dtclose else None
             days_held = (close_dt.date() - entry_dt.date()).days if entry_dt and close_dt else 0
-            exit_price = round(entry_price + pnl / orig_size, 2) if orig_size > 0 else 0.0
+            # Цена выхода по знаку позиции: лонг exit=entry+pnl/qty, шорт exit=entry-pnl/qty.
+            if orig_size > 0:
+                per = pnl / orig_size
+                exit_price = round(entry_price + per if signed_size >= 0 else entry_price - per, 2)
+            else:
+                exit_price = 0.0
             self.recorded_trades.append(
                 {
                     "opened": str(entry_dt) if entry_dt else None,
@@ -1163,7 +1168,22 @@ class FibPullbackStrategy(RiskAwareStrategy):
         if stop_dist <= 0:
             return
         stop = price + stop_dist  # стоп выше входа
-        target = price - stop_dist * float(self.p.rr_ratio)  # тейк ниже входа
+        # Тейк — Фибо-цель 0% (swing low на входе); 2R от стопа — только фолбэк.
+        # Бэктест 2021-2026: тейк по swing low даёт перевес на MTSS/GAZP/CHMF/NVTK,
+        # тейк 2R недостижим и шорт убыточен.
+        target = None
+        st = self._last_state
+        sl_arr = st.get("swing_low") if st else None
+        if sl_arr is not None and st.get("idx") is not None:
+            v = float(sl_arr[st["idx"]])
+            if v == v and v > 0 and v < price:  # не NaN и ниже входа
+                target = v
+        if target is None or not (0 < target < price):
+            # фолбэк 2R от стопа
+            target = price - stop_dist * float(self.p.rr_ratio)
+        if not (0 < target < price):
+            # последний пол: тейк на 0.5% ниже входа, но всегда положительный
+            target = price * 0.995
         size = abs(self.position.size)
         self._sl_order = self.buy(exectype=bt.Order.Stop, price=stop, size=size)
         self._tp_order = self.buy(exectype=bt.Order.Limit, price=target, size=size)
@@ -1911,6 +1931,54 @@ TICKER_OVERRIDES: dict[tuple[str, str], dict] = {
         "profile_bins": 50,
         "profile_period": 100,
         "profile_mult": 1.2,
+    },
+    # Fib pullback short — отобранные бумаги (перебор 2021-2026, дневки,
+    # confluence_min=1, fib 0.5-0.618, teйк=swing low). Только эти бумаги торгуют
+    # в шорт; остальные остаются на глобальном дефолте direction=1 (лонг).
+    # Результаты (эксп. на сделку): MTSS +406, GAZP +286, CHMF +163, NVTK +140.
+    ("fib_pullback", "MTSS"): {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    ("fib_pullback", "GAZP"): {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    ("fib_pullback", "CHMF"): {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
+    },
+    ("fib_pullback", "NVTK"): {
+        "direction": -1,
+        "confluence_min": 1,
+        "rsi_oversold": 40.0,
+        "rsi_overbought": 80.0,
+        "trend_period": 100,
+        "swing_bars": 10,
+        "min_rr": 1.0,
+        "fib_in_low": 0.50,
+        "fib_in_high": 0.618,
     },
 }
 

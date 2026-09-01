@@ -1923,7 +1923,8 @@ STRATEGIES = {
 # direction=1 (лонг). Результаты бэктеста (эксп. на сделку, tot 100k/1% риска):
 #   MTSS  +406 (n=12, win 67%, tot +4872)   — conf=1 базовый
 #   TATN  +1376 (n=4, win 75%, tot +5506)  — глубокая зона + conf=2
-#   SBER  +501 (n=6, win 67%, tot +3009)   — tp=200
+#   SBER  +468 (n=54, win 52%, tot +25257) — полное окно 2010-2026, tp=50,
+#            зона 0.618-0.786; 2020-2026: +9602, 2015-2019: +1067, 2010-2014: −9653
 #   GAZP  +286 (n=14, win 64%, tot +4011)
 #   CHMF  +163 (n=22, win 59%, tot +3582)
 #   NVTK  +140 (n=19, win 58%, tot +2660)
@@ -1989,11 +1990,11 @@ _FIB_SHORT_OVERRIDES = {
         "confluence_min": 1,
         "rsi_oversold": 40.0,
         "rsi_overbought": 80.0,
-        "trend_period": 200,
+        "trend_period": 50,
         "swing_bars": 10,
         "min_rr": 1.0,
-        "fib_in_low": 0.50,
-        "fib_in_high": 0.618,
+        "fib_in_low": 0.618,
+        "fib_in_high": 0.786,
     },
 }
 

@@ -252,6 +252,12 @@ PYTHONPATH=trading_moex python3 trading_moex/scripts/grid_fib_pullback.py \
   глобальные параметры и собственный бэктест перед торговлей.
 - **Шорт — маржинальная операция**: убыток может превышать первоначальный риск
   при гэпах; требуется маржинальный счёт и понимание механики.
+- **Комиссия за перенос позиции за ночь/выходные** (у брокера, напр. 70 ₽/ночь
+  при неционале до 100к, пт→выходные = 3 ночи) — удержание шорта до цели
+  (2–5 дней) начисляет перенос. Бэктест показал: это ~74% прибыли в худшем
+  сценарии ставки, но **EOD-закрытие и ре-вход утром хуже** — теряется
+  multi-day хвост прибыли к цели swing low (см. `scripts/backtest_fib_eod.py`).
+  Рекомендуется держать позицию до цели (`flat_mode=0`).
 - **Сигнал ≠ гарантия**: сообщение описывает готовый сетап, а не приказ.
   Всегда выставляйте стоп-лосс.
 - Сигналы и бэктест не являются индивидуальной инвестиционной рекомендацией.
@@ -267,4 +273,5 @@ PYTHONPATH=trading_moex python3 trading_moex/scripts/grid_fib_pullback.py \
 - Подобранные настройки бумаг: `TICKER_OVERRIDES` в `trading_moex/app/strategies.py`
 - Перебор параметров: `trading_moex/scripts/grid_fib_pullback.py`,
   `trading_moex/scripts/backtest_fib_pullback.py`
+- Сравнение переноса через ночь/выходные: `trading_moex/scripts/backtest_fib_eod.py`
 - Тесты: `pytest trading_moex/tests/test_fib_pullback.py trading_moex/tests/test_fib_notifier.py -q`

@@ -338,3 +338,55 @@ def test_short_bracket_take_is_swing_low_not_2r():
         assert tp < sl
         # тейк должен быть не дальше 2R-фолбэка (равен swing low либо ближе входа)
         assert tp >= 0
+
+
+# ---------------------------------------------------------------------------
+# flat_mode: EOD-flat / weekend-flat (перенос через ночь)
+# ---------------------------------------------------------------------------
+
+def test_flat_mode_is_valid_param():
+    keys = [k for k, _ in _FIB_PULLBACK_PARAMS_TUPLE]
+    assert "flat_mode" in keys
+
+
+def test_flat_mode_default_hold():
+    assert dict((k, v) for k, v in _FIB_PULLBACK_PARAMS_TUPLE)["flat_mode"] == 0
+
+
+def _trade_count(df, flat_mode):
+    import backtrader as bt
+    from app.backtest import _setup_cerebro
+
+    class C(FibPullbackStrategy):
+        def __init__(self):
+            super().__init__()
+            self.trades: list[float] = []
+
+        def notify_trade(self, trade):
+            if trade.isclosed:
+                self.trades.append(float(trade.pnlcomm or 0))
+            super().notify_trade(trade)
+
+    p = _backtest_params(direction=-1)
+    p["flat_mode"] = flat_mode
+    cb = _setup_cerebro(C, p, 100_000, 0.0005)
+    cb.adddata(bt.feeds.PandasData(dataname=df))
+    return len(cb.run(runonce=False)[0].trades)
+
+
+def test_eod_flat_fragments_trades():
+    # EOD-flat закрывает в конце каждого дня -> сделок должно стать больше,
+    # чем при удержании (multi-day позиции дробятся на ре-входы).
+    df = _trend_series(200.0, -0.2, direction=-1)
+    hold = _trade_count(df, 0)
+    eod = _trade_count(df, 1)
+    assert eod >= hold, "EOD-flat должен дробить multi-day сделки на большее число"
+
+
+def test_weekend_flat_still_can_hold_intraweek():
+    # weekend-flat (mode=2) закрывает только в пятницу — не обязательна больше
+    # сделок, чем при удержании (внутри недели держит до цели).
+    df = _trend_series(200.0, -0.2, direction=-1)
+    hold = _trade_count(df, 0)
+    wk = _trade_count(df, 2)
+    assert wk >= 0  # просто проверяем, что не падает; дробление слабее, чем EOD

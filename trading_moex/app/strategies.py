@@ -973,6 +973,11 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     ("sl_beyond_swing", 1),
     ("min_rr", 1.5),
     ("daily_drawdown_pct", 0.0),
+    # Управление переносом позиции через ночь/выходные (комиссия брокера за
+    # перенос: 70 ₽/ночь при неционале ≤100к). 0 — держать до цели (по умолчанию),
+    # 1 — закрывать в конце дня и ре-входить утром при живом сетапе,
+    # 2 — закрывать только в пятницу (не переносить через выходные).
+    ("flat_mode", 0),
 )
 
 
@@ -1230,6 +1235,29 @@ class FibPullbackStrategy(RiskAwareStrategy):
                 self._sl_order = None
                 self._tp_order = None
 
+    def _is_last_bar_of_day(self) -> bool:
+        """Последний бар торгового дня: следующий бар — другая дата или его нет."""
+        try:
+            return self.data.datetime.date(0) != self.data.datetime.date(1)
+        except Exception:  # noqa: BLE001 — нет следующего бара (конец данных)
+            return True
+
+    def _flat_should_close(self) -> bool:
+        """Нужно ли закрыть шорт по правилу плоского переноса (flat_mode).
+
+        ``flat_mode``: 0=держать до цели (по умолчанию), 1=закрывать в конце
+        каждого дня, 2=закрывать только в пятницу (не переносить через выходные).
+        """
+        mode = int(getattr(self.p, "flat_mode", 0) or 0)
+        if mode == 0 or self.position.size >= 0:
+            return False
+        if mode == 1:
+            return self._is_last_bar_of_day()
+        if mode == 2:
+            # пятница (last bar дня) — не переносить через выходные
+            return self._is_last_bar_of_day() and self.data.datetime.date(0).weekday() == 4
+        return False
+
     def next(self):
         self._update_day_peak()
         direction = int(getattr(self.p, "direction", 1))
@@ -1246,6 +1274,8 @@ class FibPullbackStrategy(RiskAwareStrategy):
             if direction >= 0:
                 self._fib_state()
                 cover_sig = cover_sig or self._entry_ok()
+            if self._flat_should_close():
+                cover_sig = True  # закрыть по правилу EOD/выходных
             if cover_sig:
                 self._cover()
         else:  # без позиции
@@ -1891,6 +1921,7 @@ STRATEGIES = {
             {"key": "min_rr", "label": "Мин. риск/доход для входа (RR)", "type": "float", "default": 1.5},
             {"key": "daily_drawdown_pct", "label": "Дневная просадка-блокировка, % (0 = выкл)", "type": "float", "default": 0.0},
             {"key": "direction", "label": "Направление: 1=только лонг, -1=только шорт, 0=оба", "type": "int", "default": 1},
+            {"key": "flat_mode", "label": "Перенос через ночь: 0=держать до цели, 1=EOD (закрыть в конце дня), 2=не переносить через выходные", "type": "int", "default": 0},
         ],
     },
     "elliott_candles": {

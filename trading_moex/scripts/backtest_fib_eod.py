@@ -4,7 +4,11 @@
 Комиссия за перенос шорта (фиксированная, зависит от нецинала позиции):
   ≤ 100 000 ₽  — 70 ₽ за ночь
   ≤ 250 000 ₽  — 175 ₽ за ночь
-Ночь после пятницы (пт→пн) тарифицируется как 3 ночи (выходные).
+
+С марта 2025 MOEX торгуется по выходным (сессии 08:00–16:00, объём ~10–16%
+от будней). Если для тикера есть weekend-свечи — каждая календарная ночь
+считается как 1 (рынок открыт, позиция может закрыться). Если weekend-свечей
+нет (ранние данные до марта 2025) — старая формула: пт→пн = 3 ночи.
 
 Режимы (параметр ``flat_mode`` стратегии):
   0 — держать позицию до цели (по умолчанию);
@@ -55,6 +59,14 @@ def load_df(ticker: str, db: str, period: str = "4h") -> pd.DataFrame:
     return df[~df.index.duplicated(keep="last")]
 
 
+def _has_weekend_candles(df: pd.DataFrame) -> bool:
+    """Определяет, торгуется ли тикер по выходным (есть ли свечи на сб/вс)."""
+    if df.empty:
+        return False
+    dow = df.index.dayofweek  # 0=Mon .. 6=Sun
+    return bool((dow == 5).any() or (dow == 6).any())
+
+
 class _TradeRecorder(FibPullbackStrategy):
     """Фиксирует сделку (вход/выход, размер, нецинал, pnl) при закрытии."""
 
@@ -96,16 +108,26 @@ def run_mode(ticker: str, df: pd.DataFrame, flat_mode: int, db: str) -> list[dic
     return strat.closed
 
 
-def nights_held(op, close) -> int:
-    """Взвешенные ночи переноса: будни=1, пт→пн=3 (сб/вс не считаем)."""
+def nights_held(op, close, weekend_trading: bool = False) -> int:
+    """Ночи переноса.
+
+    *weekend_trading=True* (MOEX торгуется по выходным, с марта 2025):
+      каждая календарная ночь = 1 (пт→сб=1, сб→вс=1, вс→пн=1).
+
+    *weekend_trading=False* (старые данные, weekend-сессий нет):
+      пт→пн = 3 ночи (тариф за 3 выходных), остальные = 1.
+    """
     carries = 0
     cur = op.date()
     while cur < close.date():
         nxt = cur + timedelta(days=1)
-        if nxt.weekday() == 5:
-            carries += 3
-        elif nxt.weekday() < 5:
+        if weekend_trading:
             carries += 1
+        else:
+            if nxt.weekday() == 5:  # Saturday -> Fri->Mon = 3
+                carries += 3
+            elif nxt.weekday() < 5:
+                carries += 1
         cur = nxt
     return carries
 
@@ -123,18 +145,24 @@ def main() -> None:
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
     results: dict[int, list] = {0: [], 1: [], 2: []}
+    weekend_info: dict[str, bool] = {}
     for ticker in tickers:
         df = load_df(ticker, args.db)
+        wk = _has_weekend_candles(df)
+        weekend_info[ticker] = wk
+        label = "есть weekend-свечи" if wk else "нет weekend-свечей"
+        print(f"  {ticker}: {label} ({len(df)} баров)")
         for mode in (0, 1, 2):
             closed = run_mode(ticker, df, mode, args.db)
             for tr in closed:
-                tr["nights"] = nights_held(tr["open"], tr["close"])
+                tr["nights"] = nights_held(tr["open"], tr["close"], weekend_trading=wk)
                 tr["carry"] = carry_fee(tr["notional"], tr["nights"])
                 results[mode].append(tr)
 
+    print()
     names = {0: "A. Удержание", 1: "B. EOD-flat", 2: "C. Только пятница"}
     summary = []
-    print(f"\n{'Режим':20} {'сделок':>7} {'gross pnl':>12} {'перенос':>10} {'чистый':>10}")
+    print(f"{'Режим':20} {'сделок':>7} {'gross pnl':>12} {'перенос':>10} {'чистый':>10}")
     for mode in (0, 1, 2):
         trs = results[mode]
         gross = sum(t["pnl"] for t in trs)
@@ -145,6 +173,21 @@ def main() -> None:
 
     best = max(summary, key=lambda x: x[4])
     print(f"\nЛучший по чистому: {names[best[0]]} (чистый {best[4]:+,.0f} ₽)")
+
+    # Детализация по тикерам
+    print(f"\n{'Тикер':<8} {'Режим':<20} {'сделок':>7} {'gross':>10} {'ночей':>6} {'перенос':>8} {'чистый':>10}")
+    for ticker in tickers:
+        for mode in (0, 1, 2):
+            trs = [t for t in results[mode] if t["ticker"] == ticker]
+            if not trs:
+                continue
+            gross = sum(t["pnl"] for t in trs)
+            nights = sum(t["nights"] for t in trs)
+            carry = sum(t["carry"] for t in trs)
+            net = gross - carry
+            print(f"{ticker:<8} {names[mode]:<20} {len(trs):>7} {gross:>10,.0f} {nights:>6} {carry:>8,.0f} {net:>10,.0f}")
+        if ticker != tickers[-1]:
+            print()
 
 
 if __name__ == "__main__":

@@ -26,6 +26,12 @@ from app.elliott_notifier import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _strong_gate_off(monkeypatch):
+    """Синтетические волны в тестах имеют тела меньше ATR → по умолчанию
+    отключаем фильтр сильного импульса (он проверяется отдельно в TestStrongGate)."""
+    monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_STRONG_ATR_K", 0.0)
+
 def _make_df(closes: list[float], opens: list[float] | None = None, dates=None) -> pd.DataFrame:
     """Build a minimal OHLCV DataFrame for testing."""
     n = len(closes)

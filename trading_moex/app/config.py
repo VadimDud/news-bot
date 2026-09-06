@@ -130,8 +130,11 @@ TRADER_ELLIOTT_WAVE_MIN: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MIN", "3"
 TRADER_ELLIOTT_WAVE_MAX: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MAX", "5"))
 TRADER_ELLIOTT_BODY_RATIO_MIN: float = float(os.environ.get("TRADER_ELLIOTT_BODY_RATIO_MIN", "0.6"))
 TRADER_ELLIOTT_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_ATR_K", "0.5"))
-# Мин. качество волны (0..1) для отправки сигнала; волны ниже порога считаются шумом.
-TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.4"))
+# Мин. качество волны (0..1) для отправки сигнала; волны ниже порога считаются
+# шумом. По итогам бэктестов (long-only, 1day) прибылен порог q≥0.8 (win ~59%,
+# стабилен по эрам); при q<0.8 результат около нуля. Требование сильного
+# импульса (STRONG_ATR_K=1.0) — обязательная часть выгодного варианта.
+TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.8"))
 # Тикеры Elliott-скана через запятую. По итогам бэктестов прибыльны только
 # SBER, T, NLMK (см. scripts/backtest_elliott_v2.py); остальные не подтверждены.
 # Пустое значение = весь watchlist (DB → WATCH_TICKERS).
@@ -140,9 +143,9 @@ TRADER_ELLIOTT_TICKERS: list[str] = [
     if t.strip()
 ]
 # Требование «сильного импульса» в волне: внутри должно быть >= STRONG_MIN
-# свечей с телом >= STRONG_ATR_K × ATR(14). 0.0 = выключено (текущее live-
-# поведение). Эксперименты: k=1.0 улучшает fade-край (см. backtest_elliott_v2).
-TRADER_ELLIOTT_STRONG_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_STRONG_ATR_K", "0.0"))
+# свечей с телом >= STRONG_ATR_K × ATR(14). k=1.0 (тело >= ATR) — часть
+# подтверждённого варианта; 0.0 = выключить фильтр (для сравнения).
+TRADER_ELLIOTT_STRONG_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_STRONG_ATR_K", "1.0"))
 TRADER_ELLIOTT_STRONG_MIN: int = int(os.environ.get("TRADER_ELLIOTT_STRONG_MIN", "1"))
 # Только лонг (после медвежьей волны → BUY). Шорт-сигналы по бычьим волнам не
 # отправляются: комиссия по лонгу ниже, а бэктест лонг-only стабильнее по эрам

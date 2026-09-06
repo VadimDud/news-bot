@@ -110,6 +110,17 @@ def format_elliott_signal(
 
     fib_lines = "\n".join(f"     • {k}: {_fmt_money(v)}" for k, v in fib_prices.items())
 
+    q_req = trading_config.TRADER_ELLIOTT_MIN_QUALITY
+    k_strong = trading_config.TRADER_ELLIOTT_STRONG_ATR_K
+    strong_note = (
+        f"сильный импульс (тело ≥ {k_strong:g}×ATR)"
+        if k_strong > 0 else "без фильтра импульса"
+    )
+    mode_note = (
+        "только лонг (шорты отключены)"
+        if trading_config.TRADER_ELLIOTT_LONG_ONLY else "лонг + шорт"
+    )
+
     return (
         f"{title}\n"
         f"Стратегия микро-волн Эллиотта • {now_msk} МСК\n"
@@ -119,15 +130,16 @@ def format_elliott_signal(
         f"{'Медвежья' if wave.direction == 'bear' else 'Бычья'} волна: "
         f"{wave.candle_count} {_plural_candles(wave.candle_count)} "
         f"({_fmt_money(wave_start)} → {_fmt_money(wave_end)}, {_wave_pct(wave)})\n"
-        f"Качество волны: {q_total:.2f}/1.00\n"
+        f"Качество волны: {q_total:.2f}/1.00 (порог {q_req:.2f})\n"
         f"{_quality_line(quality)}\n"
         f"\n"
         f"Цели коррекции от экстремума волны ({_fmt_money(anchor)}):\n"
         f"{fib_lines}\n"
         f"\n"
         f"План: {plan}.\n"
-        f"При минусе — удвоение на след. свече, макс. 3 сделки (25→50→100%).\n"
-        f"⚠️ Контртренд + мартингейл — высокий риск."
+        f"Выход: на закрытии той же свечи (удержание 1 день).\n"
+        f"Режим: {mode_note}, {strong_note}.\n"
+        f"⚠️ Контртренд — высокий риск; без мартингейла."
     )
 
 

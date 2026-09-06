@@ -13,9 +13,10 @@
       и фибо-вход по extended-импульсу.
   E4  риск-инженерия: 3-й шаг мартингейла вместо «всё-в-100%» -> стоп/разворот.
   E5  честная сетка (q x горизонт x тикеры) с OOS-проверкой по эрам.
+  E6  только лонг + докутка при убытке (hold-add) vs «держать до минуса»; 1day и 4h.
 
 Usage (from trading_moex/):
-    python3 scripts/backtest_elliott_v2.py --e 1,2,3,4,5
+    python3 scripts/backtest_elliott_v2.py --e 1,2,3,4,5,6
 """
 from __future__ import annotations
 
@@ -43,12 +44,12 @@ TOP6 = ["SBER", "T", "NLMK", "MOEX", "TATN", "MTSS"]
 # helpers
 # ---------------------------------------------------------------------------
 
-def load_df(ticker: str, db: str) -> pd.DataFrame:
+def load_df(ticker: str, db: str, period: str = "1day") -> pd.DataFrame:
     con = sqlite3.connect(db)
     df = pd.read_sql_query(
         "SELECT begin AS dt, open, high, low, close, volume FROM candles"
-        " WHERE ticker=? AND period='1day' ORDER BY begin",
-        con, params=(ticker,),
+        " WHERE ticker=? AND period=? ORDER BY begin",
+        con, params=(ticker, period),
     )
     con.close()
     df["dt"] = pd.to_datetime(df["dt"])
@@ -56,9 +57,9 @@ def load_df(ticker: str, db: str) -> pd.DataFrame:
     return df[~df.index.duplicated(keep="last")]
 
 
-def prep(t: str, db: str, sma_p: int = 50) -> dict:
+def prep(t: str, db: str, sma_p: int = 50, period: str = "1day") -> dict:
     """Классификация + вспомогательные массивы (HTF SMA строго по sig-close)."""
-    df = ec.classify_candles(load_df(t, db), body_ratio_min=0.6, atr_period=14, atr_k=0.5)
+    df = ec.classify_candles(load_df(t, db, period), body_ratio_min=0.6, atr_period=14, atr_k=0.5)
     cl = df["close"].values.astype(float)
     sma = pd.Series(cl).rolling(sma_p, min_periods=max(20, sma_p // 2)).mean().values
     up = np.where(np.isnan(sma), True, cl > sma)
@@ -485,6 +486,128 @@ def run_e5(preps: dict, comm: float, slip: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# E6: ТОЛЬКО ЛОНГ + ДОКУПКА при убытке (вместо разворота в шорт)
+#
+# Правило (запрос пользователя, уточнение «только лонг», «докупка лонга вместо
+# разворота»): базовая сделка — лонг после медвежьей волны (fade). Если закрытие
+# в минусе — НЕ закрываем и НЕ идём в шорт, а ДОБАВЛЯЕМ ещё лот лонга на open
+# следующего бара. Если позиция в плюсе — держим. Выход:
+#   A. «hold-add» (прод-движок): вся позиция закрывается при суммарном плюсе на
+#      закрытии или после max_steps добавок;
+#   B. «до минуса»: прибыльную держим, пока флоат не уйдёт в минус/ноль, тогда
+#      закрываем (без добавки после выхода в плюс), горизонт ограничен.
+# Шортов нигде нет.
+# ---------------------------------------------------------------------------
+
+def _long_add_hold_cycle(p: dict, s: dict, H: int, comm: float, slip: float) -> float:
+    """Правило B: один лонг, выход при флоате <= 0 или по горизонту H баров."""
+    n = p["n"]
+    o, c = p["o"], p["c"]
+    cur = s["ent"]
+    entry_px = o[cur]
+    last = cur - 1
+    for _ in range(H):
+        if cur >= n:
+            break
+        last = cur
+        net = entry_net(entry_px, c[cur], "long", comm, slip)
+        if net <= 0:
+            return net  # закрылись в минусе/нуле
+        cur += 1
+    # горизонт исчерпан при положительном флоате — фиксируем профит
+    return entry_net(entry_px, c[last], "long", comm, slip)
+
+
+def _run_long_add(tickers, db, period, qmin, strong_k, mode, comm, slip, H=6):
+    """Прогон только-лонг докуток/удержаний. mode='engine'/'holdmin'."""
+    res = []
+    comm_total = comm + slip
+    for t in tickers:
+        p = prep(t, db, period=period)
+        sig_list = sorted(sigs(p), key=lambda x: x["ent"])
+        busy = -1
+        for s in sig_list:
+            if s["fade"] != "long":
+                continue
+            if s["ent"] - 1 <= busy:
+                continue
+            if qmin > 0 and s["q"] < qmin:
+                continue
+            if strong_k > 0:
+                df = p["df"]
+                body = df["body_abs"].values.astype(float)
+                atr = df["atr"].values.astype(float)
+                ws = s["sig"] - s["L"] + 1
+                strong = sum(1 for i in range(ws, s["sig"] + 1) if atr[i] > 0 and body[i] >= strong_k * atr[i])
+                if strong < 1:
+                    continue
+            if mode == "holdmin":
+                net = _long_add_hold_cycle(p, s, H, comm, slip)
+                res.append({"t": t, "dt": p["df"].index[s["ent"]], "net_pct": net,
+                            "legs": 1, "busy": s["ent"]})
+                busy = s["ent"] + H - 1
+            else:  # engine hold_add (выход при суммарном плюсе, до 3 добавок)
+                df = load_df(t, db, period)
+                bt = ec.run_backtest(df, initial_equity=DEPOSIT, wave_min=3, wave_max=5,
+                                     base_pct=0.25, max_steps=3, commission=comm_total,
+                                     quality_min=qmin, impulse_strong_k=strong_k,
+                                     impulse_strong_min=1, direction=1, hold_add=1)
+                # единственный исполняемый цикл — берём все; busy-перекрытие движок учёл
+                for cyc in bt["cycles"]:
+                    res.append({"t": t, "dt": pd.Timestamp(cyc.wave_end),
+                                "net_pct": cyc.total_pnl / (DEPOSIT * 0.25),
+                                "legs": len(cyc.trades)})
+                break  # движок уже прошёл тикер целиком
+    return res
+
+
+def run_e6(tickers: list, db: str, comm: float, slip: float) -> None:
+    print("\n" + "=" * 78)
+    print("E6. ТОЛЬКО ЛОНГ: минус на закрытии -> ДОКУПКА лота (без шорта); "
+          "плюс -> держим")
+    print(f"    комиссия {comm*100:.2f}% + слайп {slip*100:.2f}%/сторона")
+    print("=" * 78)
+
+    def report(label, res):
+        if not res:
+            print(f"  {label:<46} нет сделок")
+            return
+        pnls = np.array([r["net_pct"] for r in res])
+        legs = sum(r["legs"] for r in res)
+        w = (pnls > 0).sum()
+        def split(fn):
+            a = [x for x in res if fn(x["dt"])]
+            if not a:
+                return None
+            arr = np.array([x["net_pct"] for x in a])
+            return len(arr), (arr > 0).mean() * 100, arr.mean() * 100, arr.sum() * DEPOSIT * 0.25
+        era_m = split(lambda d: d < WAR)
+        era_w = split(lambda d: d >= WAR)
+        fresh = split(lambda d: d >= pd.Timestamp("2024-09-01"))
+        s_m = f" | мир n={era_m[0]} m={era_m[2]:+.3f}%" if era_m else ""
+        s_w = f" | война n={era_w[0]} m={era_w[2]:+.3f}%" if era_w else ""
+        s_f = f" | 24мес n={fresh[0]} m={fresh[2]:+.3f}%" if fresh else ""
+        print(f"  {label:<46} n={len(res):>4} win={w/len(res)*100:5.1f}% "
+              f"ног={legs:>4} net_m={pnls.mean()*100:+.3f}% net={pnls.sum()*DEPOSIT*0.25:>+12,.0f}"
+              f"{s_m}{s_w}{s_f}")
+
+    for period in ("1day", "4h"):
+        ticks = [t for t in tickers if not load_df(t, db, period).empty]
+        print(f"\n### {period} | тикеры: {','.join(ticks)}")
+        for qmin, strong, label in [
+            (0.0, 0.0, "q0 все лонг-сигналы"),
+            (0.6, 1.0, "q0.6 + сильный импульс"),
+            (0.8, 1.0, "q0.8 + сильный импульс"),
+        ]:
+            # A: прод-движок hold_add (выход при суммарном плюсе)
+            resA = _run_long_add(ticks, db, period, qmin, strong, "engine", comm, slip)
+            report(f"A. hold-add (выход в плюс) {label}", resA)
+            # B: держим прибыль до закрытия с минусом, без добавок
+            resB = _run_long_add(ticks, db, period, qmin, strong, "holdmin", comm, slip)
+            report(f"B. держать до минуса (без добавки) {label}", resB)
+
+
+# ---------------------------------------------------------------------------
 # FINAL: проверка победителя через прод-движок run_backtest
 # ---------------------------------------------------------------------------
 
@@ -524,7 +647,7 @@ def main() -> None:
     parser.add_argument("--db", default=str(ROOT / "trading_moex/data/trader_4h.db"))
     parser.add_argument("--commission", type=float, default=0.0004)
     parser.add_argument("--slippage", type=float, default=0.0005)
-    parser.add_argument("--e", default="1,2,3,4,5,final")
+    parser.add_argument("--e", default="1,2,3,4,5,6,final")
     args = parser.parse_args()
 
     exprs = [x.strip() for x in args.e.split(",") if x.strip()]
@@ -545,6 +668,8 @@ def main() -> None:
         run_e4(preps, args.commission, args.slippage)
     if "5" in exprs:
         run_e5(preps, args.commission, args.slippage)
+    if "6" in exprs:
+        run_e6(tickers, args.db, args.commission, args.slippage)
     if "final" in exprs:
         run_final(args.db, args.commission, args.slippage)
 

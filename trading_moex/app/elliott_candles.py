@@ -449,12 +449,23 @@ def _run_cycle(
     max_steps: int = 3,
     commission: float = 0.0005,
     start_idx: int | None = None,
+    hold_add: int = 0,
+    hold_days: int = 1,
 ) -> tuple[Cycle, float, int]:
     """Execute a Martingale cycle starting after *wave*.
 
     Live-faithful: the first candle traded is ``start_idx`` (default:
     ``wave.end_idx + 1``) — its color is unknown at signal time; no doji
     skipping, a doji candle is a real trade with ~zero gross.
+
+    Two modes:
+    - ``hold_add=0`` (по умолчанию): каждый шаг — отдельная сделка
+      open→close одной свечи; при минусе — ре-вход удвоенным лотом на open
+      следующей свечи (позиция ночь не переносится);
+    - ``hold_add=1``: при минусе на закрытии свечи позиция НЕ закрывается,
+      а на открытии следующей свечи ДОБАВЛЯЕТСЯ лот (25→50→100%); выход
+      всей позиции при суммарном плюсе на закрытии или после последнего
+      шага (перенос через ночь реален: гэп учитывается).
 
     Returns (cycle, new_equity, last_consumed_idx).
     """
@@ -472,44 +483,132 @@ def _run_cycle(
     step = 0
     last_consumed = cur_idx - 1
 
+    # ── hold_days>1: один фейд-вход, удержание N свечей (без мартингейла).
+    # Используется v2-экспериментами: при quality_min>=0.6..0.8 удержание 2-3
+    # свечей снижает влияние затрат на сделку (см. scripts/backtest_elliott_v2.py).
+    if hold_days > 1:
+        if cur_idx + hold_days - 1 < len(df):
+            entry = float(df["open"].iloc[cur_idx])
+            exit_ = float(df["close"].iloc[cur_idx + hold_days - 1])
+            size_pct = base_pct
+            size_value = equity_at_start * min(size_pct, 1.0)
+            if fade_dir == "long":
+                gross_pct = (exit_ - entry) / entry
+            else:
+                gross_pct = (entry - exit_) / entry
+            cost = commission * 2
+            net_pct = gross_pct - cost
+            pnl = size_value * net_pct
+            cycle.trades.append(Trade(
+                entry_dt=str(df.index[cur_idx]),
+                direction=fade_dir,
+                step=1,
+                size_pct=min(size_pct, 1.0),
+                entry_price=entry,
+                exit_price=exit_,
+                pnl=round(pnl, 2),
+                pnl_pct=round(net_pct, 6),
+                commission=round(size_value * cost, 2),
+                wave_start=str(wave.start_dt),
+                wave_end=str(wave.end_dt),
+                wave_len=wave.candle_count,
+                quality=cycle.quality,
+            ))
+            equity += pnl
+            last_consumed = cur_idx + hold_days - 1
+        return cycle, equity, last_consumed
+
+    if not hold_add:
+        while step < max_steps and cur_idx < len(df):
+            step += 1
+            entry = float(df["open"].iloc[cur_idx])
+            exit_ = float(df["close"].iloc[cur_idx])
+            size_pct = base_pct * (2 ** (step - 1))
+            size_value = equity_at_start * min(size_pct, 1.0)  # cap at 100 %
+
+            if fade_dir == "long":
+                gross_pct = (exit_ - entry) / entry
+            else:
+                gross_pct = (entry - exit_) / entry
+
+            cost = commission * 2  # both sides
+            net_pct = gross_pct - cost
+            pnl = size_value * net_pct
+
+            cycle.trades.append(Trade(
+                entry_dt=str(df.index[cur_idx]),
+                direction=fade_dir,
+                step=step,
+                size_pct=size_pct,
+                entry_price=entry,
+                exit_price=exit_,
+                pnl=round(pnl, 2),
+                pnl_pct=round(net_pct, 6),
+                commission=round(size_value * cost, 2),
+                wave_start=str(wave.start_dt),
+                wave_end=str(wave.end_dt),
+                wave_len=wave.candle_count,
+                quality=cycle.quality,
+            ))
+            equity += pnl
+            last_consumed = cur_idx
+
+            if pnl >= 0:
+                break  # cycle won
+
+            cur_idx += 1  # next candle for doubled position
+
+        return cycle, equity, last_consumed
+
+    # ── hold_add: удержание убыточной позиции + добавление на открытии ──────
+    legs: list[dict] = []  # {price, size, dt, step}
     while step < max_steps and cur_idx < len(df):
         step += 1
         entry = float(df["open"].iloc[cur_idx])
-        exit_ = float(df["close"].iloc[cur_idx])
         size_pct = base_pct * (2 ** (step - 1))
-        size_value = equity_at_start * min(size_pct, 1.0)  # cap at 100 %
+        size_value = equity_at_start * min(size_pct, 1.0)
+        legs.append({"price": entry, "size": size_value, "dt": str(df.index[cur_idx]),
+                     "step": step, "size_pct": min(size_pct, 1.0)})
 
-        if fade_dir == "long":
-            gross_pct = (exit_ - entry) / entry
-        else:
-            gross_pct = (entry - exit_) / entry
+        exit_ = float(df["close"].iloc[cur_idx])
+        total_pnl = 0.0
+        for leg in legs:
+            if fade_dir == "long":
+                gross = (exit_ - leg["price"]) / leg["price"]
+            else:
+                gross = (leg["price"] - exit_) / leg["price"]
+            total_pnl += leg["size"] * (gross - 2 * commission)
 
-        cost = commission * 2  # both sides
-        net_pct = gross_pct - cost
-        pnl = size_value * net_pct
+        if total_pnl >= 0 or step == max_steps:
+            # выход всей позиции на закрытии текущей свечи
+            for leg in legs:
+                if fade_dir == "long":
+                    gross = (exit_ - leg["price"]) / leg["price"]
+                else:
+                    gross = (leg["price"] - exit_) / leg["price"]
+                net_pct = gross - 2 * commission
+                pnl = leg["size"] * net_pct
+                cycle.trades.append(Trade(
+                    entry_dt=leg["dt"],
+                    direction=fade_dir,
+                    step=leg["step"],
+                    size_pct=leg["size_pct"],
+                    entry_price=leg["price"],
+                    exit_price=exit_,
+                    pnl=round(pnl, 2),
+                    pnl_pct=round(net_pct, 6),
+                    commission=round(leg["size"] * 2 * commission, 2),
+                    wave_start=str(wave.start_dt),
+                    wave_end=str(wave.end_dt),
+                    wave_len=wave.candle_count,
+                    quality=cycle.quality,
+                ))
+            equity += total_pnl
+            last_consumed = cur_idx
+            break
 
-        cycle.trades.append(Trade(
-            entry_dt=str(df.index[cur_idx]),
-            direction=fade_dir,
-            step=step,
-            size_pct=size_pct,
-            entry_price=entry,
-            exit_price=exit_,
-            pnl=round(pnl, 2),
-            pnl_pct=round(net_pct, 6),
-            commission=round(size_value * cost, 2),
-            wave_start=str(wave.start_dt),
-            wave_end=str(wave.end_dt),
-            wave_len=wave.candle_count,
-            quality=cycle.quality,
-        ))
-        equity += pnl
-        last_consumed = cur_idx
-
-        if pnl >= 0:
-            break  # cycle won
-
-        cur_idx += 1  # next candle for doubled position
+        # минус: держим позицию, на следующей свече добавляем
+        cur_idx += 1
 
     return cycle, equity, last_consumed
 
@@ -532,14 +631,26 @@ def run_backtest(
     corr_max_bars: int = 2,
     corr_max_retr: float = 1.0,
     w4_no_overlap: int = 1,
+    hold_add: int = 0,
+    hold_days: int = 1,
 ) -> dict:
     """Full back-test on a single ticker/period DataFrame (live-faithful).
 
     Signal timing without lookahead: at the close of every candle that
     extends a same-color run to length L in ``[wave_min..wave_max]`` a wave
     is detected (the color of the NEXT candle is unknown at this moment).
-    Entry at the open of the next candle, exit at its close (one-candle
-    hold); Martingale steps follow on subsequent candles.
+    Entry at the open of the next candle; Martingale steps follow on
+    subsequent candles.
+
+    ``hold_add=1`` — при минусе на закрытии позиция не закрывается, а на
+    открытии следующей свечи добавляется лот (25→50→100% капитала цикла);
+    выход при суммарном плюсе или после ``max_steps`` шагов.
+
+    ``hold_days>1`` — вместо мартингейла один фейд-вход размером
+    ``base_pct`` на открытии свечи после сигнала с удержанием ``hold_days``
+    свечей (закрытие на close последней). Полезно при сравнении влияния
+    горизонта удержания на край (v2-эксперименты). Значение 1 = старое
+    поведение (мартингейл).
 
     ``use_corrections=1`` additionally fires on Elliott-extended waves:
     impulse legs of one color separated by short shallow opposite-color
@@ -622,7 +733,7 @@ def run_backtest(
         seen_entries.add(entry_idx)
         cycle, equity, last_consumed = _run_cycle(
             classified, wave, equity, base_pct, max_steps, commission,
-            start_idx=entry_idx,
+            start_idx=entry_idx, hold_add=hold_add, hold_days=hold_days,
         )
         all_cycles.append(cycle)
         equity_curve.append((str(classified.index[entry_idx]), round(equity, 2)))

@@ -335,6 +335,123 @@ class TestExtendedWaves:
 
 
 # ---------------------------------------------------------------------------
+# Hold-add: удержание убыточной позиции + добавление на open следующей свечи
+# ---------------------------------------------------------------------------
+
+class TestHoldAdd:
+    """Минус на закрытии → позиция держится, на open след. свечи добавляется лот."""
+
+    def test_loss_then_add_then_win(self):
+        """3 bear → сигнал лонг; день 1 минус (держит), день 2 добавка на open,
+        суммарный плюс на закрытии дня 2 → выход всей позиции."""
+        bear = _bear_candles(3, step=1.0)
+        d1 = _append_candle(bear, 98, 100, days_offset=1)   # день 1: bear, лонг в минусе
+        d2 = _append_candle(d1, 100, 96, days_offset=1)     # день 2: open 96 (добавка), close 100 → плюс
+        bt = run_backtest(d2, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, hold_add=1)
+        assert len(bt["cycles"]) >= 1
+        c = bt["cycles"][0]
+        assert c.steps_used == 2  # два дня: вход + добавка
+        assert len(c.trades) == 2
+        # ноги: день 1 (open 100, exit на close дня 2 = 100) и день 2 (open 96, exit 100)
+        assert c.trades[0].entry_price == pytest.approx(100.0)
+        assert c.trades[1].entry_price == pytest.approx(96.0)
+        assert c.trades[0].exit_price == pytest.approx(100.0)
+        assert c.trades[0].size_pct == pytest.approx(0.25)
+        assert c.trades[1].size_pct == pytest.approx(0.5)
+        assert c.total_pnl > 0
+
+    def test_hold_through_overnight_gap(self):
+        """Гэп вниз на open дня 2 учитывается в PnL первой ноги (позиция держится)."""
+        bear = _bear_candles(3, step=1.0)
+        d1 = _append_candle(bear, 98, 100, days_offset=1)   # день 1: close 98, минус
+        d2 = _append_candle(d1, 99, 90, days_offset=1)      # день 2: open 90 (гэп −8%), close 99
+        bt = run_backtest(d2, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, hold_add=1)
+        c = bt["cycles"][0]
+        # нога 1: entry 100, exit 99 (close дня 2) → минус; нога 2: entry 90, exit 99 → плюс
+        assert c.trades[0].exit_price == pytest.approx(99.0)
+        assert c.trades[1].entry_price == pytest.approx(90.0)
+        assert c.total_pnl > 0
+
+    def test_all_steps_lose(self):
+        """Три минусовых дня → позиция закрывается на закрытии 3-го дня."""
+        bear = _bear_candles(3, step=1.0)
+        df = bear
+        for close_, open_ in ((98, 100), (94, 98), (90, 94)):
+            df = _append_candle(df, close_, open_, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, hold_add=1)
+        c = bt["cycles"][0]
+        assert c.steps_used == 3
+        assert len(c.trades) == 3
+        assert c.total_pnl < 0
+
+
+# ---------------------------------------------------------------------------
+# hold_days: один фейд-вход с удержанием N свечей (без мартингейла)
+# ---------------------------------------------------------------------------
+
+class TestHoldDays:
+    """hold_days>1 → одна сделка: вход open свечи после сигнала, выход close N-й."""
+
+    def test_hold_three_days_single_trade(self):
+        """3 bear → fade long; 3 бычьих дня; hold_days=3: вход open дня 1,
+        выход close дня 3, одна сделка без мартингейла."""
+        bear = _bear_candles(3, step=1.0)
+        df = bear
+        for close_, open_ in ((104, 100), (110, 104), (116, 110)):
+            df = _append_candle(df, close_, open_, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, hold_days=3)
+        assert len(bt["cycles"]) >= 1
+        c = bt["cycles"][0]
+        assert c.steps_used == 1          # без мартингейла
+        assert len(c.trades) == 1
+        t = c.trades[0]
+        assert t.direction == "long"      # fade: медвежья волна → лонг
+        assert t.entry_price == pytest.approx(100.0)   # open свечи после волны
+        assert t.exit_price == pytest.approx(116.0)    # close 3-й свечи
+        assert t.size_pct == pytest.approx(0.25)
+        assert c.total_pnl > 0
+
+    def test_hold_days_exit_price_differs_from_one_day(self):
+        """hold_days=1 закрылся бы на close дня 1 (104), hold_days=3 — на 116."""
+        bear = _bear_candles(3, step=1.0)
+        df = bear
+        for close_, open_ in ((104, 100), (110, 104), (116, 110)):
+            df = _append_candle(df, close_, open_, days_offset=1)
+        bt1 = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                           base_pct=0.25, max_steps=3, commission=0.0005,
+                           body_ratio_min=0.6, atr_k=0.01, hold_days=1)
+        bt3 = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                           base_pct=0.25, max_steps=3, commission=0.0005,
+                           body_ratio_min=0.6, atr_k=0.01, hold_days=3)
+        assert bt1["cycles"][0].trades[0].exit_price == pytest.approx(104.0)
+        assert bt3["cycles"][0].trades[0].exit_price == pytest.approx(116.0)
+
+    def test_hold_days_short(self):
+        """3 bull → fade short; 3 медвежьих дня; hold_days=3: выход на минимуме."""
+        bull = _bull_candles(3, step=1.0)
+        df = bull
+        for close_, open_ in ((96, 100), (90, 96), (84, 90)):
+            df = _append_candle(df, close_, open_, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, hold_days=3)
+        c = bt["cycles"][0]
+        t = c.trades[0]
+        assert t.direction == "short"
+        assert t.entry_price == pytest.approx(100.0)
+        assert t.exit_price == pytest.approx(84.0)
+        assert c.total_pnl > 0
+
+
+# ---------------------------------------------------------------------------
 # Martingale FSM
 # ---------------------------------------------------------------------------
 

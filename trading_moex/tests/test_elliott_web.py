@@ -176,7 +176,8 @@ class TestRegistry:
             "wave_min", "wave_max", "body_ratio_min", "atr_k",
             "base_pct", "max_steps", "quality_min",
             "use_corrections", "macro_min_legs", "macro_max_candles",
-            "corr_max_bars", "corr_max_retr", "w4_no_overlap",
+            "corr_max_bars", "corr_max_retr", "w4_no_overlap", "hold_add",
+            "hold_days",
         }
 
     def test_strategy_defaults_resolve(self):

@@ -1958,6 +1958,8 @@ STRATEGIES = {
             {"key": "corr_max_bars", "label": "Коррекции: макс. свечей в коррекции", "type": "int", "default": 2},
             {"key": "corr_max_retr", "label": "Коррекции: макс. глубина (× ход ноги)", "type": "float", "default": 1.0},
             {"key": "w4_no_overlap", "label": "Коррекции: волна 4 не перекрывает волну 1 (1 = да)", "type": "int", "default": 1},
+            {"key": "hold_add", "label": "Минус: держать позицию и добавить на open след. свечи (1 = да)", "type": "int", "default": 0},
+            {"key": "hold_days", "label": "Удержание фейда N свечей (1 = мартингейл; 2-3 = один вход на N свечей)", "type": "int", "default": 1},
         ],
     },
 }

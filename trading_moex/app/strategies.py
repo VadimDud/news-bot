@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from . import fib_pullback as fibp
+from . import kinetic as kinetic_module
 from . import risk as risk_module
 from . import signals as sig
 from .news_guard import NewsGuard
@@ -1779,6 +1780,234 @@ class ROEPortfolioStrategy(TradeRecordingStrategy):
                     open_positions += 1
 
 
+# bt-параметры Kinetic Momentum (физическая аналогия «импульс + инерция»).
+# Модуль ``kinetic`` считает скорость v=r/sigma, массу m=vol/SMA(vol),
+# импульс бара p=m*v, суммарный импульс P за mom_span и кинетическую энергию
+# KE=m*v^2; вход — при |P|>=theta и расширяющейся KE (KE > ke_base), выход —
+# при развороте P или «диссипации» энергии (cool_bars подряд против позиции).
+# Дефолты пока не подобраны перебором — честная проверка в scripts/backtest_kinetic.py.
+_KINETIC_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("direction", 0),
+    ("sigma_span", 20),
+    ("vol_span", 20),
+    ("mom_span", 12),
+    ("ke_span", 40),
+    ("theta", 1.5),
+    ("v_dir", 1),
+    ("cool_bars", 2),
+    ("min_hold", 0),
+)
+
+
+class KineticMomentumStrategy(TradeRecordingStrategy):
+    """Моментум по физике количества движения: импульс P и кинетическая энергия KE.
+
+    Подробно: ``app/kinetic.py``. Здесь бары приходят по одному: на каждом
+    ``next()`` пересчитываются кинетические фичи на окне последних ``window``
+    баров (фичи локальны — EMA/rolling по фиксированным периодам, поэтому окно
+    достаточно), а состояние (в позиции / нет, счётчик охлаждения, возраст)
+    хранится в стратегии — это зеркалит ``kinetic_position`` без lookahead.
+
+    ``direction``: 1 = только лонг, -1 = только шорт, 0 = оба (default).
+    Вход по рынку на следующем баре (сигнал на закрытии текущего), выход —
+    по сигналу разворота/диссипации; SL/TP по ATR (``atr_stop_mult``/``rr_ratio``).
+    """
+
+    params = _KINETIC_PARAMS_TUPLE + (("window", 200),)
+
+    def __init__(self):
+        super().__init__()
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        self._k_dir = 0        # текущее направление: 1 / -1 / 0 (flat)
+        self._age = 0
+        self._cool = 0
+        self._sl_order = None
+        self._tp_order = None
+
+    # ── Окно свечей → фичи на текущем баре ────────────────────────────────
+    def _frame(self) -> pd.DataFrame:
+        m = min(int(self.data.buflen()), int(self.p.window))
+        m = max(m, 2)
+
+        def col(name):
+            line = getattr(self.data, name)
+            return [float(line[-k]) for k in range(m - 1, -1, -1)]
+
+        return pd.DataFrame(
+            {
+                "open": col("open"),
+                "high": col("high"),
+                "low": col("low"),
+                "close": col("close"),
+                "volume": col("volume"),
+            },
+            index=range(m),
+        )
+
+    def _features_now(self) -> dict:
+        """Кинетические фичи на последнем (текущем) баре окна."""
+        df = self._frame()
+        feat = kinetic_module.kinetic_features(
+            df,
+            sigma_span=int(self.p.sigma_span),
+            vol_span=int(self.p.vol_span),
+            mom_span=int(self.p.mom_span),
+            ke_span=int(self.p.ke_span),
+        )
+        i = len(df) - 1
+        out = {}
+        for name in ("P", "Pz", "KE", "ke_base", "v", "sigma", "m", "bull_bear"):
+            val = feat[name].iloc[i]
+            out[name] = None if (val is None or (isinstance(val, float) and val != val)) else float(val)
+        return out
+
+    def _finite(self, f: dict, *keys) -> bool:
+        for k in keys:
+            v = f.get(k)
+            if v is None:
+                return False
+        return True
+
+    def _atr_value(self) -> float:
+        val = float(self.atr_ind[0])
+        return 0.0 if val != val or val <= 0 else val
+
+    def _risk_size(self, price: float, stop_dist: float) -> int:
+        return risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, stop_dist, price
+        )
+
+    # ── Переходы состояния (зеркало kinetic_position) ─────────────────────
+    def _entry_long(self, f: dict) -> bool:
+        if int(self.p.direction) < 0:
+            return False
+        if not self._finite(f, "Pz", "KE", "ke_base", "v"):
+            return False
+        if f["Pz"] < float(self.p.theta) or not (f["KE"] > f["ke_base"]):
+            return False
+        if int(self.p.v_dir) == 1 and f["v"] <= 0:
+            return False
+        return True
+
+    def _entry_short(self, f: dict) -> bool:
+        if int(self.p.direction) > 0:
+            return False
+        if not self._finite(f, "Pz", "KE", "ke_base", "v"):
+            return False
+        if f["Pz"] > -float(self.p.theta) or not (f["KE"] > f["ke_base"]):
+            return False
+        if int(self.p.v_dir) == 1 and f["v"] >= 0:
+            return False
+        return True
+
+    def _momentum_dead(self, f: dict, direction: int) -> bool:
+        if not self._finite(f, "Pz", "KE", "ke_base"):
+            return True
+        energy_alive = f["KE"] > f["ke_base"]
+        if direction > 0:
+            return f["Pz"] <= 0 or not energy_alive
+        return f["Pz"] >= 0 or not energy_alive
+
+    # ── Ордера: вход, SL/TP брекет ─────────────────────────────────────────
+    def _open_long(self, price: float) -> None:
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = self._risk_size(price, stop_dist)
+        if size > 0:
+            self.buy(size=size)
+
+    def _open_short(self, price: float) -> None:
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = self._risk_size(price, stop_dist)
+        if size > 0:
+            self.sell(size=size)
+
+    def _place_bracket(self) -> None:
+        """SL/TP по открытой позиции (long: sell-стоп/лимит, short: buy-стоп/лимит)."""
+        if self.position.size == 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = abs(self.position.size)
+        if self.position.size > 0:  # long
+            stop = price - stop_dist
+            target = price + stop_dist * float(self.p.rr_ratio)
+            self._sl_order = self.sell(exectype=bt.Order.Stop, price=stop, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit, price=target, size=size)
+        else:  # short
+            stop = price + stop_dist
+            target = price - stop_dist * float(self.p.rr_ratio)
+            self._sl_order = self.buy(exectype=bt.Order.Stop, price=stop, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit, price=target, size=size)
+
+    def _cancel_bracket(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        size = self.position.size
+        if order.isbuy():
+            if size > 0:  # вход в лонг исполнился — брекет
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:  # шорт закрыт (покрытие/стоп/тейк)
+                self._cancel_bracket()
+                self._k_dir = 0
+        else:
+            if size < 0:  # вход в шорт исполнился — брекет
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:  # лонг закрыт
+                self._cancel_bracket()
+                self._k_dir = 0
+
+    def _close(self) -> None:
+        self._cancel_bracket()
+        if self.position.size:
+            self.close()
+        else:
+            self._k_dir = 0
+
+    def next(self):
+        f = self._features_now()
+        # ── Выход по сигналу разворота/диссипации ──────────────────────────
+        if self._k_dir != 0:
+            self._age += 1
+            if self._momentum_dead(f, self._k_dir):
+                self._cool += 1
+            else:
+                self._cool = 0
+            if self._age >= int(self.p.min_hold) and self._cool >= int(self.p.cool_bars):
+                self._close()
+                return
+        # ── Вход по сигналу (когда нет позиции) ────────────────────────────
+        if self.position.size == 0 and self._k_dir == 0:
+            if self._entry_long(f):
+                self._k_dir = 1
+                self._age = 0
+                self._cool = 0
+                self._open_long(float(self.data.close[0]))
+            elif self._entry_short(f):
+                self._k_dir = -1
+                self._age = 0
+                self._cool = 0
+                self._open_short(float(self.data.close[0]))
+
+
 STRATEGIES = {
     "sma_cross": {
         "name": "SMA Crossover",
@@ -1963,6 +2192,25 @@ STRATEGIES = {
             {"key": "impulse_strong_k", "label": "Сильный импульс в волне: тело ≥ k×ATR(14) (0 = выкл)", "type": "float", "default": 1.0},
             {"key": "impulse_strong_min", "label": "Сильный импульс: мин. таких свечей в волне", "type": "int", "default": 1},
             {"key": "direction", "label": "Направление: 0 = обе, 1 = только лонг, 2 = только шорт", "type": "int", "default": 1},
+        ],
+    },
+    "kinetic": {
+        "name": "Kinetic Momentum (импульс + кинетическая энергия)",
+        "cls": KineticMomentumStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+            {"key": "direction", "label": "Направление: 1=лонг, -1=шорт, 0=оба", "type": "int", "default": 0},
+            {"key": "sigma_span", "label": "Волатильность: период EWMA (скорость)", "type": "int", "default": 20},
+            {"key": "vol_span", "label": "Масса: период SMA объёма", "type": "int", "default": 20},
+            {"key": "mom_span", "label": "Импульс P: окно суммирования", "type": "int", "default": 12},
+            {"key": "ke_span", "label": "Энергия KE: период базиса", "type": "int", "default": 40},
+            {"key": "theta", "label": "Порог входа |P| >=", "type": "float", "default": 1.5},
+            {"key": "v_dir", "label": "Требовать согласие скорости (1 = да)", "type": "int", "default": 1},
+            {"key": "cool_bars", "label": "Выход: баров против позиции", "type": "int", "default": 2},
+            {"key": "min_hold", "label": "Мин. удержание, баров", "type": "int", "default": 0},
         ],
     },
 }

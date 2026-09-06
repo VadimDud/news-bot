@@ -792,6 +792,23 @@ def signal_from_position(pos: pd.Series) -> str:
     return "hold"
 
 
+def _kinetic_signal(df: pd.DataFrame, **kwargs):
+    """Обёртка Kinetic Momentum: подключение чистой логики из ``kinetic``.
+
+    Сигнатура соответствует остальным SIGNAL_FUNCS (df + параметры). Параметры
+    риск-менеджмента (risk_pct, atr_* и пр.) из kwargs удаляются — модуль
+    ``kinetic`` принимает только свои ключи.
+
+    ⚠️ НЕ внесена в SIGNAL_FUNCS намеренно: стратегия не подтверждена бэктестом
+    (см. INSTRUCTIONS.md) и не должна быть доступна в live-цикле. Функция
+    остаётся для unit-тестов и паритета с backtrader-стратегией.
+    """
+    from . import kinetic
+
+    params = kinetic._signal_params(kwargs)
+    return kinetic.kinetic_position(df, **params)
+
+
 SIGNAL_FUNCS = {
     "sma_cross": sma_cross_position,
     "rsi": rsi_position,

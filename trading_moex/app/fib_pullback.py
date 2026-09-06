@@ -163,6 +163,12 @@ def _compute_arrays(
     rsi_period: int = 14,
     rsi_oversold: float = 30.0,
     rsi_overbought: float = 70.0,
+    # ── Объёмные гейты (0/выкл — поведение прод не меняется) ─────────────────
+    vol_period: int = 20,
+    vol_min_rel: float = 0.0,   # мин. относительный объём (vol/SMA) для входа
+    vol_max_rel: float = 0.0,   # макс. относительный объём (0 = без потолка)
+    long_need_bull_vol: float = 0.0,   # мин. доля быков на баре лонга (0 = выкл)
+    short_need_bear_vol: float = 0.0,  # макс. доля быков на баре шорта (0 = выкл)
 ) -> dict:
     """Векторизованный предрасчёт состояния сигнала на каждом баре.
 
@@ -267,9 +273,33 @@ def _compute_arrays(
             fs += 1
         factors_short[i] = fs
 
+    # ── Объёмные фичи (причинные) + маски для гейтов ────────────────────────
+    vol = df["volume"].values.astype(float)
+    vol_sma = pd.Series(vol, index=idx).rolling(int(vol_period), min_periods=5).mean()
+    vol_rel = np.where((vol_sma > 0).values.astype(bool), vol / vol_sma.values, np.nan)
+    vol_ok = np.ones(n, dtype=bool)
+    if vol_min_rel and vol_min_rel > 0:
+        vol_ok &= (~np.isnan(vol_rel)) & (vol_rel >= vol_min_rel)
+    if vol_max_rel and vol_max_rel > 0:
+        vol_ok &= (~np.isnan(vol_rel)) & (vol_rel <= vol_max_rel)
+
+    # Доля быков на баре: (close - low) / (high - low). 0..1.
+    bar_rng = h - l
+    bull_bear = np.where(bar_rng > 0, (c - l) / np.where(bar_rng > 0, bar_rng, np.nan), 0.5)
+    bull_vol_ok = np.ones(n, dtype=bool)
+    if long_need_bull_vol and long_need_bull_vol > 0:
+        bull_vol_ok &= bull_bear >= long_need_bull_vol
+    bear_vol_ok = np.ones(n, dtype=bool)
+    if short_need_bear_vol and short_need_bear_vol > 0:
+        bear_vol_ok &= bull_bear <= short_need_bear_vol
+
     return {
         "trend_up": trend_up,
         "vol_ok": vol_ok,
+        "bull_vol_ok": bull_vol_ok,
+        "bear_vol_ok": bear_vol_ok,
+        "vol_rel": vol_rel,
+        "bull_bear_in": bull_bear,
         "adx_ok": adx_ok,
         "swing_low": swing_low,
         "swing_high": swing_high,
@@ -302,6 +332,8 @@ def _entry_ok(st: dict, i: int) -> bool:
     """Положительное решение о входе на баре ``i`` (без учёта позиции)."""
     if not bool(st["trend_up"][i]) or not bool(st["vol_ok"][i]) or not bool(st["adx_ok"][i]):
         return False
+    if not bool(st.get("bull_vol_ok", np.ones(1, dtype=bool))[i]):
+        return False
     if not st["in_discount"][i]:
         return False
     seg = st["seg"][i]
@@ -331,6 +363,8 @@ def _exit_ok(st: dict, i: int) -> bool:
 def _entry_ok_short(st: dict, i: int) -> bool:
     """Положительное решение о шорт-входе на баре ``i`` (без учёта позиции)."""
     if bool(st["trend_up"][i]) or not bool(st["vol_ok"][i]) or not bool(st["adx_ok"][i]):
+        return False
+    if not bool(st.get("bear_vol_ok", np.ones(1, dtype=bool))[i]):
         return False
     if not st["in_premium"][i]:
         return False
@@ -451,6 +485,8 @@ def fib_score_breakdown(
         "rsi": None if np.isnan(st["rsi"][i]) else round(float(st["rsi"][i]), 1),
         "adx": None if np.isnan(st["adx"].iloc[i]) else round(float(st["adx"].iloc[i]), 1),
         "vol_ratio": None if np.isnan(st["vol_ratio"][i]) else round(float(st["vol_ratio"][i]) * 100.0, 2),
+        "vol_rel": None if np.isnan(st["vol_rel"][i]) else round(float(st["vol_rel"][i]), 2),
+        "bull_bear_in": None if np.isnan(st["bull_bear_in"][i]) else round(float(st["bull_bear_in"][i]), 2),
         "factors": int(st["factors"][i]),
         "factors_short": int(st["factors_short"][i]),
         "trend_up": bool(st["trend_up"][i]),

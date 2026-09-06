@@ -973,6 +973,14 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     ("sl_beyond_swing", 1),
     ("min_rr", 1.5),
     ("daily_drawdown_pct", 0.0),
+    # Объёмное подтверждение сигнала (0/выкл — поведение прод не меняется).
+    # Диагностика (scripts/fib_volume_research.py): шорты с закрытием бара у
+    # минимума (медведи) дают win 61-87% против 31-53% при закрытии у максимума.
+    ("vol_period", 20),
+    ("vol_min_rel", 0.0),        # мин. относительный объём (vol/SMA) для входа
+    ("vol_max_rel", 0.0),        # макс. относительный объём (0 = без потолка)
+    ("long_need_bull_vol", 0.0), # мин. доля быков на баре лонга (0 = выкл)
+    ("short_need_bear_vol", 0.0),# макс. доля быков на баре шорта (0 = выкл)
     # Управление переносом позиции через ночь/выходные (комиссия брокера за
     # перенос: 70 ₽/ночь при неционале ≤100к). 0 — держать до цели (по умолчанию),
     # 1 — закрывать в конце дня и ре-входить утром при живом сетапе,
@@ -1049,6 +1057,11 @@ class FibPullbackStrategy(RiskAwareStrategy):
             "rsi_period": int(getattr(self.p, "rsi_period", 14)),
             "rsi_oversold": float(self.p.rsi_oversold),
             "rsi_overbought": float(self.p.rsi_overbought),
+            "vol_period": int(getattr(self.p, "vol_period", 20)),
+            "vol_min_rel": float(getattr(self.p, "vol_min_rel", 0.0)),
+            "vol_max_rel": float(getattr(self.p, "vol_max_rel", 0.0)),
+            "long_need_bull_vol": float(getattr(self.p, "long_need_bull_vol", 0.0)),
+            "short_need_bear_vol": float(getattr(self.p, "short_need_bear_vol", 0.0)),
         }
         st = fibp._compute_arrays(df, None, **params)
         i = len(df) - 1
@@ -1922,6 +1935,10 @@ STRATEGIES = {
             {"key": "daily_drawdown_pct", "label": "Дневная просадка-блокировка, % (0 = выкл)", "type": "float", "default": 0.0},
             {"key": "direction", "label": "Направление: 1=только лонг, -1=только шорт, 0=оба", "type": "int", "default": 1},
             {"key": "flat_mode", "label": "Перенос через ночь: 0=держать до цели, 1=EOD (закрыть в конце дня), 2=не переносить через выходные", "type": "int", "default": 0},
+            {"key": "vol_min_rel", "label": "Объём: мин. относительный (vol/SMA) для входа (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "vol_max_rel", "label": "Объём: макс. относительный (0 = без потолка)", "type": "float", "default": 0.0},
+            {"key": "long_need_bull_vol", "label": "Лонг: мин. доля быков на баре (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "short_need_bear_vol", "label": "Шорт: макс. доля быков на баре (0 = выкл)", "type": "float", "default": 0.0},
         ],
     },
     "elliott_candles": {

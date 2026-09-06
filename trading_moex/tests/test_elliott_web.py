@@ -65,7 +65,17 @@ _ELLIOTT_KEYS = [
 
 class TestEngineQualityFilter:
     def test_low_quality_wave_skipped(self):
-        df = _bear_wave_then_rise()
+        # Плоские свечи с широкими фитилями: качество live-волны L=3 < 0.4.
+        opens = [104, 103, 102, 101, 100, 99]
+        closes = [103, 102, 101, 100, 99, 103]
+        dates = pd.date_range("2024-01-01", periods=len(closes), freq="B")
+        df = pd.DataFrame({
+            "open": opens,
+            "high": [max(o, c) + 5 for o, c in zip(opens, closes)],
+            "low": [min(o, c) - 5 for o, c in zip(opens, closes)],
+            "close": closes,
+            "volume": [1000] * len(closes),
+        }, index=dates)
         bt_filtered = run_backtest(df, quality_min=0.4)
         bt_all = run_backtest(df, quality_min=0.0)
         # плоская волна имеет низкое качество → отфильтрована
@@ -107,7 +117,8 @@ class TestElliottMapper:
 
     def test_inf_profit_factor_guarded(self):
         from app.web.app import _run_elliott_backtest
-        df = _bear_wave_then_rise()  # единственный выигрышный цикл → PF=inf в движке
+        # 3 медвежьих + сильная бычья: цикл выигрывает первым шагом, без убыточных сделок → PF=inf
+        df = _make_df(opens=[104, 103, 102, 99], closes=[103, 102, 101, 103])
         res = _run_elliott_backtest(df, {}, 100_000.0, 0.0005)
         assert res["profit_factor"] == 999.99
         assert res["win_rate_pct"] == 100.0

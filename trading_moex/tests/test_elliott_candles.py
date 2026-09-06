@@ -294,24 +294,24 @@ class TestMartingale:
         assert c.total_pnl > 0
 
     def test_loss_then_win(self):
-        """3 bear wave → doji (skip) → bear (loss) → bull (win on doubled)."""
+        """3 bear wave → doji (комиссионный минус) → bear (loss) → bull (win на удвоении)."""
         bear_wave = _bear_candles(3, step=1.0)
-        # Doji separator (skipped by _run_cycle)
+        # Doji — реальная свеча входа: gross ~0, минус комиссии (шаг 1)
         sep = _append_candle(bear_wave, 100, 100, h_range=2.0, days_offset=1)
-        # Bear candle after doji → loss on long
+        # Bear candle after doji → loss on long (шаг 2)
         step1 = _append_candle(sep, 98, 100, days_offset=1)
-        # Bull candle → win on doubled long
+        # Bull candle → win on doubled long (шаг 3)
         step2 = _append_candle(step1, 104, 98, days_offset=1)
         bt = run_backtest(step2, wave_min=3, wave_max=5, initial_equity=100_000,
                           base_pct=0.25, max_steps=3, commission=0.0005,
                           body_ratio_min=0.6, atr_k=0.01)
         assert len(bt["cycles"]) >= 1
         c = bt["cycles"][0]
-        assert c.steps_used == 2
+        assert c.steps_used == 3
         assert c.trades[1].size_pct == 0.5
 
     def test_max_steps_3(self):
-        """3 bear wave → doji (skip) → 3 bear candles (all losses) → cycle stops."""
+        """3 bear wave → doji (шаг 1, комиссионный минус) → 2 bear свечи (минусы) → стоп цикла."""
         bear_wave = _bear_candles(3, step=1.0)
         sep = _append_candle(bear_wave, 100, 100, h_range=2.0, days_offset=1)
         loss1 = _append_candle(sep, 98, 100, days_offset=1)

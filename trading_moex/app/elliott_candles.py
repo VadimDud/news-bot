@@ -10,6 +10,12 @@ Design (from user brief):
 - Wave quality: micro-Elliott rules (extension, not-shortest, alternation, dominance).
 - Multi-TF: analytics only — check whether HTF correction decomposes into
   5 LTF waves (zigzag hypothesis) vs 3 (flat) vs overlapping (triangle).
+
+``run_backtest`` is live-faithful: a wave is detected at the close of the
+candle that extends the run to L=3..5 (the next candle's color is unknown),
+entry at the open of the next candle. Earlier versions entered at the open
+of the run-terminating candle, whose direction was known by construction —
+a lookahead bug that inflated results (see scripts/backtest_elliott_honest.py).
 """
 
 from __future__ import annotations
@@ -112,7 +118,13 @@ def detect_waves(
     wave_min: int = 3,
     wave_max: int = 5,
 ) -> list[Wave]:
-    """Find runs of same non-doji color candles with length in [wave_min, wave_max]."""
+    """Find runs of same non-doji color candles with length in [wave_min, wave_max].
+
+    Note: a run is only known to be complete once the next candle of a
+    different color appears, so the waves returned here "see" that
+    terminating candle. Do NOT use ``wave.next_open`` as an entry point for
+    backtesting (lookahead); ``run_backtest`` detects waves causally instead.
+    """
     colors = df["candle_color"].values
     waves: list[Wave] = []
     i = 0
@@ -296,6 +308,10 @@ def _run_cycle(
 ) -> tuple[Cycle, float, int]:
     """Execute a Martingale cycle starting after *wave*.
 
+    Live-faithful: the first candle traded is ``wave.end_idx + 1`` (its color
+    is unknown at signal time — no doji skipping, a doji candle is a real
+    trade with ~zero gross).
+
     Returns (cycle, new_equity, last_consumed_idx).
     """
     fade_dir = "long" if wave.direction == "bear" else "short"
@@ -313,11 +329,6 @@ def _run_cycle(
     last_consumed = cur_idx - 1
 
     while step < max_steps and cur_idx < len(df):
-        # Skip doji candles — no trade on indecision
-        if df["candle_color"].iloc[cur_idx] == "doji":
-            cur_idx += 1
-            continue
-
         step += 1
         entry = float(df["open"].iloc[cur_idx])
         exit_ = float(df["close"].iloc[cur_idx])
@@ -372,7 +383,13 @@ def run_backtest(
     initial_equity: float = 100_000,
     quality_min: float = 0.0,
 ) -> dict:
-    """Full back-test on a single ticker/period DataFrame.
+    """Full back-test on a single ticker/period DataFrame (live-faithful).
+
+    Signal timing without lookahead: at the close of every candle that
+    extends a same-color run to length L in ``[wave_min..wave_max]`` a wave
+    is detected (the color of the NEXT candle is unknown at this moment).
+    Entry at the open of the next candle, exit at its close (one-candle
+    hold); Martingale steps follow on subsequent candles.
 
     ``quality_min > 0`` skips waves whose micro-Elliott quality score is
     below the threshold (same semantics as the live notifier).
@@ -384,26 +401,45 @@ def run_backtest(
         return {"cycles": [], "trades": [], "equity_curve": [], "metrics": {}}
 
     classified = classify_candles(df, body_ratio_min, atr_period, atr_k)
-    waves = detect_waves(classified, wave_min, wave_max)
+    colors = classified["candle_color"].values
+    n = len(colors)
 
     equity = initial_equity
     all_cycles: list[Cycle] = []
     equity_curve: list[tuple[str, float]] = [(str(classified.index[0]), equity)]
     busy_until = -1  # last index occupied by an ongoing cycle
 
-    for wave in waves:
-        if not wave.has_next_candle():
+    i = 0
+    while i < n:
+        c = colors[i]
+        if c == "doji":
+            i += 1
             continue
-        # Skip if this wave overlaps with a previous cycle's active trades
-        if wave.end_idx <= busy_until:
-            continue
-        # Optional quality filter (unified with the live notifier threshold)
-        if quality_min > 0 and wave_quality_score(wave)["total"] < quality_min:
-            continue
-        cycle, equity, last_consumed = _run_cycle(classified, wave, equity, base_pct, max_steps, commission)
-        all_cycles.append(cycle)
-        equity_curve.append((str(wave.next_open), round(equity, 2)))
-        busy_until = last_consumed
+        j = i
+        while j < n and colors[j] == c:
+            j += 1
+        run_len = j - i
+        # Сигнал в момент закрытия каждой свечи, продлевающей серию до L.
+        # Пока цикл мартингейла активен (busy_until), новые сигналы той же
+        # серии перекрыты позициями цикла и пропускаются.
+        for L in range(wave_min, min(run_len, wave_max) + 1):
+            sig_idx = i + L - 1
+            if sig_idx + 1 >= n:
+                break  # нет следующей свечи для входа
+            if sig_idx <= busy_until:
+                continue
+            wave = Wave(
+                start_idx=i, end_idx=sig_idx, direction=c,  # type: ignore[arg-type]
+                candle_count=L, df=classified,
+            )
+            # Optional quality filter (unified with the live notifier threshold)
+            if quality_min > 0 and wave_quality_score(wave)["total"] < quality_min:
+                continue
+            cycle, equity, last_consumed = _run_cycle(classified, wave, equity, base_pct, max_steps, commission)
+            all_cycles.append(cycle)
+            equity_curve.append((str(classified.index[sig_idx + 1]), round(equity, 2)))
+            busy_until = last_consumed
+        i = j
 
     all_trades = [t for c in all_cycles for t in c.trades]
     metrics = _compute_metrics(all_cycles, all_trades, initial_equity, equity, classified)

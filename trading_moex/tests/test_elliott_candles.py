@@ -13,6 +13,7 @@ from app.elliott_candles import (
     Wave,
     classify_candles,
     detect_waves,
+    detect_extended_waves,
     wave_quality_score,
     run_backtest,
     mtf_correction_analysis,
@@ -274,6 +275,63 @@ class TestWaveQuality:
         score = wave_quality_score(waves[0])
         # Impulse bodies: 5, 2, 4 → mid=2, others=[5,4], min_others=4, 2<4 → 0.0
         assert score["not_shortest"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Extended waves (коррекции внутри волны по Эллиотту)
+# ---------------------------------------------------------------------------
+
+class TestExtendedWaves:
+    """Волны из импульсных ног одного цвета с короткими коррекциями между ними."""
+
+    def _wave_with_corrections(self):
+        """bull3 + коррекция1 + bull3 + коррекция1 + bull2, затем глубокий bear."""
+        opens = [100, 102, 104, 106, 105, 107, 109, 111, 110, 112, 114, 113, 95]
+        closes = [102, 104, 106, 105, 107, 109, 111, 110, 112, 114, 113, 95, 93]
+        df = _make_candles(closes, opens, h_range=1.0)
+        return classify_candles(df, body_ratio_min=0.6, atr_k=0.01)
+
+    def test_detects_extended_wave(self):
+        cl = self._wave_with_corrections()
+        sigs = detect_extended_waves(cl, wave_min=3, wave_max=5, macro_min_legs=2,
+                                     macro_max_candles=13, corr_max_bars=2,
+                                     corr_max_retr=1.0, w4_no_overlap=1)
+        assert len(sigs) == 1
+        s = sigs[0]
+        assert s["direction"] == "bull"
+        assert (s["start_idx"], s["end_idx"], s["break_idx"]) == (0, 9, 11)
+        assert s["end_idx"] - s["start_idx"] + 1 > 5  # больше 5 свечей за счёт коррекций
+
+    def test_long_correction_not_a_wave(self):
+        """bull3 → bear3 (длинная коррекция) — расширенной волны нет (1 нога)."""
+        opens = [100, 102, 104, 106, 104, 102, 100]
+        closes = [102, 104, 106, 104, 102, 100, 98]
+        cl = classify_candles(_make_candles(closes, opens, h_range=1.0), atr_k=0.01)
+        sigs = detect_extended_waves(cl, 3, 5, 2, 13, 2, 1.0, 1)
+        assert sigs == []
+
+    def test_w4_overlap_breaks(self):
+        """Вторая коррекция заходит на территорию волны 1 → пробой (w4_no_overlap=1)."""
+        opens = [100, 102, 104, 106, 104, 105, 107, 109, 110, 105, 103]
+        closes = [102, 104, 106, 104, 105, 107, 109, 110, 105, 103, 101]
+        cl = classify_candles(_make_candles(closes, opens, h_range=1.0), atr_k=0.01)
+        sigs = detect_extended_waves(cl, 3, 5, 2, 13, 2, 1.0, 1)
+        assert sigs  # пробой на свече 8 (close 105 < волна1 end 106)
+        assert sigs[0]["break_idx"] == 8
+        # без правила перекрытия пробоя нет (коррекция неглубокая и короткая)
+        no_overlap = detect_extended_waves(cl, 3, 5, 2, 13, 2, 1.0, 0)
+        assert all(s["break_idx"] != 8 for s in no_overlap)
+
+    def test_backtest_with_corrections_fires(self):
+        cl = self._wave_with_corrections()
+        bt = run_backtest(cl, use_corrections=1, max_steps=1, body_ratio_min=0.6, atr_k=0.01)
+        assert len(bt["cycles"]) >= 1
+        macro = [c for c in bt["cycles"] if c.wave_len > 5]
+        assert macro, "нет цикла по расширенной волне (>5 свечей)"
+        assert macro[0].direction == "bull"
+        # fade: бычья волна → шорт, вход на open свечи после пробойной (индекс 12)
+        assert macro[0].trades[0].direction == "short"
+        assert macro[0].trades[0].entry_price == pytest.approx(95.0)
 
 
 # ---------------------------------------------------------------------------

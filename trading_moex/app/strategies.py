@@ -1952,6 +1952,12 @@ STRATEGIES = {
             {"key": "base_pct", "label": "Шаг 1 мартингейла, доля капитала", "type": "float", "default": 0.25},
             {"key": "max_steps", "label": "Макс. шагов удвоения", "type": "int", "default": 3},
             {"key": "quality_min", "label": "Фильтр качества волны 0..1 (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "use_corrections", "label": "Волны с коррекциями внутри (Эллиотт, >5 свечей) 1 = да", "type": "int", "default": 0},
+            {"key": "macro_min_legs", "label": "Коррекции: мин. импульсных ног", "type": "int", "default": 2},
+            {"key": "macro_max_candles", "label": "Коррекции: макс. свечей в волне", "type": "int", "default": 13},
+            {"key": "corr_max_bars", "label": "Коррекции: макс. свечей в коррекции", "type": "int", "default": 2},
+            {"key": "corr_max_retr", "label": "Коррекции: макс. глубина (× ход ноги)", "type": "float", "default": 1.0},
+            {"key": "w4_no_overlap", "label": "Коррекции: волна 4 не перекрывает волну 1 (1 = да)", "type": "int", "default": 1},
         ],
     },
 }

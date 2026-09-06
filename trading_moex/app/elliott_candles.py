@@ -149,6 +149,149 @@ def detect_waves(
     return waves
 
 
+def detect_extended_waves(
+    df: pd.DataFrame,
+    wave_min: int = 3,
+    wave_max: int = 5,
+    macro_min_legs: int = 2,
+    macro_max_candles: int = 13,
+    corr_max_bars: int = 2,
+    corr_max_retr: float = 1.0,
+    w4_no_overlap: int = 1,
+) -> list[dict]:
+    """Эллиотт-расширенные волны: импульсные ноги одного цвета, разделённые
+    короткими неглубокими коррекциями противоположного цвета.
+
+    На старшем таймфрейме такая конструкция выглядела бы как одна большая
+    свеча одного цвета; коррекции соответствуют теории Эллиотта (волны 2/4):
+    - коррекция не длиннее ``corr_max_bars`` свечей;
+    - глубина коррекции не больше ``corr_max_retr`` × ход предыдущей ноги;
+    - ``w4_no_overlap``: вторая коррекция не заходит на территорию первой
+      ноги (волна 4 не перекрывает волну 1);
+    - всего свечей ≤ ``macro_max_candles`` (больше ``wave_max`` — разрешено
+      именно за счёт коррекций).
+
+    Возвращает список dict: ``{start_idx, end_idx, break_idx, direction}`` —
+    ``start_idx..end_idx`` свечи волны (последняя нога — импульсная),
+    ``break_idx`` — свеча, на закрытии которой структура сломана (тогда и
+    только тогда волна считается завершённой; lookahead нет).
+    """
+    colors = df["candle_color"].values
+    opens = df["open"].values.astype(float)
+    closes = df["close"].values.astype(float)
+    n = len(colors)
+    out: list[dict] = []
+
+    def leg_net(start: int, end: int, direction: str) -> float:
+        if direction == "bull":
+            return closes[end] - opens[start]
+        return opens[start] - closes[end]
+
+    i = 0
+    while i < n:
+        c = colors[i]
+        if c == "doji":
+            i += 1
+            continue
+        macro_dir = c
+        macro_start = i
+        leg_start = i
+        leg_dir = c
+        leg_end = i
+        last_impulse_end = i
+        impulse_nets: list[float] = []
+        leg1_end_price: float | None = None
+        break_idx = n  # n = пробоя нет (конец данных)
+        j = i + 1
+        while j < n:
+            cj = colors[j]
+            if cj == "doji":
+                break_idx = j
+                break
+            total = j - macro_start + 1
+            if total > macro_max_candles:
+                break_idx = j
+                break
+            if cj == leg_dir:
+                leg_end = j
+                if leg_dir == macro_dir:
+                    last_impulse_end = j
+                else:
+                    # коррекция удлиняется: перепроверяем длину и глубину
+                    if j - leg_start + 1 > corr_max_bars:
+                        break_idx = j
+                        break
+                    adv = leg_net(leg_start, j, leg_dir)  # глубина в своём направлении
+                    if impulse_nets and adv > corr_max_retr * impulse_nets[-1]:
+                        break_idx = j
+                        break
+                    if (w4_no_overlap and len(impulse_nets) >= 2
+                            and leg1_end_price is not None):
+                        if macro_dir == "bull" and closes[j] < leg1_end_price:
+                            break_idx = j
+                            break
+                        if macro_dir == "bear" and closes[j] > leg1_end_price:
+                            break_idx = j
+                            break
+                j += 1
+                continue
+            # смена цвета: финализируем текущую ногу, начинаем новую
+            if leg_dir == macro_dir:
+                impulse_nets.append(leg_net(leg_start, leg_end, leg_dir))
+                if len(impulse_nets) == 1:
+                    leg1_end_price = closes[leg_end]
+            leg_start = j
+            leg_dir = cj
+            leg_end = j
+            if leg_dir != macro_dir:
+                # первая свеча коррекции: длина, глубина, неперекрытие
+                if 1 > corr_max_bars:
+                    break_idx = j
+                    break
+                adv = leg_net(leg_start, j, leg_dir)  # глубина в своём направлении
+                if not impulse_nets or adv > corr_max_retr * impulse_nets[-1]:
+                    break_idx = j
+                    break
+                if (w4_no_overlap and len(impulse_nets) >= 2
+                        and leg1_end_price is not None):
+                    if macro_dir == "bull" and closes[j] < leg1_end_price:
+                        break_idx = j
+                        break
+                    if macro_dir == "bear" and closes[j] > leg1_end_price:
+                        break_idx = j
+                        break
+            j += 1
+
+        # Волна должна содержать минимум macro_min_legs импульсных ног
+        # (коррекции реально присутствуют) и быть не короче wave_min свечей.
+        # Если пробой случился на импульсной ноге, она тоже считается.
+        n_legs = len(impulse_nets) + (1 if leg_dir == macro_dir else 0)
+        total_candles = last_impulse_end - macro_start + 1
+        if n_legs >= macro_min_legs and total_candles >= wave_min \
+                and break_idx < n and break_idx + 1 < n:
+            out.append({
+                "start_idx": macro_start,
+                "end_idx": last_impulse_end,
+                "break_idx": break_idx,
+                "direction": macro_dir,
+            })
+
+        # Точка рестарта: начало сломавшей структуру ноги (либо после додзи).
+        if break_idx < n:
+            restart = i + 1
+            # ищем начало ноги, содержащей свечу пробоя
+            if colors[break_idx] != "doji":
+                restart = break_idx
+                while restart > i + 1 and colors[restart - 1] == colors[break_idx]:
+                    restart -= 1
+            if restart <= i:
+                restart = i + 1
+            i = restart
+        else:
+            i = j if j > i else i + 1
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Wave quality scoring (micro-Elliott rules)
 # ---------------------------------------------------------------------------
@@ -305,12 +448,13 @@ def _run_cycle(
     base_pct: float = 0.25,
     max_steps: int = 3,
     commission: float = 0.0005,
+    start_idx: int | None = None,
 ) -> tuple[Cycle, float, int]:
     """Execute a Martingale cycle starting after *wave*.
 
-    Live-faithful: the first candle traded is ``wave.end_idx + 1`` (its color
-    is unknown at signal time — no doji skipping, a doji candle is a real
-    trade with ~zero gross).
+    Live-faithful: the first candle traded is ``start_idx`` (default:
+    ``wave.end_idx + 1``) — its color is unknown at signal time; no doji
+    skipping, a doji candle is a real trade with ~zero gross.
 
     Returns (cycle, new_equity, last_consumed_idx).
     """
@@ -323,7 +467,7 @@ def _run_cycle(
         quality=wave_quality_score(wave)["total"],
     )
 
-    cur_idx = wave.end_idx + 1
+    cur_idx = start_idx if start_idx is not None else wave.end_idx + 1
     equity_at_start = equity
     step = 0
     last_consumed = cur_idx - 1
@@ -382,6 +526,12 @@ def run_backtest(
     atr_k: float = 0.5,
     initial_equity: float = 100_000,
     quality_min: float = 0.0,
+    use_corrections: int = 0,
+    macro_min_legs: int = 2,
+    macro_max_candles: int = 13,
+    corr_max_bars: int = 2,
+    corr_max_retr: float = 1.0,
+    w4_no_overlap: int = 1,
 ) -> dict:
     """Full back-test on a single ticker/period DataFrame (live-faithful).
 
@@ -390,6 +540,13 @@ def run_backtest(
     is detected (the color of the NEXT candle is unknown at this moment).
     Entry at the open of the next candle, exit at its close (one-candle
     hold); Martingale steps follow on subsequent candles.
+
+    ``use_corrections=1`` additionally fires on Elliott-extended waves:
+    impulse legs of one color separated by short shallow opposite-color
+    corrections (Elliott waves 2/4) — such a wave may exceed ``wave_max``
+    candles (up to ``macro_max_candles``). The signal is known only when the
+    structure breaks (correction too long/deep, wave-4 overlap, cap reached)
+    and entry is at the open of the candle after the break.
 
     ``quality_min > 0`` skips waves whose micro-Elliott quality score is
     below the threshold (same semantics as the live notifier).
@@ -404,11 +561,11 @@ def run_backtest(
     colors = classified["candle_color"].values
     n = len(colors)
 
-    equity = initial_equity
-    all_cycles: list[Cycle] = []
-    equity_curve: list[tuple[str, float]] = [(str(classified.index[0]), equity)]
-    busy_until = -1  # last index occupied by an ongoing cycle
+    # Сигналы: {entry_idx, wave}. entry_idx — первая свеча сделки
+    # (открывается после закрытия свечи, на которой сигнал стал известен).
+    signals: list[tuple[int, Wave]] = []
 
+    # 1) Обычные сигналы: закрытие свечи, продлевающей одноцветную серию до L.
     i = 0
     while i < n:
         c = colors[i]
@@ -419,27 +576,57 @@ def run_backtest(
         while j < n and colors[j] == c:
             j += 1
         run_len = j - i
-        # Сигнал в момент закрытия каждой свечи, продлевающей серию до L.
-        # Пока цикл мартингейла активен (busy_until), новые сигналы той же
-        # серии перекрыты позициями цикла и пропускаются.
         for L in range(wave_min, min(run_len, wave_max) + 1):
             sig_idx = i + L - 1
             if sig_idx + 1 >= n:
                 break  # нет следующей свечи для входа
-            if sig_idx <= busy_until:
-                continue
             wave = Wave(
                 start_idx=i, end_idx=sig_idx, direction=c,  # type: ignore[arg-type]
                 candle_count=L, df=classified,
             )
-            # Optional quality filter (unified with the live notifier threshold)
-            if quality_min > 0 and wave_quality_score(wave)["total"] < quality_min:
-                continue
-            cycle, equity, last_consumed = _run_cycle(classified, wave, equity, base_pct, max_steps, commission)
-            all_cycles.append(cycle)
-            equity_curve.append((str(classified.index[sig_idx + 1]), round(equity, 2)))
-            busy_until = last_consumed
+            signals.append((sig_idx + 1, wave))
         i = j
+
+    # 2) Расширенные (Эллиотт) сигналы: волны с коррекциями внутри.
+    if use_corrections:
+        for sig in detect_extended_waves(
+            classified, wave_min, wave_max, macro_min_legs, macro_max_candles,
+            corr_max_bars, corr_max_retr, w4_no_overlap,
+        ):
+            entry_idx = sig["break_idx"] + 1
+            wave = Wave(
+                start_idx=sig["start_idx"], end_idx=sig["end_idx"],
+                direction=sig["direction"],  # type: ignore[arg-type]
+                candle_count=sig["end_idx"] - sig["start_idx"] + 1,
+                df=classified,
+            )
+            signals.append((entry_idx, wave))
+
+    signals.sort(key=lambda s: s[0])
+
+    equity = initial_equity
+    all_cycles: list[Cycle] = []
+    equity_curve: list[tuple[str, float]] = [(str(classified.index[0]), equity)]
+    busy_until = -1  # last index occupied by an ongoing cycle
+    seen_entries: set[int] = set()
+
+    for entry_idx, wave in signals:
+        # Сигнал уже перекрыт активным циклом мартингейла — пропускаем.
+        if entry_idx - 1 <= busy_until:
+            continue
+        if entry_idx in seen_entries:
+            continue
+        # Optional quality filter (unified with the live notifier threshold)
+        if quality_min > 0 and wave_quality_score(wave)["total"] < quality_min:
+            continue
+        seen_entries.add(entry_idx)
+        cycle, equity, last_consumed = _run_cycle(
+            classified, wave, equity, base_pct, max_steps, commission,
+            start_idx=entry_idx,
+        )
+        all_cycles.append(cycle)
+        equity_curve.append((str(classified.index[entry_idx]), round(equity, 2)))
+        busy_until = last_consumed
 
     all_trades = [t for c in all_cycles for t in c.trades]
     metrics = _compute_metrics(all_cycles, all_trades, initial_equity, equity, classified)

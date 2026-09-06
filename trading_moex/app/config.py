@@ -144,6 +144,10 @@ TRADER_ELLIOTT_TICKERS: list[str] = [
 # поведение). Эксперименты: k=1.0 улучшает fade-край (см. backtest_elliott_v2).
 TRADER_ELLIOTT_STRONG_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_STRONG_ATR_K", "0.0"))
 TRADER_ELLIOTT_STRONG_MIN: int = int(os.environ.get("TRADER_ELLIOTT_STRONG_MIN", "1"))
+# Только лонг (после медвежьей волны → BUY). Шорт-сигналы по бычьим волнам не
+# отправляются: комиссия по лонгу ниже, а бэктест лонг-only стабильнее по эрам
+# (в отличие от шорта, который живёт только в военном режиме).
+TRADER_ELLIOTT_LONG_ONLY: bool = os.environ.get("TRADER_ELLIOTT_LONG_ONLY", "true").lower() in ("1", "true")
 
 # ── Fibonacci retracement (трендовое продолжение) signal notifier ───────────
 TRADER_FIB_ENABLED: bool = os.environ.get("TRADER_FIB_ENABLED", "true").lower() in ("1", "true")

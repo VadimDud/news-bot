@@ -196,6 +196,11 @@ async def _scan_ticker(ticker: str) -> dict | None:
         logger.debug("Нет завершённой волны по %s", ticker)
         return None
 
+    # Только лонг: бычья волна → сигнал продажи; пропускаем (см. конфиг).
+    if trading_config.TRADER_ELLIOTT_LONG_ONLY and wave.direction == "bull":
+        logger.debug("Elliott %s: шорт-сигнал пропущен (long-only)", ticker)
+        return None
+
     # Дедуп: wave_end время
     wave_end_str = str(wave.end_dt)
     prev = storage.get_elliott_signal(ticker)

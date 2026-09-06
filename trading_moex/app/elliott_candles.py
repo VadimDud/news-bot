@@ -635,6 +635,7 @@ def run_backtest(
     hold_days: int = 1,
     impulse_strong_k: float = 0.0,
     impulse_strong_min: int = 1,
+    direction: int = 0,
 ) -> dict:
     """Full back-test on a single ticker/period DataFrame (live-faithful).
 
@@ -669,6 +670,10 @@ def run_backtest(
     x ATR(14) (1-2 strong-move candles inside the wave). Tested in v2
     experiments: with quality_min>=0.6 and k=1.0 it improves the 1-day fade
     edge and keeps both eras positive, but hurts multi-day holds.
+
+    ``direction``: 0 = оба направления (default), 1 = только лонг (фейд после
+    медвежьей волны — комиссия по лонгу ниже, бэктест стабильнее по эрам),
+    2 = только шорт.
 
     Returns dict with ``cycles``, ``trades``, ``equity_curve``,
     ``metrics``.
@@ -745,6 +750,13 @@ def run_backtest(
             sub = wave.sub_candles()
             strong = int(((sub["body_abs"] >= impulse_strong_k * sub["atr"]).sum()))
             if strong < impulse_strong_min:
+                continue
+        # Direction restriction (0=both, 1=long-only, 2=short-only)
+        if direction:
+            fade_dir = "long" if wave.direction == "bear" else "short"
+            if direction == 1 and fade_dir != "long":
+                continue
+            if direction == 2 and fade_dir != "short":
                 continue
         seen_entries.add(entry_idx)
         cycle, equity, last_consumed = _run_cycle(

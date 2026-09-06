@@ -491,6 +491,50 @@ class TestImpulseStrong:
 
 
 # ---------------------------------------------------------------------------
+# direction: 0 = обе, 1 = только лонг, 2 = только шорт
+# ---------------------------------------------------------------------------
+
+class TestDirection:
+    def test_long_only_keeps_buy_after_bear(self):
+        """Медвежья волна + отскок: direction=1 (лонг) → сделка long есть."""
+        bear = _bear_candles(3, step=1.0)
+        df = _append_candle(bear, 104, 100, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, direction=1)
+        assert len(bt["cycles"]) >= 1
+        assert bt["cycles"][0].trades[0].direction == "long"
+
+    def test_long_only_skips_sell_after_bull(self):
+        """Бычья волна (sell-сигнал) при direction=1 → сделок нет."""
+        bull = _bull_candles(3, step=1.0)
+        df = _append_candle(bull, 96, 100, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, direction=1)
+        assert bt["cycles"] == []
+
+    def test_short_only_keeps_sell_after_bull(self):
+        """Бычья волна + падение: direction=2 (шорт) → сделка short есть."""
+        bull = _bull_candles(3, step=1.0)
+        df = _append_candle(bull, 96, 100, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, direction=2)
+        assert len(bt["cycles"]) >= 1
+        assert bt["cycles"][0].trades[0].direction == "short"
+
+    def test_short_only_skips_buy_after_bear(self):
+        """Медвежья волна (buy-сигнал) при direction=2 → сделок нет."""
+        bear = _bear_candles(3, step=1.0)
+        df = _append_candle(bear, 104, 100, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, direction=2)
+        assert bt["cycles"] == []
+
+
+# ---------------------------------------------------------------------------
 # Martingale FSM
 # ---------------------------------------------------------------------------
 

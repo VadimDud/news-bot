@@ -204,6 +204,7 @@ class TestScanTicker:
 
     async def test_new_wave_sent_after_old(self, monkeypatch):
         monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_LONG_ONLY", False)  # тест дедупа, не направления
         df1 = _bear_wave_df(5, start=100, drop=1.0)
         _save_candles("TEST", df1)
         with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
@@ -354,6 +355,48 @@ class TestStrongGate:
             result = await _scan_ticker("STRONG3")
             assert result is not None
             assert result["sent"] is True
+
+
+# ---------------------------------------------------------------------------
+# Long-only (TRADER_ELLIOTT_LONG_ONLY): шорт-сигналы не отправляются
+# ---------------------------------------------------------------------------
+
+class TestLongOnly:
+    async def test_long_only_skips_sell_signal(self, monkeypatch):
+        """Бычья волна → сигнал продажи; при long-only=True не отправляется."""
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_LONG_ONLY", True)
+        df = _bull_wave_df(5, start=100, rise=1.5)
+        _save_candles("LONLY1", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("LONLY1")
+            assert result is None
+            mock_send.assert_not_called()
+
+    async def test_buy_signal_sent_when_long_only(self, monkeypatch):
+        """Медвежья волна → BUY: при long-only=True отправляется."""
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_LONG_ONLY", True)
+        df = _bear_wave_df(5, start=100, drop=1.5)
+        _save_candles("LONLY2", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("LONLY2")
+            assert result is not None
+            assert result["sent"] is True
+            mock_send.assert_called_once()
+
+    async def test_sell_allowed_when_long_only_off(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_LONG_ONLY", False)
+        df = _bull_wave_df(5, start=100, rise=1.5)
+        _save_candles("LONLY3", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("LONLY3")
+            assert result is not None
+            assert result["direction"] == "bull"
 
 
 # ---------------------------------------------------------------------------

@@ -1962,6 +1962,7 @@ STRATEGIES = {
             {"key": "hold_days", "label": "Удержание фейда N свечей (1 = мартингейл; 2-3 = один вход на N свечей)", "type": "int", "default": 1},
             {"key": "impulse_strong_k", "label": "Сильный импульс в волне: тело ≥ k×ATR(14) (0 = выкл)", "type": "float", "default": 1.0},
             {"key": "impulse_strong_min", "label": "Сильный импульс: мин. таких свечей в волне", "type": "int", "default": 1},
+            {"key": "direction", "label": "Направление: 0 = обе, 1 = только лонг, 2 = только шорт", "type": "int", "default": 1},
         ],
     },
 }

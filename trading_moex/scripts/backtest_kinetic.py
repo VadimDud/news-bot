@@ -20,6 +20,8 @@ Live-faithful модель: сигнал формируется на закры�
 Usage (from trading_moex/):
     python3 scripts/backtest_kinetic.py --db data/trader_4h.db --period 30min
     python3 scripts/backtest_kinetic.py --period 15min --ticker NVTK --grid
+    python3 scripts/backtest_kinetic.py --period 60min --direction 1    # только лонг
+    python3 scripts/backtest_kinetic.py --period 1day --direction 1 --grid
 """
 from __future__ import annotations
 
@@ -251,10 +253,15 @@ def main():
     parser.add_argument("--ticker", default=None, help="тикер (default: первый доступный для периода)")
     parser.add_argument("--period", default="30min", choices=list(AVAILABLE))
     parser.add_argument("--grid", action="store_true", help="перебор параметров")
+    parser.add_argument("--direction", type=int, default=None,
+                        help="направление: 1 = только лонг, -1 = только шорт, 0 = оба "
+                             "(default: 0, переопределяет DEFAULTS)")
     args = parser.parse_args()
 
     tickers = [args.ticker] if args.ticker else AVAILABLE[args.period]
     params = dict(DEFAULTS)
+    if args.direction is not None:
+        params["direction"] = args.direction
 
     if not args.grid:
         for ticker in tickers:
@@ -267,6 +274,8 @@ def main():
 
     # ── Grid-search: перебор параметров, ранжирование по net на полной истории ──
     keys = list(GRID.keys())
+    if args.direction is not None:
+        keys = [k for k in keys if k != "direction"]
     combos = list(itertools.product(*[GRID[k] for k in keys]))
     results = []
     for ticker in tickers:

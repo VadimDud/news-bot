@@ -131,10 +131,9 @@ TRADER_ELLIOTT_WAVE_MAX: int = int(os.environ.get("TRADER_ELLIOTT_WAVE_MAX", "5"
 TRADER_ELLIOTT_BODY_RATIO_MIN: float = float(os.environ.get("TRADER_ELLIOTT_BODY_RATIO_MIN", "0.6"))
 TRADER_ELLIOTT_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_ATR_K", "0.5"))
 # Мин. качество волны (0..1) для отправки сигнала; волны ниже порога считаются
-# шумом. По итогам бэктестов (long-only, 1day) прибылен порог q≥0.8 (win ~59%,
-# стабилен по эрам); при q<0.8 результат около нуля. Требование сильного
-# импульса (STRONG_ATR_K=1.0) — обязательная часть выгодного варианта.
-TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.8"))
+# шумом. Выигрышный вариант (E6): hold-add ЛОНГ-только + сильный импульс при
+# q>=0.6 даёт свежий позитив на 1day (см. scripts/backtest_elliott_v2.py).
+TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.6"))
 # Тикеры Elliott-скана через запятую. По итогам бэктестов прибыльны только
 # SBER, T, NLMK (см. scripts/backtest_elliott_v2.py); остальные не подтверждены.
 # Пустое значение = весь watchlist (DB → WATCH_TICKERS).

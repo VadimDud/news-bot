@@ -185,8 +185,12 @@ class TestRegistry:
         d = strategy_defaults("elliott_candles")
         assert d["wave_min"] == 3
         assert d["wave_max"] == 5
-        assert d["quality_min"] == 0.0
+        # выигрышный вариант E6: hold-add лонг-только q>=0.6 + сильный импульс
+        assert d["quality_min"] == 0.6
         assert d["base_pct"] == 0.25
+        assert d["hold_add"] == 1
+        assert d["direction"] == 1
+        assert d["impulse_strong_k"] == 1.0
 
     def test_per_ticker_view_without_cls(self):
         from app.web.app import _strategies_for_ticker

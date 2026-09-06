@@ -452,6 +452,45 @@ class TestHoldDays:
 
 
 # ---------------------------------------------------------------------------
+# impulse_strong: волна должна содержать свечи с сильным телом (>= k×ATR)
+# ---------------------------------------------------------------------------
+
+class TestImpulseStrong:
+    """Фильтр «сильный импульс»: в волне >= impulse_strong_min свечей с телом
+    >= impulse_strong_k × ATR(14). Шаг свечи 1.0 при h_range=1.0 даёт
+    ATR ≈ 2.0, поэтому k=1.0 (тело>=2.0) пройти нельзя, а k=0.4 — можно."""
+
+    def _wave_plus_recovery(self):
+        bear = _bear_candles(3, step=1.0)   # тело 1.0, ATR~2.0
+        return _append_candle(bear, 104, 100, days_offset=1)  # отскок: fade лонг в плюс
+
+    def test_strong_filter_blocks_small_bodies(self):
+        df = self._wave_plus_recovery()
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, quality_min=0.0,
+                          impulse_strong_k=1.0, impulse_strong_min=1)
+        assert bt["cycles"] == []   # тела 1.0 < ATR~2.0 → волна отклонена
+
+    def test_strong_filter_passes_lower_k(self):
+        df = self._wave_plus_recovery()
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, quality_min=0.0,
+                          impulse_strong_k=0.4, impulse_strong_min=1)
+        assert len(bt["cycles"]) >= 1
+
+    def test_strong_min_too_high_blocks(self):
+        df = self._wave_plus_recovery()
+        # при k=0.4 сильных свечей в волне 3 (тело 1.0 >= 0.8) — требования 4 нет
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=1, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, impulse_strong_k=0.4,
+                          impulse_strong_min=4)
+        assert bt["cycles"] == []
+
+
+# ---------------------------------------------------------------------------
 # Martingale FSM
 # ---------------------------------------------------------------------------
 

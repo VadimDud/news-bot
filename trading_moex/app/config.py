@@ -132,6 +132,18 @@ TRADER_ELLIOTT_BODY_RATIO_MIN: float = float(os.environ.get("TRADER_ELLIOTT_BODY
 TRADER_ELLIOTT_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_ATR_K", "0.5"))
 # Мин. качество волны (0..1) для отправки сигнала; волны ниже порога считаются шумом.
 TRADER_ELLIOTT_MIN_QUALITY: float = float(os.environ.get("TRADER_ELLIOTT_MIN_QUALITY", "0.4"))
+# Тикеры Elliott-скана через запятую. По итогам бэктестов прибыльны только
+# SBER, T, NLMK (см. scripts/backtest_elliott_v2.py); остальные не подтверждены.
+# Пустое значение = весь watchlist (DB → WATCH_TICKERS).
+TRADER_ELLIOTT_TICKERS: list[str] = [
+    t.strip() for t in os.environ.get("TRADER_ELLIOTT_TICKERS", "SBER,T,NLMK").split(",")
+    if t.strip()
+]
+# Требование «сильного импульса» в волне: внутри должно быть >= STRONG_MIN
+# свечей с телом >= STRONG_ATR_K × ATR(14). 0.0 = выключено (текущее live-
+# поведение). Эксперименты: k=1.0 улучшает fade-край (см. backtest_elliott_v2).
+TRADER_ELLIOTT_STRONG_ATR_K: float = float(os.environ.get("TRADER_ELLIOTT_STRONG_ATR_K", "0.0"))
+TRADER_ELLIOTT_STRONG_MIN: int = int(os.environ.get("TRADER_ELLIOTT_STRONG_MIN", "1"))
 
 # ── Fibonacci retracement (трендовое продолжение) signal notifier ───────────
 TRADER_FIB_ENABLED: bool = os.environ.get("TRADER_FIB_ENABLED", "true").lower() in ("1", "true")

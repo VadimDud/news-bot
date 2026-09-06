@@ -254,6 +254,7 @@ class TestRunElliotScan:
     async def test_scan_empty_watchlist_and_env(self, monkeypatch):
         storage.set_watchlist([])
         monkeypatch.setattr(trading_config, "WATCH_TICKERS", [])
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_TICKERS", [])
         with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock) as mock_send:
             result = await run_elliott_scan()
             assert result == []
@@ -261,6 +262,7 @@ class TestRunElliotScan:
 
     async def test_scan_with_candles(self, monkeypatch):
         monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_TICKERS", [])
         storage.set_watchlist(["TEST"])
         df = _bear_wave_df(5, start=100, drop=1.0)
         _save_candles("TEST", df)
@@ -271,7 +273,8 @@ class TestRunElliotScan:
             assert result[0]["ticker"] == "TEST"
             assert result[0]["sent"] is True
 
-    async def test_scan_graceful_on_error(self):
+    async def test_scan_graceful_on_error(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_TICKERS", [])
         storage.set_watchlist(["TEST"])
         result = await run_elliott_scan()
         assert result == []
@@ -305,6 +308,52 @@ class TestQualityFilter:
             assert result is not None
             assert result["sent"] is True
             mock_send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Strong-impulse gate (TRADER_ELLIOTT_STRONG_ATR_K)
+# ---------------------------------------------------------------------------
+
+class TestStrongGate:
+    """Волна должна содержать свечу с телом >= k×ATR(14), иначе сигнал не шлём."""
+
+    async def test_strong_gate_blocks_small_bodies(self, monkeypatch):
+        # drop=1.0, ATR≈1.6 → body 1.0 < 1.0×ATR → волна отклонена
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_STRONG_ATR_K", 1.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_STRONG_MIN", 1)
+        df = _bear_wave_df(5, start=100, drop=1.0)
+        _save_candles("STRONG1", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("STRONG1")
+            assert result is None
+            mock_send.assert_not_called()
+            assert storage.get_elliott_signal("STRONG1")["wave_end"] is None
+
+    async def test_strong_gate_passes_when_body_above_threshold(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_STRONG_ATR_K", 0.5)  # порог ~0.8
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_STRONG_MIN", 1)
+        df = _bear_wave_df(5, start=100, drop=1.0)
+        _save_candles("STRONG2", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("STRONG2")
+            assert result is not None
+            assert result["sent"] is True
+            mock_send.assert_called_once()
+
+    async def test_strong_gate_disabled_by_default(self, monkeypatch):
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_MIN_QUALITY", 0.0)
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_STRONG_ATR_K", 0.0)
+        df = _bear_wave_df(5, start=100, drop=1.0)
+        _save_candles("STRONG3", df)
+
+        with patch("app.elliott_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
+            result = await _scan_ticker("STRONG3")
+            assert result is not None
+            assert result["sent"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +422,7 @@ class TestWatchlistFallback:
     async def test_empty_db_falls_back_to_env(self, monkeypatch):
         storage.set_watchlist([])
         monkeypatch.setattr(trading_config, "WATCH_TICKERS", ["ENVTK"])
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_TICKERS", [])
 
         called: list[str] = []
 
@@ -388,6 +438,7 @@ class TestWatchlistFallback:
     async def test_db_watchlist_preferred_over_env(self, monkeypatch):
         storage.set_watchlist(["DBT"])
         monkeypatch.setattr(trading_config, "WATCH_TICKERS", ["ENVTK"])
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_TICKERS", [])
 
         called: list[str] = []
 
@@ -399,3 +450,19 @@ class TestWatchlistFallback:
             await run_elliott_scan()
 
         assert called == ["DBT"]
+
+    async def test_restricted_tickers_override_watchlist(self, monkeypatch):
+        """TRADER_ELLIOTT_TICKERS (по умолчанию SBER,T,NLMK) заменяет watchlist."""
+        monkeypatch.setattr(trading_config, "TRADER_ELLIOTT_TICKERS", ["SBER", "T", "NLMK"])
+        storage.set_watchlist(["DBT", "ENVTK"])
+
+        called: list[str] = []
+
+        async def fake_scan(ticker):
+            called.append(ticker)
+            return None
+
+        with patch("app.elliott_notifier._scan_ticker", side_effect=fake_scan):
+            await run_elliott_scan()
+
+        assert called == ["SBER", "T", "NLMK"]

@@ -211,6 +211,18 @@ async def _scan_ticker(ticker: str) -> dict | None:
             ticker, quality["total"], trading_config.TRADER_ELLIOTT_MIN_QUALITY,
         )
         return None
+    # Требование «сильного импульса»: в волне должна быть свеча с телом
+    # >= STRONG_ATR_K × ATR(14) (0.0 = выключено).
+    strong_k = trading_config.TRADER_ELLIOTT_STRONG_ATR_K
+    if strong_k > 0:
+        sub = wave.sub_candles()
+        strong = int(((sub["body_abs"] >= strong_k * sub["atr"]).sum()))
+        if strong < trading_config.TRADER_ELLIOTT_STRONG_MIN:
+            logger.debug(
+                "Волна %s отклонена: сильных свечей %d < %d (k=%.2f)",
+                ticker, strong, trading_config.TRADER_ELLIOTT_STRONG_MIN, strong_k,
+            )
+            return None
     fib = elliott_candles.fibonacci_levels(wave)
     stale = _is_stale(df)
 
@@ -224,7 +236,16 @@ async def _scan_ticker(ticker: str) -> dict | None:
 
 
 def _watchlist() -> list[str]:
-    """Тикеры скана: watchlist из БД, при пустом — fallback на WATCH_TICKERS."""
+    """Тикеры Elliott-скана.
+
+    Приоритет:
+    1. ``TRADER_ELLIOTT_TICKERS`` (не пусто) — бэктесты подтвердили прибыль
+       только на SBER/T/NLMK, поэтому скан ограничен этим списком;
+    2. иначе watchlist из БД, при пустом — fallback на WATCH_TICKERS.
+    """
+    restricted = list(trading_config.TRADER_ELLIOTT_TICKERS)
+    if restricted:
+        return restricted
     tickers = storage.list_watchlist()
     if not tickers:
         return list(trading_config.WATCH_TICKERS)

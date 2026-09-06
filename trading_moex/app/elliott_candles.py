@@ -633,6 +633,8 @@ def run_backtest(
     w4_no_overlap: int = 1,
     hold_add: int = 0,
     hold_days: int = 1,
+    impulse_strong_k: float = 0.0,
+    impulse_strong_min: int = 1,
 ) -> dict:
     """Full back-test on a single ticker/period DataFrame (live-faithful).
 
@@ -661,6 +663,12 @@ def run_backtest(
 
     ``quality_min > 0`` skips waves whose micro-Elliott quality score is
     below the threshold (same semantics as the live notifier).
+
+    ``impulse_strong_k > 0`` additionally requires the wave to contain at
+    least ``impulse_strong_min`` candles whose body is >= ``impulse_strong_k``
+    x ATR(14) (1-2 strong-move candles inside the wave). Tested in v2
+    experiments: with quality_min>=0.6 and k=1.0 it improves the 1-day fade
+    edge and keeps both eras positive, but hurts multi-day holds.
 
     Returns dict with ``cycles``, ``trades``, ``equity_curve``,
     ``metrics``.
@@ -730,6 +738,14 @@ def run_backtest(
         # Optional quality filter (unified with the live notifier threshold)
         if quality_min > 0 and wave_quality_score(wave)["total"] < quality_min:
             continue
+        # Optional "strong impulse" filter: внутри волны должно быть >=
+        # impulse_strong_min свечей с телом >= impulse_strong_k × ATR(14)
+        # (1-2 свечи с сильным движением делают волну пригодной для fade).
+        if impulse_strong_k > 0:
+            sub = wave.sub_candles()
+            strong = int(((sub["body_abs"] >= impulse_strong_k * sub["atr"]).sum()))
+            if strong < impulse_strong_min:
+                continue
         seen_entries.add(entry_idx)
         cycle, equity, last_consumed = _run_cycle(
             classified, wave, equity, base_pct, max_steps, commission,

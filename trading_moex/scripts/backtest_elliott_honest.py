@@ -426,5 +426,103 @@ def main() -> None:
               f"net={ra.sum():>+14,.0f} avg={ra.mean():>+10,.0f}")
 
 
+    # ── G. Вариант «ровно 5 свечей одного цвета» (запрос пользователя) ───────
+    # 5 свечей одного цвета -> fade (bull->short, bear->long), вход на open
+    # следующей свечи, выход на close следующей свечи (конец следующего дня).
+    print("\nG. Вариант 'ровно 5 свечей одного цвета' (live-faithful):")
+    sig5: dict[str, list[dict]] = {}
+    for t in tickers:
+        df = ticker_df.get(t)
+        if df is None:
+            continue
+        classified = ec.classify_candles(df, 0.6, 14, 0.5)
+        colors = classified["candle_color"].values
+        nlen = len(colors)
+        out = []
+        i = 0
+        while i < nlen:
+            c = colors[i]
+            if c == "doji":
+                i += 1
+                continue
+            j = i
+            while j < nlen and colors[j] == c:
+                j += 1
+            if j - i >= 5:
+                sig_idx = i + 4
+                if sig_idx + 1 < nlen:
+                    wave = ec.Wave(start_idx=i, end_idx=sig_idx, direction=c,
+                                   candle_count=5, df=classified)
+                    q = ec.wave_quality_score(wave)["total"]
+                    fade = "long" if c == "bear" else "short"
+                    out.append({"sig_idx": sig_idx, "fade": fade, "quality": q})
+            i = j
+        sig5[t] = out
+
+    # raw-статистика
+    all_g = []
+    for t, lst in sig5.items():
+        df = ticker_df[t]
+        for s in lst:
+            o = float(df["open"].iloc[s["sig_idx"] + 1])
+            cl = float(df["close"].iloc[s["sig_idx"] + 1])
+            gross = (cl - o) / o if s["fade"] == "long" else (o - cl) / o
+            all_g.append({"q": s["quality"], "gross": gross, "win": gross > 0})
+    gd = pd.DataFrame(all_g)
+    if len(gd):
+        print(f"    raw: n={len(gd):>4} win={(gd['win']).mean()*100:>5.1f}% "
+              f"gross_mean={gd['gross'].mean()*100:+.3f}% "
+              f"gross_med={gd['gross'].median()*100:+.3f}%")
+        for lo, hi, lbl in ((0, 0.4, "q<0.4"), (0.4, 0.6, "0.4-0.6"),
+                            (0.6, 0.8, "0.6-0.8"), (0.8, 1.01, "q>=0.8")):
+            g = gd[(gd["q"] >= lo) & (gd["q"] < hi)]
+            if len(g):
+                print(f"    {lbl:10}: n={len(g):>4} win={(g['win']).mean()*100:>5.1f}% "
+                      f"gross_mean={g['gross'].mean()*100:+.3f}%")
+
+    # мартингейл на L=5
+    print("    Мартингейл 25→50→100 на L=5:")
+    for qmin in (0.0, 0.4, 0.8):
+        equity = DEPOSIT
+        peak = equity
+        mdd = 0.0
+        wins = 0
+        cycles = 0
+        lost3 = 0
+        for t, lst in sig5.items():
+            df = ticker_df[t]
+            for s in lst:
+                if s["quality"] < qmin:
+                    continue
+                e = equity
+                step = 0
+                ok = False
+                for k in range(1, 4):
+                    idx = s["sig_idx"] + k
+                    if idx >= len(df):
+                        break
+                    o = float(df["open"].iloc[idx])
+                    cl = float(df["close"].iloc[idx])
+                    size = e * min(0.25 * 2 ** step, 1.0)
+                    gross = (cl - o) / o if s["fade"] == "long" else (o - cl) / o
+                    pnl = size * (gross - 2 * args.commission)
+                    e += pnl
+                    step += 1
+                    if pnl >= 0:
+                        ok = True
+                        break
+                cycles += 1
+                wins += 1 if ok else 0
+                if step == 3 and not ok:
+                    lost3 += 1
+                equity = e
+                peak = max(peak, equity)
+                mdd = max(mdd, peak - equity)
+        if cycles:
+            print(f"    q>={qmin}: циклов={cycles:>4} win={wins/cycles*100:>5.1f}% "
+                  f"3шаг-потерь={lost3:>3} net={equity-DEPOSIT:>+13,.0f} "
+                  f"maxDD={mdd/DEPOSIT*100:>5.1f}%")
+
+
 if __name__ == "__main__":
     main()

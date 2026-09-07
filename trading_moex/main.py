@@ -91,6 +91,19 @@ async def main() -> None:
 
         fib_data_task = asyncio.create_task(fib_data_sync_task())
 
+    # Запустить фоновый сканер MTF-сигналов (после закрытия 4h-баров)
+    mtf_task: asyncio.Task | None = None
+    if config.TRADER_MTF_ENABLED:
+        from app.mtf_notifier import mtf_scan_loop
+
+        logger.info(
+            "Starting MTF Confirmation notifier (scans at %s UTC)",
+            ",".join(f"{h:02d}:{m:02d}" for h, m in config.TRADER_MTF_SCANS),
+        )
+        mtf_task = asyncio.create_task(mtf_scan_loop())
+    else:
+        logger.info("MTF Confirmation notifier disabled via TRADER_MTF_ENABLED")
+
     try:
         while True:
             await asyncio.sleep(3600)
@@ -111,6 +124,10 @@ async def main() -> None:
             fib_data_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await fib_data_task
+        if mtf_task is not None:
+            mtf_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await mtf_task
         await runner.cleanup()
 
 

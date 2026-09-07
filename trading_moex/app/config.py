@@ -177,3 +177,24 @@ TRADER_FIB_DAILY_DRAWDOWN_PCT: float = float(os.environ.get("TRADER_FIB_DAILY_DR
 TRADER_FIB_REGIME_ADX_MIN: float = float(os.environ.get("TRADER_FIB_REGIME_ADX_MIN", "0.0"))
 TRADER_FIB_REGIME_ATR_VOL_MAX: float = float(os.environ.get("TRADER_FIB_REGIME_ATR_VOL_MAX", "0.0"))
 TRADER_FIB_USE_HTF: int = int(os.environ.get("TRADER_FIB_USE_HTF", "1"))
+
+# ── MTF Confirmation: multi-timeframe candle-pattern notifier ──────────────
+TRADER_MTF_ENABLED: bool = os.environ.get("TRADER_MTF_ENABLED", "true").lower() in ("1", "true")
+TRADER_MTF_RUN_ON_STARTUP: bool = os.environ.get("TRADER_MTF_RUN_ON_STARTUP", "true").lower() in ("1", "true")
+# Скан после закрытия каждого 4h-бара: 08:00 (закрытие 04:00 бара), 12:00, 16:00 UTC.
+TRADER_MTF_SCANS: list[tuple[int, int]] = [
+    (int(h), int(m))
+    for h, m in (p.split(":") for p in os.environ.get("TRADER_MTF_SCANS", "08:00,12:00,16:00").split(",") if p.strip())
+]
+# Разрешённые часы UTC для СИГНАЛЬНЫХ баров (4=07:00 MSK, 8=11:00, 12=15:00).
+# Бары 16 (19:00 MSK) и 20 (23:00 MSK) исключены — худший win-rate.
+TRADER_MTF_SIGNAL_HOURS: list[int] = [
+    int(h.strip()) for h in os.environ.get("TRADER_MTF_SIGNAL_HOURS", "4,8,12").split(",") if h.strip()
+]
+# Подтверждённые тикеры (бэктест win>0 на 13 мес. данных, без MOEX).
+TRADER_MTF_TICKERS: list[str] = [
+    t.strip() for t in os.environ.get(
+        "TRADER_MTF_TICKERS",
+        "CHMF,GAZP,LKOH,MTSS,NLMK,NVTK,T,TATN",
+    ).split(",") if t.strip()
+]

@@ -182,6 +182,20 @@ def init_db() -> None:
         except sqlite3.Error:  # pragma: no cover — таблица может быть недоступна
             pass
 
+        # ── MTF Confirmation: dedup таблица ─────────────────────────────────
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mtf_signals (
+                ticker TEXT NOT NULL,
+                signal_ts TEXT NOT NULL,
+                side TEXT NOT NULL,
+                close_price REAL,
+                notified_at TEXT,
+                PRIMARY KEY (ticker, signal_ts, side)
+            )
+            """
+        )
+
         # ── News Guard: AI severity cache + user overrides ──────────────────
         conn.execute(
             """
@@ -424,6 +438,35 @@ def save_fib_short_signal(
             " swing_low=excluded.swing_low, swing_high=excluded.swing_high,"
             " retrace=excluded.retrace, factors=excluded.factors, notified_at=excluded.notified_at",
             (ticker, setup_id, swing_low, swing_high, retrace, factors, now),
+        )
+
+
+# ── MTF Confirmation: dedup ─────────────────────────────────────────────────
+
+def get_mtf_signal(ticker: str) -> dict:
+    """Последний отправленный MTF-сигнал для тикера (дедупликация)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT ticker, signal_ts, side, close_price, notified_at"
+            " FROM mtf_signals WHERE ticker = ? ORDER BY signal_ts DESC LIMIT 1",
+            (ticker,),
+        ).fetchone()
+    if row is None:
+        return {"ticker": ticker, "signal_ts": None, "side": None,
+                "close_price": None, "notified_at": None}
+    return {"ticker": row[0], "signal_ts": row[1], "side": row[2],
+            "close_price": row[3], "notified_at": row[4]}
+
+
+def save_mtf_signal(ticker: str, signal_ts: str, side: str,
+                    close_price: float | None = None) -> None:
+    """Сохранить MTF-сигнал для дедупликации."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO mtf_signals (ticker, signal_ts, side, close_price, notified_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (ticker, signal_ts, side, close_price, now),
         )
 
 

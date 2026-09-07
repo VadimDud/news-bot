@@ -818,6 +818,17 @@ Halves-тест проходит: 1-я половина маргинально �
   вечер (19:00 MSK), win 59.1%, обе halves позитивны.
 - Если появятся 4h за 3–5 лет для 10+ тикеров — повторить halves-тест.
 
+**Внедрение в прод (Telegram-нотификатор):**
+
+- Модуль: `app/mtf_notifier.py` (по образцу `elliott_notifier.py`)
+- Дедуп: таблица `mtf_signals` (ticker + signal_ts + side)
+- Расписание: скан в 08:00, 12:00, 16:00 UTC (после закрытия 4h-баров)
+- Тикеры: `TRADER_MTF_TICKERS` — 8 подтверждённых (CHMF, GAZP, LKOH, MTSS, NLMK, NVTK, T, TATN)
+- Часы сигнала: `TRADER_MTF_SIGNAL_HOURS` = [4,8,12] UTC (07:00–15:00 MSK)
+- Включение: `TRADER_MTF_ENABLED=true` (дефолт)
+- Формат: направление, цена, дневной режим, план (вход на open след. бара, exit close через 6 баров), дисклеймер
+- Автоторговли нет — только уведомления, сделки вручную
+
 ---
 
 ## Быстрые ссылки
@@ -840,5 +851,7 @@ Halves-тест проходит: 1-я половина маргинально �
 - Диагностика MTF Confirmation (часовой+дневной): `trading_moex/scripts/backtest_mtf_confirm.py`
   - Параметр `--signal-hours` для фильтрации по времени сигнала (напр. `--signal-hours 4,8,12`)
 - Статистика MTF Confirmation: `trading_moex/scripts/candle_pattern_mtf_research.py`
+- MTF Confirmation нотификатор (Telegram): `trading_moex/app/mtf_notifier.py`
 - Фильтр дивидендных окон: `trading_moex/app/event_filter.py`
+- Тесты MTF: `pytest trading_moex/tests/test_mtf_confirm.py trading_moex/tests/test_mtf_notifier.py -q`
 - Тесты: `pytest trading_moex/tests/test_fib_pullback.py trading_moex/tests/test_fib_notifier.py -q`

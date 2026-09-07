@@ -59,8 +59,13 @@ def honest_trades(
     horizon: int = 6,
     direction: int = 0,
     min_hold: int = 0,
+    event_mask: pd.Series | None = None,
 ) -> list[dict]:
-    """Live-faithful сделки: сигнал на close, вход на open следующего бара."""
+    """Live-faithful сделки: сигнал на close, вход на open следующего бара.
+
+    ``event_mask`` — boolean Series (aligned to LTF index), True = бар в запретном
+    окне (отсечка дивидендов и т.п.), вход запрещён.
+    """
     ltf = mtf.prepare_ohlc(ltf_df)
     htf = mtf.prepare_ohlc(htf_df)
     if len(ltf) < max(ltf_zone, 50) + horizon + 5 or len(htf) < htf_zone + 5:
@@ -73,6 +78,7 @@ def honest_trades(
     closes = ltf["close"].to_numpy(dtype=float)
     highs = ltf["high"].to_numpy(dtype=float)
     lows = ltf["low"].to_numpy(dtype=float)
+    ev_mask = event_mask.to_numpy(dtype=bool) if event_mask is not None else np.zeros(len(ltf), dtype=bool)
 
     trades = []
     in_trade = False
@@ -81,7 +87,7 @@ def honest_trades(
 
     for i in range(len(sig_np) - 1):
         if not in_trade:
-            if sig_np[i] != 0:
+            if sig_np[i] != 0 and not ev_mask[i + 1]:  # проверяем entry_bar = i+1
                 entry_bar = i + 1
                 entry_side = sig_np[i]
                 in_trade = True
@@ -119,10 +125,12 @@ def run_backtest(
     htf_zone: int = 20,
     horizon: int = 6,
     direction: int = 0,
+    event_mask: pd.Series | None = None,
 ) -> dict:
     """Полный бэктест для одного тикера."""
     trades = honest_trades(ltf_df, htf_df, pattern=pattern, ltf_zone=ltf_zone,
-                           htf_zone=htf_zone, horizon=horizon, direction=direction)
+                           htf_zone=htf_zone, horizon=horizon, direction=direction,
+                           event_mask=event_mask)
     if not trades:
         return {
             "ticker": ticker, "trades": 0, "win_raw": 0, "win_net": 0,
@@ -185,7 +193,11 @@ def main():
     parser.add_argument("--htf-zone", type=int, default=20)
     parser.add_argument("--horizon", type=int, default=6)
     parser.add_argument("--direction", type=int, default=0, help="1=long, -1=short, 0=both")
+    parser.add_argument("--exclude-div-days", type=int, default=0,
+                        help="Исключить входы в окне ±N дней от отсечки дивидендов (0=выкл)")
     args = parser.parse_args()
+
+    from app.event_filter import load_dividend_events, in_event_window  # noqa: E402
 
     con = sqlite3.connect(args.db)
     ltf_rows = con.execute("SELECT DISTINCT ticker FROM candles WHERE period=?", (args.ltf,)).fetchall()
@@ -200,6 +212,8 @@ def main():
 
     print(f"=== MTF Honest Backtest: {args.pattern} | LTF={args.ltf} zone={args.ltf_zone} | HTF=1day zone={args.htf_zone} ===")
     print(f"Horizon={args.horizon} bars, cost={TOTAL_COST_PCT:.2f}%/round-trip, direction={args.direction}")
+    if args.exclude_div_days > 0:
+        print(f"Dividend filter: ±{args.exclude_div_days} days around ex-div")
     print(f"Tickers: {', '.join(common)}\n")
 
     all_results = []
@@ -211,17 +225,38 @@ def main():
         if len(ltf_df) < 60 or len(htf_df) < 60:
             continue
 
+        event_mask = None
+        if args.exclude_div_days > 0:
+            from app.mtf_confirm import prepare_ohlc  # noqa: E402
+            ltf_prepared = prepare_ohlc(ltf_df)
+            div_events = load_dividend_events(ticker, args.db)
+            if not div_events.empty:
+                event_mask = in_event_window(ltf_prepared.index, div_events,
+                                             pre_days=args.exclude_div_days,
+                                             post_days=args.exclude_div_days)
+
         res = run_backtest(ticker, ltf_df, htf_df, pattern=args.pattern,
                            ltf_zone=args.ltf_zone, htf_zone=args.htf_zone,
-                           horizon=args.horizon, direction=args.direction)
+                           horizon=args.horizon, direction=args.direction,
+                           event_mask=event_mask)
         all_results.append(res)
 
         # Halves
         for name, h_ltf, h_htf in _split_eras(ltf_df, htf_df):
             if len(h_ltf) >= 30 and len(h_htf) >= 30:
+                h_event_mask = None
+                if args.exclude_div_days > 0:
+                    from app.mtf_confirm import prepare_ohlc  # noqa: E402
+                    h_ltf_prepared = prepare_ohlc(h_ltf)
+                    h_div_events = load_dividend_events(ticker, args.db)
+                    if not h_div_events.empty:
+                        h_event_mask = in_event_window(h_ltf_prepared.index, h_div_events,
+                                                       pre_days=args.exclude_div_days,
+                                                       post_days=args.exclude_div_days)
                 hr = run_backtest(ticker, h_ltf, h_htf, pattern=args.pattern,
                                   ltf_zone=args.ltf_zone, htf_zone=args.htf_zone,
-                                  horizon=args.horizon, direction=args.direction)
+                                  horizon=args.horizon, direction=args.direction,
+                                  event_mask=h_event_mask)
                 halves_results[name].append(hr)
 
     if not all_results:

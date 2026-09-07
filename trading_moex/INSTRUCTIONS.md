@@ -745,6 +745,25 @@ marubozu / strong_body / engulfing), **фильтр** на дневном (1day)
 `tests/test_mtf_confirm.py`, исследование `scripts/candle_pattern_mtf_research.py`,
 честный бэктест `scripts/backtest_mtf_confirm.py`.
 
+**Исследование фильтров (4h, 9 тикеров, zone_break):**
+
+| Фильтр | best_lift_z | Δz vs unfiltered | Вердикт |
+|---|---|---|---|
+| zone (close > max(high[20])) | bear z=+3.11 | +4.38 | **Лучший** |
+| ma_single (EMA 20 + ATR) | bear z=+2.44 | +3.71 | Слабее |
+| ma_cross (EMA 20/50) | bear z=+1.31 | +2.58 | Слабее |
+| ma_200 (close vs SMA200) | bear z=+0.83 | +2.10 | Слабее |
+| ma_combined (EMA 20 + 200) | bear z=+0.83 | +2.10 | Слабее |
+
+Zone filter доминирует: +1.55 lift vs лучшей MA-альтернативе (strong_body bear).
+
+**Исследование event filter (дивиденды):**
+
+±2 дня: 8 сделок удалены, pnl без изменений (+125.50% vs +125.57%).
+±5 дней: 19 сделок удалены, pnl +128.65% vs +125.57% (+3%, шум).
+Все блокируемые сигналы — шорты (дивидендный гэп вниз = выигрыш шорта).
+**Вердикт: event filter не имеет статистической значимости.**
+
 **Статистика (4h, 9 тикеров, zone_break, горизонт 6 баров = 24 ч):**
 
 | label | side | n | win% | base% | z |
@@ -812,4 +831,5 @@ marubozu / strong_body / engulfing), **фильтр** на дневном (1day)
 - Диагностика Kinetic Momentum (интрадей): `trading_moex/scripts/backtest_kinetic.py`
 - Диагностика MTF Confirmation (часовой+дневной): `trading_moex/scripts/backtest_mtf_confirm.py`
 - Статистика MTF Confirmation: `trading_moex/scripts/candle_pattern_mtf_research.py`
+- Фильтр дивидендных окон: `trading_moex/app/event_filter.py`
 - Тесты: `pytest trading_moex/tests/test_fib_pullback.py trading_moex/tests/test_fib_notifier.py -q`

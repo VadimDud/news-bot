@@ -159,9 +159,29 @@ def main():
     parser.add_argument("--pattern", default=None, help="Один паттерн (или все)")
     parser.add_argument("--ltf-zone", type=int, default=20)
     parser.add_argument("--htf-zone", type=int, default=20)
+    parser.add_argument("--htf-filter", default="zone", choices=["zone", "ma_single", "ma_cross", "grid"])
+    parser.add_argument("--htf-ma-fast", type=int, default=20)
+    parser.add_argument("--htf-ma-slow", type=int, default=50)
+    parser.add_argument("--htf-atr-neutral", type=float, default=0.0)
     parser.add_argument("--horizon", type=int, default=6, help="Forward bars on LTF")
     parser.add_argument("--min-events", type=int, default=10)
     args = parser.parse_args()
+
+    FILTER_GRID = {
+        "zone": {"htf_filter": "zone", "htf_zone": args.htf_zone},
+        "ema20": {"htf_filter": "ma_single", "htf_ma_fast": 20},
+        "ema50": {"htf_filter": "ma_single", "htf_ma_fast": 50},
+        "ema200": {"htf_filter": "ma_single", "htf_ma_fast": 200},
+        "ema20_50": {"htf_filter": "ma_cross", "htf_ma_fast": 20, "htf_ma_slow": 50},
+        "ema50_200": {"htf_filter": "ma_cross", "htf_ma_fast": 50, "htf_ma_slow": 200},
+    }
+    if args.htf_filter == "grid":
+        filters_to_run = FILTER_GRID
+    else:
+        fk = {"htf_filter": args.htf_filter, "htf_zone": args.htf_zone,
+              "htf_ma_fast": args.htf_ma_fast, "htf_ma_slow": args.htf_ma_slow,
+              "htf_atr_neutral": args.htf_atr_neutral}
+        filters_to_run = {args.htf_filter: fk}
 
     ltf_tickers = available_tickers(args.db, args.ltf)
     htf_tickers = available_tickers(args.db, "1day")
@@ -171,106 +191,104 @@ def main():
         return
 
     patterns = [args.pattern] if args.pattern else ["zone_break", "marubozu", "strong_body", "engulfing", "three_soldiers"]
-    print(f"=== MTF Research: LTF={args.ltf}, HTF=1day, zone_ltf={args.ltf_zone}, zone_htf={args.htf_zone}, horizon={args.horizon} ===")
+    filter_names = list(filters_to_run.keys())
+    print(f"=== MTF Research: LTF={args.ltf}, HTF=1day, filters={filter_names}, horizon={args.horizon} ===")
     print(f"Tickers: {', '.join(common)}")
 
-    all_agg = []
-    per_ticker_agg = []
+    for filter_name, filter_kw in filters_to_run.items():
+        print(f"\n{'#'*70}")
+        print(f"FILTER: {filter_name}  params={filter_kw}")
+        print(f"{'#'*70}")
 
-    for pat in patterns:
-        print(f"\n{'='*70}")
-        print(f"PATTERN: {pat}")
-        print(f"{'='*70}")
+        all_agg = []
+        per_ticker_agg = []
 
-        h1_all, h2_all, peace_all, war_all = [], [], [], []
+        for pat in patterns:
+            print(f"\n{'='*70}")
+            print(f"PATTERN: {pat}")
+            print(f"{'='*70}")
 
-        for t in common:
-            ltf_df = load_df(t, args.db, args.ltf)
-            htf_df = load_df(t, args.db, "1day")
-            if len(ltf_df) < 60 or len(htf_df) < 60:
-                continue
+            h1_all, h2_all = [], []
 
-            stats = mtf.mtf_stats(
-                ltf_df, htf_df, pattern=pat,
-                ltf_zone=args.ltf_zone, htf_zone=args.htf_zone,
-                horizon=args.horizon, min_events=args.min_events,
-            )
-            if stats.empty:
-                continue
-            stats["ticker"] = t
-            stats["pattern"] = pat
-            all_agg.append(stats)
-            per_ticker_agg.append((t, stats))
+            for t in common:
+                ltf_df = load_df(t, args.db, args.ltf)
+                htf_df = load_df(t, args.db, "1day")
+                if len(ltf_df) < 60 or len(htf_df) < 60:
+                    continue
 
-            # halves
-            h1_ltf, h2_ltf = _halves(ltf_df)
-            h1_htf, h2_htf = _halves(htf_df)
-            if len(h1_ltf) >= 30 and len(h1_htf) >= 30:
-                s1 = mtf.mtf_stats(h1_ltf, h1_htf, pattern=pat, ltf_zone=args.ltf_zone,
-                                    htf_zone=args.htf_zone, horizon=args.horizon, min_events=max(3, args.min_events // 2))
-                if not s1.empty:
-                    h1_all.append(s1)
-            if len(h2_ltf) >= 30 and len(h2_htf) >= 30:
-                s2 = mtf.mtf_stats(h2_ltf, h2_htf, pattern=pat, ltf_zone=args.ltf_zone,
-                                    htf_zone=args.htf_zone, horizon=args.horizon, min_events=max(3, args.min_events // 2))
-                if not s2.empty:
-                    h2_all.append(s2)
+                stats = mtf.mtf_stats(
+                    ltf_df, htf_df, pattern=pat,
+                    ltf_zone=args.ltf_zone, htf_zone=args.htf_zone,
+                    horizon=args.horizon, min_events=args.min_events,
+                    htf_filter=filter_kw.get("htf_filter", "zone"),
+                    htf_ma_fast=filter_kw.get("htf_ma_fast", 20),
+                    htf_ma_slow=filter_kw.get("htf_ma_slow", 50),
+                    htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0),
+                )
+                if stats.empty:
+                    continue
+                stats["ticker"] = t
+                stats["pattern"] = pat
+                stats["filter"] = filter_name
+                all_agg.append(stats)
+                per_ticker_agg.append((t, stats))
 
-            # eras
-            peace_era, war_era = _eras(ltf_df)
-            for era_name, e_ltf in [("peace", peace_era[1]), ("war", war_era[1])]:
-                e_htf_sub = htf_df
-                if len(e_ltf) >= 30 and len(e_htf_sub) >= 30:
-                    se = mtf.mtf_stats(e_ltf, e_htf_sub, pattern=pat, ltf_zone=args.ltf_zone,
-                                        htf_zone=args.htf_zone, horizon=args.horizon, min_events=max(3, args.min_events // 2))
-                    if not se.empty:
-                        (peace_all if era_name == "peace" else war_all).append(se)
+                # halves
+                h1_ltf, h2_ltf = _halves(ltf_df)
+                h1_htf, h2_htf = _halves(htf_df)
+                if len(h1_ltf) >= 30 and len(h1_htf) >= 30:
+                    s1 = mtf.mtf_stats(h1_ltf, h1_htf, pattern=pat, ltf_zone=args.ltf_zone,
+                                        htf_zone=args.htf_zone, horizon=args.horizon,
+                                        min_events=max(3, args.min_events // 2),
+                                        htf_filter=filter_kw.get("htf_filter", "zone"),
+                                        htf_ma_fast=filter_kw.get("htf_ma_fast", 20),
+                                        htf_ma_slow=filter_kw.get("htf_ma_slow", 50),
+                                        htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0))
+                    if not s1.empty:
+                        h1_all.append(s1)
+                if len(h2_ltf) >= 30 and len(h2_htf) >= 30:
+                    s2 = mtf.mtf_stats(h2_ltf, h2_htf, pattern=pat, ltf_zone=args.ltf_zone,
+                                        htf_zone=args.htf_zone, horizon=args.horizon,
+                                        min_events=max(3, args.min_events // 2),
+                                        htf_filter=filter_kw.get("htf_filter", "zone"),
+                                        htf_ma_fast=filter_kw.get("htf_ma_fast", 20),
+                                        htf_ma_slow=filter_kw.get("htf_ma_slow", 50),
+                                        htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0))
+                    if not s2.empty:
+                        h2_all.append(s2)
 
-        # ── Aggregated tables ──
-        agg = _agg_stats(all_agg) if all_agg else pd.DataFrame()
-        if not agg.empty:
-            print(f"\n--- Pooled ({len(common)} tickers) ---")
-            _print_mtf_table(agg)
+            # ── Aggregated tables ──
+            agg = _agg_stats(all_agg) if all_agg else pd.DataFrame()
+            if not agg.empty:
+                print(f"\n--- Pooled ({len(common)} tickers) ---")
+                _print_mtf_table(agg)
 
-        h1_agg = _agg_stats(h1_all) if h1_all else pd.DataFrame()
-        if not h1_agg.empty:
-            print(f"\n--- 1st half ---")
-            _print_mtf_table(h1_agg)
+            h1_agg = _agg_stats(h1_all) if h1_all else pd.DataFrame()
+            if not h1_agg.empty:
+                print(f"\n--- 1st half ---")
+                _print_mtf_table(h1_agg)
 
-        h2_agg = _agg_stats(h2_all) if h2_all else pd.DataFrame()
-        if not h2_agg.empty:
-            print(f"\n--- 2nd half ---")
-            _print_mtf_table(h2_agg)
+            h2_agg = _agg_stats(h2_all) if h2_all else pd.DataFrame()
+            if not h2_agg.empty:
+                print(f"\n--- 2nd half ---")
+                _print_mtf_table(h2_agg)
 
-        if peace_all:
-            p_agg = _agg_stats(peace_all)
-            if not p_agg.empty:
-                print(f"\n--- Peace era ---")
-                _print_mtf_table(p_agg)
-        if war_all:
-            w_agg = _agg_stats(war_all)
-            if not w_agg.empty:
-                print(f"\n--- War era ---")
-                _print_mtf_table(w_agg)
-
-        # ── Lift table ──
+        # ── Lift table per filter+pattern ──
         lift = _lift_table([s for s in all_agg if "pattern" in s.columns])
         if not lift.empty:
-            pat_lift = lift[lift["pattern"] == pat]
-            if not pat_lift.empty:
-                print(f"\n--- Lift: confirmed vs no_filter ---")
-                print(f"{'side':6s} {'n_nf':>5s} {'n_cf':>5s} {'z_nf':>7s} {'z_cf':>7s} {'Δz':>7s} {'win_nf':>7s} {'win_cf':>7s} {'Δwin%':>7s}")
-                for _, r in pat_lift.iterrows():
-                    flag = " ◀" if r["lift_z"] > 0 and r["z_cf"] >= 2.0 else ""
-                    print(f"{r['side']:6s} {r['n_nf']:5d} {r['n_cf']:5d} {r['z_nf']:+7.2f} {r['z_cf']:+7.2f} "
-                          f"{r['lift_z']:+7.2f} {r['win_nf']:7.1f} {r['win_cf']:7.1f} {r['lift_win']:+7.1f}{flag}")
+            print(f"\n--- Lift: confirmed vs no_filter ({filter_name}) ---")
+            print(f"{'pat':16s} {'side':6s} {'n_nf':>5s} {'n_cf':>5s} {'z_nf':>7s} {'z_cf':>7s} {'Δz':>7s} {'win_nf':>7s} {'win_cf':>7s} {'Δwin%':>7s}")
+            for _, r in lift.iterrows():
+                flag = " ◀" if r["lift_z"] > 0 and r["z_cf"] >= 2.0 else ""
+                print(f"{r['pattern']:16s} {r['side']:6s} {r['n_nf']:5d} {r['n_cf']:5d} {r['z_nf']:+7.2f} {r['z_cf']:+7.2f} "
+                      f"{r['lift_z']:+7.2f} {r['win_nf']:7.1f} {r['win_cf']:7.1f} {r['lift_win']:+7.1f}{flag}")
 
-    # ── Per-ticker robustness ──
-    if per_ticker_agg:
+    # ── Cross-filter comparison (grid mode) ──
+    if len(filters_to_run) > 1 and per_ticker_agg:
         pt = _per_ticker_table(per_ticker_agg)
         if not pt.empty:
             print(f"\n{'='*70}")
-            print("PER-TICKER: where filter improves win% (lift > 0)")
+            print("CROSS-FILTER COMPARISON: avg lift per filter")
             print(f"{'='*70}")
             g = pt.groupby(["pattern", "side"]).apply(
                 lambda grp: pd.Series({

@@ -52,6 +52,45 @@ def htf_zone_state(
     return state
 
 
+# ── HTF MA-режим ─────────────────────────────────────────────────────────────
+
+def htf_ma_state(
+    htf_df: pd.DataFrame,
+    fast: int = 20,
+    slow: int | None = None,
+    atr_neutral: float = 0.0,
+) -> pd.Series:
+    """MA-режим на HTF: +1 (bull), −1 (bear), 0 (нейтраль/неопределённость).
+
+    Одна MA: ``sign(close − EMA(fast))``. Две MA: ``sign(EMA(fast) − EMA(slow))``.
+    ``atr_neutral > 0``: нейтральная зона ±k·ATR حول MA — внутри 0.
+
+    Всё причинное: используем только завершённые бары (shifted).
+    """
+    htf = prepare_ohlc(htf_df)
+    if len(htf) < max(fast, slow or 0, 5) + 2:
+        return pd.Series(np.zeros(len(htf), dtype=int), index=htf.index)
+    close = htf["close"]
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    if slow and slow > 0:
+        ema_slow = close.ewm(span=slow, adjust=False).mean()
+        diff = ema_fast - ema_slow
+        state = pd.Series(0, index=htf.index, dtype=int)
+        state[diff > 0] = 1
+        state[diff < 0] = -1
+    else:
+        diff = close - ema_fast
+        state = pd.Series(0, index=htf.index, dtype=int)
+        state[diff > 0] = 1
+        state[diff < 0] = -1
+    if atr_neutral > 0:
+        atr = _atr(htf, 14)
+        neutral_zone = atr_neutral * atr
+        inside = diff.abs() <= neutral_zone
+        state[inside] = 0
+    return state
+
+
 # ── Causes-only alignment: HTF state → LTF timestamps ───────────────────────
 
 def htf_state_at(
@@ -135,6 +174,23 @@ def ltf_signals(
 
 # ── Комбинированный MTF-сигнал ───────────────────────────────────────────────
 
+def _compute_htf_state(
+    htf_df: pd.DataFrame,
+    htf_filter: str = "zone",
+    htf_zone: int = 20,
+    htf_ma_fast: int = 20,
+    htf_ma_slow: int = 50,
+    htf_atr_neutral: float = 0.0,
+) -> pd.Series:
+    """Диспетчер HTF-фильтра: 'zone' | 'ma_single' | 'ma_cross'."""
+    if htf_filter == "ma_single":
+        return htf_ma_state(htf_df, fast=htf_ma_fast, slow=None, atr_neutral=htf_atr_neutral)
+    elif htf_filter == "ma_cross":
+        return htf_ma_state(htf_df, fast=htf_ma_fast, slow=htf_ma_slow, atr_neutral=htf_atr_neutral)
+    else:  # "zone"
+        return htf_zone_state(htf_df, zone=htf_zone)
+
+
 def mtf_signal(
     ltf_df: pd.DataFrame,
     htf_df: pd.DataFrame,
@@ -145,8 +201,15 @@ def mtf_signal(
     atr_period: int = 14,
     atr_k: float = 1.0,
     body_ratio_min: float = 0.6,
+    htf_filter: str = "zone",
+    htf_ma_fast: int = 20,
+    htf_ma_slow: int = 50,
+    htf_atr_neutral: float = 0.0,
 ) -> pd.Series:
     """Комбинированный сигнал: LTF-паттерн + HTF-фильтр.
+
+    ``htf_filter``: 'zone' (пробой диапазона), 'ma_single' (close vs EMA),
+    'ma_cross' (EMA fast vs EMA slow).
 
     Возвращает серию знаков: +1 (подтверждённый bull), −1 (подтверждённый
     bear), 0 (нет сигнала / фильтр не подтверждает).
@@ -155,10 +218,10 @@ def mtf_signal(
     """
     sig = ltf_signals(ltf_df, pattern=pattern, zone=ltf_zone,
                       atr_period=atr_period, atr_k=atr_k, body_ratio_min=body_ratio_min)
-    htf_state = htf_zone_state(htf_df, zone=htf_zone)
+    htf_state = _compute_htf_state(htf_df, htf_filter=htf_filter, htf_zone=htf_zone,
+                                    htf_ma_fast=htf_ma_fast, htf_ma_slow=htf_ma_slow,
+                                    htf_atr_neutral=htf_atr_neutral)
     filt = htf_state_at(ltf_df, htf_state)
-    # подтверждение: сигнал и фильтр одного знака
-    confirmed = pd.Series(0, index=ltf_df.index if hasattr(ltf_df, "index") else sig.index, dtype=int)
     sig_np = sig.to_numpy(dtype=int)
     filt_np = filt.to_numpy(dtype=int)
     out = np.zeros(len(sig), dtype=int)
@@ -187,21 +250,21 @@ def mtf_stats(
     atr_period: int = 14,
     atr_k: float = 1.0,
     body_ratio_min: float = 0.6,
+    htf_filter: str = "zone",
+    htf_ma_fast: int = 20,
+    htf_ma_slow: int = 50,
+    htf_atr_neutral: float = 0.0,
 ) -> pd.DataFrame:
     """Статистика продолжения: с фильтром vs без фильтра vs базовая ставка.
 
-    Возвращает DataFrame:
-    - ``label``: "no_filter", "confirmed", "rejected" (filter off)
-    - ``n``, ``win_pct``, ``base_pct``, ``edge_pct``, ``mean_atr``, ``z``
-
-    ``confirmed`` = вход только при ``S·F > 0`` (согласованность LTF+HTF).
-    ``rejected`` = вход при ``S ≠ 0`` но ``F = 0`` или ``S ≠ F`` (фильтр не
-    пропускает).
+    ``htf_filter``: 'zone' | 'ma_single' | 'ma_cross'.
     """
     ltf = prepare_ohlc(ltf_df)
     sig = ltf_signals(ltf, pattern=pattern, zone=ltf_zone,
                       atr_period=atr_period, atr_k=atr_k, body_ratio_min=body_ratio_min)
-    htf_state = htf_zone_state(htf_df, zone=htf_zone)
+    htf_state = _compute_htf_state(htf_df, htf_filter=htf_filter, htf_zone=htf_zone,
+                                    htf_ma_fast=htf_ma_fast, htf_ma_slow=htf_ma_slow,
+                                    htf_atr_neutral=htf_atr_neutral)
     filt = htf_state_at(ltf, htf_state)
     close = ltf["close"].to_numpy(dtype=float)
     atr_arr = _atr(ltf, atr_period).to_numpy(dtype=float)
@@ -279,11 +342,17 @@ def mtf_position(
     atr_period: int = 14,
     atr_k: float = 1.0,
     body_ratio_min: float = 0.6,
+    htf_filter: str = "zone",
+    htf_ma_fast: int = 20,
+    htf_ma_slow: int = 50,
+    htf_atr_neutral: float = 0.0,
 ) -> pd.Series:
     """Позиция (1/−1/0) по MTF-сигналу: удержание до противоположного сигнала."""
     sig = mtf_signal(ltf_df, htf_df, pattern=pattern, ltf_zone=ltf_zone,
                      htf_zone=htf_zone, direction=direction, atr_period=atr_period,
-                     atr_k=atr_k, body_ratio_min=body_ratio_min)
+                     atr_k=atr_k, body_ratio_min=body_ratio_min,
+                     htf_filter=htf_filter, htf_ma_fast=htf_ma_fast,
+                     htf_ma_slow=htf_ma_slow, htf_atr_neutral=htf_atr_neutral)
     sig_np = sig.to_numpy(dtype=int)
     pos = np.zeros(len(sig), dtype=int)
     cur = 0

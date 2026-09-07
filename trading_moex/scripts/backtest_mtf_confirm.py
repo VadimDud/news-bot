@@ -171,17 +171,29 @@ def run_backtest(
 
 
 def _split_eras(ltf_df, htf_df):
-    war = pd.Timestamp("2022-02-24")
-    # For 4h data (short period), split by halves
-    mid_ltf = len(ltf_df) // 2
-    h1_ltf, h2_ltf = ltf_df.iloc[:mid_ltf], ltf_df.iloc[mid_ltf:]
-    # Daily: match period
-    mid_htf = len(htf_df) // 2
-    h1_htf, h2_htf = htf_df.iloc[:mid_htf], htf_df.iloc[mid_htf:]
+    # Split both LTF and HTF by the SAME calendar date (midpoint of LTF)
+    mid_date = ltf_df.index[len(ltf_df) // 2]
+    h1_ltf, h2_ltf = ltf_df[ltf_df.index < mid_date], ltf_df[ltf_df.index >= mid_date]
+    h1_htf, h2_htf = htf_df[htf_df.index < mid_date], htf_df[htf_df.index >= mid_date]
     return [
         ("1st_half", h1_ltf, h1_htf),
         ("2nd_half", h2_ltf, h2_htf),
     ]
+
+
+def signal_hours_mask(ltf_df, allowed_hours):
+    """Build entry mask from allowed signal-bar hours.
+
+    Signal at bar i (hour S) → entry at bar i+1.  To allow signals at
+    specific hours, shift the mask so that bar i+1 is masked when bar i
+    is not in ``allowed_hours``.
+    """
+    if not allowed_hours:
+        return None
+    ltf = mtf.prepare_ohlc(ltf_df)
+    signal_mask = ~ltf.index.to_series().dt.hour.isin(allowed_hours)
+    entry_mask = signal_mask.shift(1, fill_value=True)
+    return entry_mask
 
 
 def main():
@@ -195,6 +207,9 @@ def main():
     parser.add_argument("--direction", type=int, default=0, help="1=long, -1=short, 0=both")
     parser.add_argument("--exclude-div-days", type=int, default=0,
                         help="Исключить входы в окне ±N дней от отсечки дивидендов (0=выкл)")
+    parser.add_argument("--signal-hours", type=str, default="",
+                        help="Разрешённые часы UTC для СИГНАЛЬНЫХ баров (запятые, напр. '4,8,12'). "
+                             "Пустая строка = все часы.")
     args = parser.parse_args()
 
     from app.event_filter import load_dividend_events, in_event_window  # noqa: E402
@@ -214,6 +229,9 @@ def main():
     print(f"Horizon={args.horizon} bars, cost={TOTAL_COST_PCT:.2f}%/round-trip, direction={args.direction}")
     if args.exclude_div_days > 0:
         print(f"Dividend filter: ±{args.exclude_div_days} days around ex-div")
+    allowed_hours = sorted(set(int(x.strip()) for x in args.signal_hours.split(",") if x.strip())) if args.signal_hours else []
+    if allowed_hours:
+        print(f"Signal hours (UTC): {allowed_hours}")
     print(f"Tickers: {', '.join(common)}\n")
 
     all_results = []
@@ -225,15 +243,20 @@ def main():
         if len(ltf_df) < 60 or len(htf_df) < 60:
             continue
 
+        # Build combined mask: dividend + signal hours
         event_mask = None
         if args.exclude_div_days > 0:
-            from app.mtf_confirm import prepare_ohlc  # noqa: E402
-            ltf_prepared = prepare_ohlc(ltf_df)
+            ltf_prepared = mtf.prepare_ohlc(ltf_df)
             div_events = load_dividend_events(ticker, args.db)
             if not div_events.empty:
                 event_mask = in_event_window(ltf_prepared.index, div_events,
                                              pre_days=args.exclude_div_days,
                                              post_days=args.exclude_div_days)
+        hour_mask = signal_hours_mask(ltf_df, allowed_hours)
+        if event_mask is not None and hour_mask is not None:
+            event_mask = event_mask | hour_mask
+        elif hour_mask is not None:
+            event_mask = hour_mask
 
         res = run_backtest(ticker, ltf_df, htf_df, pattern=args.pattern,
                            ltf_zone=args.ltf_zone, htf_zone=args.htf_zone,
@@ -246,13 +269,17 @@ def main():
             if len(h_ltf) >= 30 and len(h_htf) >= 30:
                 h_event_mask = None
                 if args.exclude_div_days > 0:
-                    from app.mtf_confirm import prepare_ohlc  # noqa: E402
-                    h_ltf_prepared = prepare_ohlc(h_ltf)
                     h_div_events = load_dividend_events(ticker, args.db)
                     if not h_div_events.empty:
-                        h_event_mask = in_event_window(h_ltf_prepared.index, h_div_events,
+                        h_event_mask = in_event_window(h_ltf.index, h_div_events,
                                                        pre_days=args.exclude_div_days,
                                                        post_days=args.exclude_div_days)
+                h_hour_mask = signal_hours_mask(h_ltf, allowed_hours)
+                if h_event_mask is not None and h_hour_mask is not None:
+                    h_event_mask = h_event_mask | h_hour_mask
+                elif h_hour_mask is not None:
+                    h_event_mask = h_hour_mask
+
                 hr = run_backtest(ticker, h_ltf, h_htf, pattern=args.pattern,
                                   ltf_zone=args.ltf_zone, htf_zone=args.htf_zone,
                                   horizon=args.horizon, direction=args.direction,

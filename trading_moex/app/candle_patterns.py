@@ -137,6 +137,109 @@ def detect_zone_break(df: pd.DataFrame, zone: int = 20) -> tuple[pd.Series, pd.S
     return bull.fillna(False), bear.fillna(False)
 
 
+# ── Свечные паттерны (per-bar детекторы, scalar) ────────────────────────────
+
+def _candle_body(o: float, c: float) -> float:
+    return abs(c - o)
+
+
+def _lower_wick(o: float, h: float, l: float, c: float) -> float:
+    return min(o, c) - l
+
+
+def _upper_wick(o: float, h: float, l: float, c: float) -> float:
+    return h - max(o, c)
+
+
+def is_bullish_pinbar(o: float, h: float, l: float, c: float, wick_ratio: float = 2.0) -> bool:
+    """Молот: тело в верхней части, длинная нижняя тень >= wick_ratio * тело."""
+    body = _candle_body(o, c)
+    if body <= 0:
+        return False
+    return _lower_wick(o, h, l, c) >= wick_ratio * body and _upper_wick(o, h, l, c) <= body
+
+
+def is_bearish_pinbar(o: float, h: float, l: float, c: float, wick_ratio: float = 2.0) -> bool:
+    """Падающая звезда: тело в нижней части, длинная верхняя тень."""
+    body = _candle_body(o, c)
+    if body <= 0:
+        return False
+    return _upper_wick(o, h, l, c) >= wick_ratio * body and _lower_wick(o, h, l, c) <= body
+
+
+def is_bullish_engulfing(o: float, h: float, l: float, c: float, po: float, pc: float) -> bool:
+    """Бычье поглощение: тело текущей бычьей свечи полностью поглощает тело предыдущей."""
+    prev_bear = pc < po
+    cur_bull = c > o
+    return prev_bear and cur_bull and min(o, c) < min(po, pc) and max(o, c) > max(po, pc)
+
+
+def is_bearish_engulfing(o: float, h: float, l: float, c: float, po: float, pc: float) -> bool:
+    """Медвежье поглощение."""
+    prev_bull = pc > po
+    cur_bear = c < o
+    return prev_bull and cur_bear and min(o, c) < min(po, pc) and max(o, c) > max(po, pc)
+
+
+def volume_confirms(vol: float, avg_vol: float, vol_mult: float, vol_period: int) -> bool:
+    """Подтверждение сигнала объёмом: объём свечи не ниже среднего с множителем.
+
+    ``vol_period <= 0`` — фильтр выключен; при NaN/нулевом среднем (тёплый
+    период индикатора) требуем просто ненулевой объём.
+    """
+    if vol_period <= 0:
+        return True
+    if avg_vol != avg_vol or avg_vol <= 0:
+        return vol > 0
+    return vol >= vol_mult * avg_vol
+
+
+def bulls_dominate(high: float, low: float, close: float, bull_frac: float) -> bool:
+    """Доля «быков» на свече: close ближе к high, чем к low (покупки двигают цену).
+
+    ``bull_frac <= 0`` — выключено; при нулевом диапазоне свечи — False.
+    """
+    if bull_frac <= 0:
+        return True
+    rng = high - low
+    if rng <= 0:
+        return False
+    return (close - low) / rng >= bull_frac
+
+
+def pinbar_position(df: pd.DataFrame, wick_ratio: float = 2.0) -> pd.Series:
+    """Вход на бычьем пин-баре (молот), выход на медвежьем (падающая звезда)."""
+    o, h, l, c = df["open"].values, df["high"].values, df["low"].values, df["close"].values
+    pos = np.zeros(len(df), dtype=int)
+    cur = 0
+    for i in range(1, len(df)):
+        if cur == 0:
+            if is_bullish_pinbar(o[i], h[i], l[i], c[i], wick_ratio):
+                cur = 1
+        elif is_bearish_pinbar(o[i], h[i], l[i], c[i], wick_ratio):
+            cur = 0
+        pos[i] = cur
+    return pd.Series(pos, index=df.index)
+
+
+def engulfing_position(df: pd.DataFrame) -> pd.Series:
+    """Вход на бычьем поглощении, выход на медвежьем поглощении."""
+    o = df["open"].values
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+    pos = np.zeros(len(df), dtype=int)
+    cur = 0
+    for i in range(1, len(df)):
+        if cur == 0:
+            if is_bullish_engulfing(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1]):
+                cur = 1
+        elif is_bearish_engulfing(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1]):
+            cur = 0
+        pos[i] = cur
+    return pd.Series(pos, index=df.index)
+
+
 # Словарь паттернов: имя → (детектор возвращает пару (bull, bear) | флаги).
 # Направление события: bull → +1 (ожидаем рост), bear → −1 (ожидаем падение).
 PATTERNS: dict[str, tuple[str, tuple[str, str]]] = {

@@ -2,6 +2,10 @@
 
 Используются live-циклом и покрываются юнит-тестами. Backtrader-стратегии
 в ``strategies.py`` повторяют ту же логику для бэктеста.
+
+Свечные паттерны (pinbar, engulfing, volume_confirms, bulls_dominate) —
+канонический дом: ``candle_patterns.py``. Здесьkept для обратной совместимости
+(``strategies.py`` импортирует через ``sig.*``).
 """
 
 import numpy as np

@@ -10,6 +10,7 @@ import backtrader as bt
 import numpy as np
 import pandas as pd
 
+from . import candle_patterns as candle_module
 from . import fib_pullback as fibp
 from . import kinetic as kinetic_module
 from . import risk as risk_module
@@ -2008,6 +2009,182 @@ class KineticMomentumStrategy(TradeRecordingStrategy):
                 self._open_short(float(self.data.close[0]))
 
 
+# bt-параметры пробоя зоны (CandlePatterns). Статистическое обоснование:
+# scripts/candle_pattern_research.py — на дневках пробой зоны (close за пределы
+# диапазона предыдущих N баров) имеет наибольшую вероятность продолжения.
+_ZONE_BREAK_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("direction", 1),
+    ("zone", 20),
+    ("strong_candle", 1),
+    ("atr_k", 1.0),
+    ("body_ratio_min", 0.6),
+    ("exit_zone", 0),
+)
+
+
+class ZoneBreakStrategy(TradeRecordingStrategy):
+    """Пробой зоны консолидации (трендовое продолжение).
+
+    Зона = диапазон (high/low) предыдущих ``zone`` баров. Лонг открывается при
+    «свежем» пробое вверх (close > зоны после пребывания внутри), при
+    ``strong_candle=1`` — только если бар пробоя имеет длинное тело (>= atr_k*ATR,
+    body_ratio >= body_ratio_min) — статистически это сильнейший сигнал на дневках.
+
+    ``direction``: 1 = только лонг, -1 = только шорт, 0 = оба (default 1).
+    ``exit_zone``: 0 = выход на обратном пробое той же зоны (за ``zone`` баров),
+    иначе — пробой зоны за ``exit_zone`` баров. SL/TP по ATR как страховка.
+    """
+
+    params = _ZONE_BREAK_PARAMS_TUPLE + (("window", 300),)
+
+    def __init__(self):
+        super().__init__()
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        self._z_dir = 0
+        self._sl_order = None
+        self._tp_order = None
+
+    def _frame(self) -> pd.DataFrame:
+        m = min(int(self.data.buflen()), int(self.p.window))
+        m = max(m, max(int(self.p.zone), int(self.p.exit_zone) or 1) + 3)
+
+        def col(name):
+            line = getattr(self.data, name)
+            return [float(line[-k]) for k in range(m - 1, -1, -1)]
+
+        return pd.DataFrame(
+            {
+                "open": col("open"),
+                "high": col("high"),
+                "low": col("low"),
+                "close": col("close"),
+                "volume": col("volume"),
+            },
+            index=range(m),
+        )
+
+    def _state(self) -> dict:
+        df = self._frame()
+        exit_zone = int(self.p.exit_zone) or int(self.p.zone)
+        st = candle_module.zone_break_state(
+            df,
+            zone=int(self.p.zone),
+            strong_candle=int(self.p.strong_candle),
+            atr_period=int(self.p.atr_period),
+            atr_k=float(self.p.atr_k),
+            body_ratio_min=float(self.p.body_ratio_min),
+        )
+        # Выходная зона может отличаться от входной (exit_zone).
+        if exit_zone != int(self.p.zone):
+            st2 = candle_module.zone_break_state(
+                df, zone=exit_zone, strong_candle=0,
+                atr_period=int(self.p.atr_period),
+            )
+            st["xl"], st["xh"] = st2["xl"], st2["xh"]
+        st["close"] = float(df["close"].iloc[-1])
+        return st
+
+    def _atr_value(self) -> float:
+        val = float(self.atr_ind[0])
+        return 0.0 if val != val or val <= 0 else val
+
+    def _risk_size(self, price: float, stop_dist: float) -> int:
+        return risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, stop_dist, price
+        )
+
+    def _open_long(self, price: float) -> None:
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = self._risk_size(price, stop_dist)
+        if size > 0:
+            self.buy(size=size)
+
+    def _open_short(self, price: float) -> None:
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = self._risk_size(price, stop_dist)
+        if size > 0:
+            self.sell(size=size)
+
+    def _place_bracket(self) -> None:
+        if self.position.size == 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = abs(self.position.size)
+        if self.position.size > 0:
+            self._sl_order = self.sell(exectype=bt.Order.Stop,
+                                       price=price - stop_dist, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit,
+                                       price=price + stop_dist * float(self.p.rr_ratio), size=size)
+        else:
+            self._sl_order = self.buy(exectype=bt.Order.Stop,
+                                      price=price + stop_dist, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit,
+                                      price=price - stop_dist * float(self.p.rr_ratio), size=size)
+
+    def _cancel_bracket(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        size = self.position.size
+        if order.isbuy():
+            if size > 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+                self._z_dir = 0
+        else:
+            if size < 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+                self._z_dir = 0
+
+    def _close(self) -> None:
+        self._cancel_bracket()
+        if self.position.size:
+            self.close()
+        else:
+            self._z_dir = 0
+
+    def next(self):
+        st = self._state()
+        close = st["close"]
+        # Выход: обратный пробой зоны (закрытие ниже xl для лонга / выше xh для шорта)
+        if self._z_dir != 0:
+            if self._z_dir == 1 and close < st["xl"]:
+                self._close()
+                return
+            if self._z_dir == -1 and close > st["xh"]:
+                self._close()
+                return
+        if self.position.size == 0 and self._z_dir == 0:
+            if int(self.p.direction) >= 0 and st["bull_break"]:
+                self._z_dir = 1
+                self._open_long(close)
+            elif int(self.p.direction) <= 0 and st["bear_break"]:
+                self._z_dir = -1
+                self._open_short(close)
+
+
 STRATEGIES = {
     "sma_cross": {
         "name": "SMA Crossover",
@@ -2211,6 +2388,22 @@ STRATEGIES = {
             {"key": "v_dir", "label": "Требовать согласие скорости (1 = да)", "type": "int", "default": 1},
             {"key": "cool_bars", "label": "Выход: баров против позиции", "type": "int", "default": 2},
             {"key": "min_hold", "label": "Мин. удержание, баров", "type": "int", "default": 0},
+        ],
+    },
+    "zone_break": {
+        "name": "Пробой зоны (свечной паттерн-продолжение)",
+        "cls": ZoneBreakStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR (страховка)", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+            {"key": "direction", "label": "Направление: 1=лонг, -1=шорт, 0=оба", "type": "int", "default": 1},
+            {"key": "zone", "label": "Зона: период диапазона (high/low), баров", "type": "int", "default": 20},
+            {"key": "strong_candle", "label": "Требовать длинное тело на баре пробоя (1 = да)", "type": "int", "default": 1},
+            {"key": "atr_k", "label": "Сильная свеча: тело ≥ k×ATR", "type": "float", "default": 1.0},
+            {"key": "body_ratio_min", "label": "Сильная свеча: тело ≥ доли диапазона", "type": "float", "default": 0.6},
+            {"key": "exit_zone", "label": "Выход: зона за N баров (0 = та же)", "type": "int", "default": 0},
         ],
     },
 }

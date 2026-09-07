@@ -809,6 +809,22 @@ def _kinetic_signal(df: pd.DataFrame, **kwargs):
     return kinetic.kinetic_position(df, **params)
 
 
+def _zone_break_signal(df: pd.DataFrame, **kwargs):
+    """Обёртка пробоя зоны: чистая логика из ``candle_patterns.zone_break_position``.
+
+    Параметры риск-менеджмента (risk_pct, atr_* и пр.) из kwargs удаляются.
+
+    ⚠️ НЕ внесена в SIGNAL_FUNCS намеренно: стратегия не подтверждена бэктестом
+    (см. INSTRUCTIONS.md) и не должна быть доступна в live-цикле до подтверждения.
+    """
+    from . import candle_patterns as cpattern
+
+    params = {k: v for k, v in kwargs.items()
+              if k in ("zone", "direction", "strong_candle", "atr_period",
+                       "atr_k", "body_ratio_min", "exit_zone")}
+    return cpattern.zone_break_position(df, **params)
+
+
 SIGNAL_FUNCS = {
     "sma_cross": sma_cross_position,
     "rsi": rsi_position,

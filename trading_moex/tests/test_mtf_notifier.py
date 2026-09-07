@@ -1,5 +1,6 @@
 """Tests for MTF Confirmation signal notifier (synthetic data + isolated DB)."""
 
+import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.mtf_notifier import (  # noqa: E402
     run_mtf_scan,
     _scan_ticker,
     _watchlist,
+    _needs_sync,
 )
 
 
@@ -209,3 +211,54 @@ class TestRunMtfScan:
         })())
         result = await run_mtf_scan()
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# mtf_data_sync_task / _needs_sync
+# ---------------------------------------------------------------------------
+
+class TestDataSync:
+    def test_needs_sync_when_no_data(self):
+        assert _needs_sync("NOTHING", "4h") is True
+
+    def test_no_sync_for_fresh_data(self):
+        # save candle with begin = now → max(begin) свежий → sync не нужен
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        idx = pd.date_range(end=now, periods=8, freq="4h")
+        df = pd.DataFrame({
+            "open": [1.0] * 8, "high": [1.1] * 8, "low": [0.9] * 8,
+            "close": [1.05] * 8, "volume": [100] * 8,
+            "begin": [str(i) for i in idx],
+        }, index=idx)
+        storage.save_candles("FRESH", "4h", df)
+        assert _needs_sync("FRESH", "4h") is False
+
+    @pytest.mark.asyncio
+    async def test_data_sync_task_fetches_stale(self, monkeypatch):
+        """mtf_data_sync_task качает только те тикеры/периоды, где данные stale."""
+        calls: list[tuple[str, str]] = []
+
+        def fake_fetch(ticker, period, start, end):
+            calls.append((ticker, period))
+            return None
+
+        fake_cfg = type("C", (), {"TRADER_MTF_TICKERS": ["STALE1", "FRESH"]})()
+        monkeypatch.setattr("app.mtf_notifier.trading_config", fake_cfg)
+        monkeypatch.setattr("app.mtf_notifier._needs_sync", lambda t, p: t == "STALE1")
+        # data импортируется внутри функции как from . import data → патчим app.data
+        monkeypatch.setattr(
+            "app.data.fetch_history",
+            fake_fetch,
+        )
+        import app.mtf_notifier as mn
+        original_sleep = mn.asyncio.sleep
+        mn.asyncio.sleep = lambda s: (_ for _ in ()).throw(asyncio.CancelledError())
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await mn.mtf_data_sync_task()
+        finally:
+            mn.asyncio.sleep = original_sleep
+        assert ("STALE1", "4h") in calls
+        assert ("STALE1", "1day") in calls
+        assert not any(t == "FRESH" for t, _ in calls)

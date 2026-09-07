@@ -153,6 +153,45 @@ async def run_mtf_scan() -> list[dict]:
     return sent
 
 
+# ── Доскачивание данных (4h + 1day) ─────────────────────────────────────────
+
+_MTF_SYNC_HOURS = 6  # период повторной синхронизации данных
+
+
+def _needs_sync(ticker: str, period: str) -> bool:
+    last = storage.last_candle_time(ticker, period)
+    if last is None:
+        return True
+    last_dt = datetime.fromisoformat(last)
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_dt) > timedelta(hours=_MTF_SYNC_HOURS)
+
+
+async def mtf_data_sync_task() -> None:
+    """Фоновая синхронизация 4h+1day свечей MTF-тикеров с MOEX."""
+    from . import data as data_module
+
+    while True:
+        try:
+            for ticker in _watchlist():
+                for period in ("4h", "1day"):
+                    if not _needs_sync(ticker, period):
+                        continue
+                    try:
+                        end = date.today()
+                        start = end - timedelta(days=400)
+                        await asyncio.to_thread(data_module.fetch_history, ticker, period, start, end)
+                        logger.info("Свечи синхронизированы: %s %s", ticker, period)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Синхронизация %s %s не удалась: %s", period, ticker, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка цикла синхронизации MTF: %s", exc)
+        await asyncio.sleep(3600)
+
+
 # ── Планировщик ─────────────────────────────────────────────────────────────
 
 def _next_scan_delay(now: datetime | None = None) -> float:

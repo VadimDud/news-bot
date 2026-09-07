@@ -823,6 +823,8 @@ Halves-тест проходит: 1-я половина маргинально �
 - Модуль: `app/mtf_notifier.py` (по образцу `elliott_notifier.py`)
 - Дедуп: таблица `mtf_signals` (ticker + signal_ts + side)
 - Расписание: скан в 08:00, 12:00, 16:00 UTC (после закрытия 4h-баров)
+- Data sync: `mtf_data_sync_task` докачивает 4h+1day для MTF-тикеров (в т.ч. MTSS,
+  которого нет в fib-watchlist) каждые ~6ч
 - Тикеры: `TRADER_MTF_TICKERS` — 8 подтверждённых (CHMF, GAZP, LKOH, MTSS, NLMK, NVTK, T, TATN)
 - Часы сигнала: `TRADER_MTF_SIGNAL_HOURS` = [4,8,12] UTC (07:00–15:00 MSK)
 - Включение: `TRADER_MTF_ENABLED=true` (дефолт)

@@ -35,6 +35,7 @@ import pandas as pd  # noqa: E402
 
 from app import mtf_confirm as mtf  # noqa: E402
 from app.elliott_candles import classify_candles, detect_waves  # noqa: E402
+from scripts.backtest_mtf_confirm import honest_trades as _baseline_trades  # noqa: E402
 
 DEFAULT_DB = ROOT / "trading_moex" / "data" / "trader_4h.db"
 ALL_TICKERS = ["SBER", "LKOH", "GAZP", "TATN", "NVTK", "CHMF", "NLMK", "MOEX", "T", "MTSS"]
@@ -128,10 +129,12 @@ def honest_trades_elliott(
     htf_zone: int = 20,
     direction: int = 0,
     signal_hours: list[int] | None = None,
+    no_tp: bool = False,
 ) -> list[dict]:
-    """MTF entry + Elliott-wave TP.
+    """MTF entry + Elliott-wave TP (or wave-filter-only exit close+time_cap).
 
     Entry on open of bar after signal. TP = entry ± k × wave1_amplitude.
+    If no_tp=True: no TP, exit at close after time_cap bars (wave filter only).
     Exit: limit fill within time_cap bars, or close at time_cap.
     """
     ltf = mtf.prepare_ohlc(ltf_df)
@@ -148,11 +151,13 @@ def honest_trades_elliott(
     else:
         wave_df = classify_candles(htf_df.copy())
 
-    # Build signal hours mask
+    # Build signal hours mask: allow entry at bar i+1 iff SIGNAL bar i's hour in allowed
+    # Matches production: signal on bar hour S → entry on next bar
     if signal_hours:
-        sig_mask = ~ltf.index.to_series().dt.hour.isin(signal_hours)
+        signal_ok = ltf.index.to_series().dt.hour.isin(signal_hours)
+        entry_mask = signal_ok.shift(1, fill_value=False)  # True = entry allowed
     else:
-        sig_mask = pd.Series(False, index=ltf.index)
+        entry_mask = pd.Series(True, index=ltf.index)
 
     sig_np = sig.to_numpy(dtype=int)
     opens = ltf["open"].to_numpy(dtype=float)
@@ -169,34 +174,46 @@ def honest_trades_elliott(
 
     for i in range(len(sig_np) - 1):
         if not in_trade:
-            if sig_np[i] != 0 and not sig_mask.iloc[i + 1]:
+            if sig_np[i] != 0 and entry_mask.iloc[i + 1]:
                 # Signal at bar i → entry at bar i+1
                 side = sig_np[i]
                 entry_bar = i + 1
                 entry_side = side
                 entry_price = opens[entry_bar]
 
-                # Find wave 1-2 pair before signal bar on wave TF
+                in_trade = True
+                tp_hit_bar = None
+                if no_tp:
+                    pair = None
                 signal_time = ltf.index[i]
-                # Map signal time to wave_df index position
-                # For 4h: same df. For 1day: find the day containing signal_time
                 if wave_tf == "4h":
+                    # 4h: same df, wave pos = signal bar itself (causal: color known at close)
                     wave_pos = wave_df.index.searchsorted(signal_time, side="right") - 1
                 else:
-                    wave_pos = wave_df.index.searchsorted(signal_time, side="right") - 1
+                    # 1day: ONLY completed daily bars (begin < signal date's midnight)
+                    # The forming daily bar (begin = signal date 00:00) is excluded
+                    completed_mask = wave_df.index < signal_time.normalize()
+                    if not completed_mask.any():
+                        in_trade = False
+                        continue
+                    wave_pos = int(completed_mask.sum()) - 1
 
                 if wave_pos < 0:
+                    in_trade = False
                     continue
 
                 pair = last_wave12_before(wave_df, wave_pos)
                 if pair is None:
+                    in_trade = False
                     continue
                 if (side == 1 and pair["direction"] != "long") or \
                    (side == -1 and pair["direction"] != "short"):
+                    in_trade = False
                     continue
 
                 L = pair["wave1_amp"]
                 if L <= 0:
+                    in_trade = False
                     continue
 
                 if side == 1:
@@ -209,7 +226,7 @@ def honest_trades_elliott(
         else:
             bars_held = i - entry_bar + 1
             # Check if TP was hit during this bar
-            if tp_hit_bar is None:
+            if tp_hit_bar is None and not no_tp:
                 if entry_side == 1:
                     # long: TP is above entry
                     if highs[i] >= tp_price:
@@ -241,7 +258,7 @@ def honest_trades_elliott(
                     "entry_price": entry_price,
                     "exit_price": exit_price,
                     "tp_price": tp_price,
-                    "wave1_amp": pair["wave1_amp"],
+                    "wave1_amp": pair["wave1_amp"] if pair is not None else 0.0,
                     "tp_hit": tp_hit_bar is not None,
                     "pnl_pct": pnl_pct,
                     "pnl_net_pct": pnl_pct - TOTAL_COST_PCT,
@@ -263,11 +280,12 @@ def run_backtest(
     htf_zone: int = 20,
     direction: int = 0,
     signal_hours: list[int] | None = None,
+    no_tp: bool = False,
 ) -> dict:
     trades = honest_trades_elliott(
         ltf_df, htf_df, wave_tf=wave_tf, k=k, time_cap=time_cap,
         pattern=pattern, ltf_zone=ltf_zone, htf_zone=htf_zone,
-        direction=direction, signal_hours=signal_hours,
+        direction=direction, signal_hours=signal_hours, no_tp=no_tp,
     )
     if not trades:
         return {
@@ -294,6 +312,44 @@ def run_backtest(
     else:
         sharpe = 0.0
 
+    return {
+        "ticker": ticker,
+        "trades": n,
+        "win_raw": round(win_raw, 1),
+        "win_net": round(win_net, 1),
+        "pnl_net": round(pnl_net, 2),
+        "avg_pnl_net_pct": round(avg_pnl, 2),
+        "max_dd_pct": round(max_dd, 2),
+        "sharpe": round(sharpe, 2),
+        "tp_hits": tp_hits,
+        "tp_hit_rate": round(tp_hits / n * 100, 1),
+    }
+
+
+def _summarize_trades(ticker, pnls_raw, pnls_net, tp_hits, time_cap):
+    """Summarize raw PnL lists into standard dict."""
+    if not pnls_net:
+        return {
+            "ticker": ticker, "trades": 0, "win_raw": 0, "win_net": 0,
+            "pnl_net": 0, "avg_pnl_net_pct": 0, "max_dd_pct": 0,
+            "sharpe": 0, "tp_hits": 0, "tp_hit_rate": 0,
+        }
+    pnls = np.array(pnls_net)
+    wins_raw = np.array(pnls_raw)
+    n = len(pnls)
+    win_raw = float((wins_raw > 0).sum()) / n * 100.0
+    win_net = float((pnls > 0).sum()) / n * 100.0
+    pnl_net = float(pnls.sum())
+    avg_pnl = float(pnls.mean())
+    cum = np.cumsum(pnls)
+    peak = np.maximum.accumulate(cum)
+    dd = peak - cum
+    max_dd = float(dd.max()) if len(dd) > 0 else 0.0
+    if n > 1 and pnls.std() > 0:
+        trades_per_year = 252.0 / max(time_cap, 1)
+        sharpe = float(pnls.mean() / pnls.std() * np.sqrt(trades_per_year))
+    else:
+        sharpe = 0.0
     return {
         "ticker": ticker,
         "trades": n,
@@ -350,32 +406,34 @@ def main():
         print(f"Нет тикеров с {args.ltf} + 1day в {args.db}")
         return
 
-    # Baseline: close + 6 bars (same as backtest_mtf_confirm)
-    print(f"=== MTF + Elliott TP: wave_tf={args.wave_tf} k={args.k} time_cap={args.time_cap} ===")
+    # Grid: TRUE baseline + wave-filter control + Elliott TP configs
+    print(f"=== MTF + Elliott TP: corrected grid (signal-hours mask, causal 1day) ===")
     print(f"Pattern={args.pattern}, LTF={args.ltf}, HTF=1day, cost={TOTAL_COST_PCT:.2f}%")
     print(f"Signal hours (UTC): {allowed_hours}")
     print(f"Tickers: {', '.join(common)}\n")
 
-    # Grid: (wave_tf, k, time_cap) + baseline
     configs = [
-        ("4h",  1.0,   6,  "baseline_4h_h6"),
-        ("4h",  1.0,  12,  "Elliott_4h_k1_h12"),
-        ("4h",  1.0,  24,  "Elliott_4h_k1_h24"),
-        ("4h",  1.618, 6,  "Elliott_4h_k1618_h6"),
-        ("4h",  1.618, 12, "Elliott_4h_k1618_h12"),
-        ("4h",  1.618, 24, "Elliott_4h_k1618_h24"),
-        ("1day", 1.0,   6, "Elliott_1d_k1_h6"),
-        ("1day", 1.0,  12, "Elliott_1d_k1_h12"),
-        ("1day", 1.0,  24, "Elliott_1d_k1_h24"),
-        ("1day", 1.618, 6, "Elliott_1d_k1618_h6"),
-        ("1day", 1.618, 12, "Elliott_1d_k1618_h12"),
-        ("1day", 1.618, 24, "Elliott_1d_k1618_h24"),
+        ("baseline", "TRUE_BASELINE_close6",  None, None, 6),
+        ("control",  "CTRL_wavefilt_close6_4h",  "4h",  None, 6),
+        ("control",  "CTRL_wavefilt_close6_1d", "1day", None, 6),
+        ("elliott",  "Elliott_4h_k1_h6",    "4h",  1.0,   6),
+        ("elliott",  "Elliott_4h_k1_h12",   "4h",  1.0,  12),
+        ("elliott",  "Elliott_4h_k1_h24",   "4h",  1.0,  24),
+        ("elliott",  "Elliott_4h_k1618_h6", "4h",  1.618, 6),
+        ("elliott",  "Elliott_4h_k1618_h12","4h",  1.618, 12),
+        ("elliott",  "Elliott_4h_k1618_h24","4h",  1.618, 24),
+        ("elliott",  "Elliott_1d_k1_h6",    "1day", 1.0,   6),
+        ("elliott",  "Elliott_1d_k1_h12",   "1day", 1.0,  12),
+        ("elliott",  "Elliott_1d_k1_h24",   "1day", 1.0,  24),
+        ("elliott",  "Elliott_1d_k1618_h6", "1day", 1.618, 6),
+        ("elliott",  "Elliott_1d_k1618_h12","1day", 1.618, 12),
+        ("elliott",  "Elliott_1d_k1618_h24","1day", 1.618, 24),
     ]
 
     # For baseline, use simple time-cap without Elliott TP (wave_tf irrelevant)
     all_grid_results = []
 
-    for cfg_wtf, cfg_k, cfg_h, cfg_name in configs:
+    for cfg_type, cfg_name, cfg_wtf, cfg_k, cfg_h in configs:
         results = []
         halves = {"1st_half": [], "2nd_half": []}
 
@@ -385,24 +443,55 @@ def main():
             if len(ltf_df) < 60 or len(htf_df) < 60:
                 continue
 
-            res = run_backtest(
-                ticker, ltf_df, htf_df,
-                wave_tf=cfg_wtf, k=cfg_k, time_cap=cfg_h,
-                pattern=args.pattern, ltf_zone=args.ltf_zone,
-                htf_zone=args.htf_zone, direction=args.direction,
-                signal_hours=allowed_hours,
-            )
+            if cfg_type == "baseline":
+                # TRUE BASELINE: backtest_mtf_confirm.honest_trades (no wave filter)
+                from app import mtf_confirm as _mtf_base
+                event_mask = None
+                if allowed_hours:
+                    ltf_prepared = _mtf_base.prepare_ohlc(ltf_df)
+                    signal_ok = ltf_prepared.index.to_series().dt.hour.isin(allowed_hours)
+                    event_mask = ~signal_ok.shift(1, fill_value=True)  # mask non-allowed signal bars
+                trades = _baseline_trades(
+                    ltf_df, htf_df, pattern=args.pattern, ltf_zone=args.ltf_zone,
+                    htf_zone=args.htf_zone, direction=args.direction, horizon=cfg_h,
+                    event_mask=event_mask,
+                )
+                pnls_net = [t["pnl_net_pct"] for t in trades]
+                pnls_raw = [t["pnl_pct"] for t in trades]
+                tp_hits = 0
+                tp_rate = 0.0
+                res = _summarize_trades(ticker, pnls_raw, pnls_net, tp_hits, cfg_h)
+            else:
+                is_no_tp = cfg_type == "control"
+                res = run_backtest(
+                    ticker, ltf_df, htf_df,
+                    wave_tf=cfg_wtf, k=cfg_k or 1.0, time_cap=cfg_h,
+                    pattern=args.pattern, ltf_zone=args.ltf_zone,
+                    htf_zone=args.htf_zone, direction=args.direction,
+                    signal_hours=allowed_hours, no_tp=is_no_tp,
+                )
             results.append(res)
 
             for name, h_ltf, h_htf in _split_eras(ltf_df, htf_df):
                 if len(h_ltf) >= 30 and len(h_htf) >= 30:
-                    hr = run_backtest(
-                        ticker, h_ltf, h_htf,
-                        wave_tf=cfg_wtf, k=cfg_k, time_cap=cfg_h,
-                        pattern=args.pattern, ltf_zone=args.ltf_zone,
-                        htf_zone=args.htf_zone, direction=args.direction,
-                        signal_hours=allowed_hours,
-                    )
+                    if cfg_type == "baseline":
+                        h_trades = _baseline_trades(
+                            h_ltf, h_htf, pattern=args.pattern, ltf_zone=args.ltf_zone,
+                            htf_zone=args.htf_zone, direction=args.direction,
+                            horizon=cfg_h, event_mask=None,
+                        )
+                        h_pnls_net = [t["pnl_net_pct"] for t in h_trades]
+                        h_pnls_raw = [t["pnl_pct"] for t in h_trades]
+                        hr = _summarize_trades(ticker, h_pnls_raw, h_pnls_net, 0, cfg_h)
+                    else:
+                        hr = run_backtest(
+                            ticker, h_ltf, h_htf,
+                            wave_tf=cfg_wtf, k=cfg_k or 1.0, time_cap=cfg_h,
+                            pattern=args.pattern, ltf_zone=args.ltf_zone,
+                            htf_zone=args.htf_zone, direction=args.direction,
+                            signal_hours=allowed_hours,
+                            no_tp=(cfg_type == "control"),
+                        )
                     halves[name].append(hr)
 
         if not results:
@@ -469,7 +558,10 @@ def main():
     # Per-ticker detail for best config
     if all_grid_results:
         best = max(all_grid_results, key=lambda x: x["pnl_net"])
-        cfg_wtf, cfg_k, cfg_h = best["wave_tf"], best["k"], best["time_cap"]
+        best_wtf = best.get("wave_tf")
+        best_k = best.get("k")
+        best_h = best["time_cap"]
+        best_is_baseline = best_wtf is None and best_k is None
         print(f"\n=== Per-ticker detail: {best['name']} ===")
         print(f"{'ticker':8s} {'trades':>6s} {'win%':>6s} {'pnl%':>8s} {'sharpe':>7s} {'tp%':>6s}")
         print("-" * 50)
@@ -478,13 +570,26 @@ def main():
             htf_df = load_df(ticker, args.db, "1day")
             if len(ltf_df) < 60 or len(htf_df) < 60:
                 continue
-            res = run_backtest(
-                ticker, ltf_df, htf_df,
-                wave_tf=cfg_wtf, k=cfg_k, time_cap=cfg_h,
-                pattern=args.pattern, ltf_zone=args.ltf_zone,
-                htf_zone=args.htf_zone, direction=args.direction,
-                signal_hours=allowed_hours,
-            )
+            if best_is_baseline:
+                trades = _baseline_trades(
+                    ltf_df, htf_df, pattern=args.pattern, ltf_zone=args.ltf_zone,
+                    htf_zone=args.htf_zone, direction=args.direction,
+                    horizon=best_h, event_mask=None,
+                )
+                res = _summarize_trades(
+                    ticker,
+                    [t["pnl_pct"] for t in trades],
+                    [t["pnl_net_pct"] for t in trades],
+                    0, best_h,
+                )
+            else:
+                res = run_backtest(
+                    ticker, ltf_df, htf_df,
+                    wave_tf=best_wtf, k=best_k or 1.0, time_cap=best_h,
+                    pattern=args.pattern, ltf_zone=args.ltf_zone,
+                    htf_zone=args.htf_zone, direction=args.direction,
+                    signal_hours=allowed_hours,
+                )
             if res["trades"] > 0:
                 flag = " ◀" if res["pnl_net"] > 0 else ""
                 print(f"{ticker:8s} {res['trades']:6d} {res['win_net']:6.1f} "

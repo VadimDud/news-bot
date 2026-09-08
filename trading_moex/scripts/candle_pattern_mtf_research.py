@@ -224,6 +224,7 @@ def main():
                     htf_ma_fast=filter_kw.get("htf_ma_fast", 20),
                     htf_ma_slow=filter_kw.get("htf_ma_slow", 50),
                     htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0),
+                    causal_daily=True,
                 )
                 if stats.empty:
                     continue
@@ -243,7 +244,8 @@ def main():
                                         htf_filter=filter_kw.get("htf_filter", "zone"),
                                         htf_ma_fast=filter_kw.get("htf_ma_fast", 20),
                                         htf_ma_slow=filter_kw.get("htf_ma_slow", 50),
-                                        htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0))
+                                        htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0),
+                                        causal_daily=True)
                     if not s1.empty:
                         h1_all.append(s1)
                 if len(h2_ltf) >= 30 and len(h2_htf) >= 30:
@@ -253,7 +255,8 @@ def main():
                                         htf_filter=filter_kw.get("htf_filter", "zone"),
                                         htf_ma_fast=filter_kw.get("htf_ma_fast", 20),
                                         htf_ma_slow=filter_kw.get("htf_ma_slow", 50),
-                                        htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0))
+                                        htf_atr_neutral=filter_kw.get("htf_atr_neutral", 0.0),
+                                        causal_daily=True)
                     if not s2.empty:
                         h2_all.append(s2)
 

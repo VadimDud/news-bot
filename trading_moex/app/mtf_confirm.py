@@ -96,12 +96,19 @@ def htf_ma_state(
 def htf_state_at(
     ltf_df: pd.DataFrame,
     htf_state: pd.Series,
+    causal_daily: bool = False,
 ) -> pd.Series:
     """Привязать HTF-состояние к каждому бару LTF (cause-only).
 
     Для бара ``t`` (LTF) берётся состояние последнего HTF-бара, чей timestamp
-    строго **< t** (не ≤). Это исключает lookahead: дневной бар, содержащий
-    текущий часовой бар, ещё не закрыт.
+    строго **< t** (не ≤). Это исключает lookahead: HTF-бар, содержащий текущий
+    LTF-бар, ещё не закрыт.
+
+    ``causal_daily=True``: дополнительно исключает HTF-бары, начавшиеся в тот же
+    календарный день, что и LTF-бар. Нужно для дневного HTF + 4h LTF, потому что
+    дневной бар с begin=00:00 UTC ещё формируется внутри торгового дня, а в
+    бэктесте его close — это конец дня (future data). В production MOEX daily
+    bar обновляется интрадей, поэтому там causal_daily=False (поведение по умолчанию).
     """
     ltf = prepare_ohlc(ltf_df)
     ltf_idx = ltf.index
@@ -113,6 +120,10 @@ def htf_state_at(
     for i, t in enumerate(ltf_idx.values):
         # Последний HTF-бар строго до t
         mask = htf_ts < t
+        if causal_daily:
+            # Исключаем HTF-бары, начавшиеся в тот же день (ещё формируются)
+            day_start = np.datetime64(t.astype("M8[D]"))
+            mask = mask & (htf_ts < day_start)
         if mask.any():
             out[i] = int(htf_arr[mask][-1])
     return pd.Series(out, index=ltf_idx)
@@ -205,6 +216,7 @@ def mtf_signal(
     htf_ma_fast: int = 20,
     htf_ma_slow: int = 50,
     htf_atr_neutral: float = 0.0,
+    causal_daily: bool = False,
 ) -> pd.Series:
     """Комбинированный сигнал: LTF-паттерн + HTF-фильтр.
 
@@ -215,13 +227,16 @@ def mtf_signal(
     bear), 0 (нет сигнала / фильтр не подтверждает).
 
     ``direction``: 1 = только лонг, -1 = только шорт, 0 = обе стороны.
+
+    ``causal_daily``: передать в ``htf_state_at`` для исключения формирующегося
+    дневного бара (честный бэктест). В production оставить False.
     """
     sig = ltf_signals(ltf_df, pattern=pattern, zone=ltf_zone,
                       atr_period=atr_period, atr_k=atr_k, body_ratio_min=body_ratio_min)
     htf_state = _compute_htf_state(htf_df, htf_filter=htf_filter, htf_zone=htf_zone,
                                     htf_ma_fast=htf_ma_fast, htf_ma_slow=htf_ma_slow,
                                     htf_atr_neutral=htf_atr_neutral)
-    filt = htf_state_at(ltf_df, htf_state)
+    filt = htf_state_at(ltf_df, htf_state, causal_daily=causal_daily)
     sig_np = sig.to_numpy(dtype=int)
     filt_np = filt.to_numpy(dtype=int)
     out = np.zeros(len(sig), dtype=int)
@@ -254,6 +269,7 @@ def mtf_stats(
     htf_ma_fast: int = 20,
     htf_ma_slow: int = 50,
     htf_atr_neutral: float = 0.0,
+    causal_daily: bool = False,
 ) -> pd.DataFrame:
     """Статистика продолжения: с фильтром vs без фильтра vs базовая ставка.
 
@@ -265,7 +281,7 @@ def mtf_stats(
     htf_state = _compute_htf_state(htf_df, htf_filter=htf_filter, htf_zone=htf_zone,
                                     htf_ma_fast=htf_ma_fast, htf_ma_slow=htf_ma_slow,
                                     htf_atr_neutral=htf_atr_neutral)
-    filt = htf_state_at(ltf, htf_state)
+    filt = htf_state_at(ltf, htf_state, causal_daily=causal_daily)
     close = ltf["close"].to_numpy(dtype=float)
     atr_arr = _atr(ltf, atr_period).to_numpy(dtype=float)
     atr_frac = np.where((atr_arr > 0) & (close > 0) & ~np.isnan(atr_arr), atr_arr / close, np.nan)

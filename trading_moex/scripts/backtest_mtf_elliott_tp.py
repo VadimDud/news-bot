@@ -143,7 +143,8 @@ def honest_trades_elliott(
         return []
 
     sig = mtf.mtf_signal(ltf, htf, pattern=pattern, ltf_zone=ltf_zone,
-                          htf_zone=htf_zone, direction=direction)
+                          htf_zone=htf_zone, direction=direction,
+                          causal_daily=True)
 
     # Classify wave TF for Elliott wave detection
     if wave_tf == "4h":

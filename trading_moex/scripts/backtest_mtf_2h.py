@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Честная проверка MTF-стратегии: LTF паттерн + HTF зона-фильтр.
+"""MTF backtest with 2h HTF filter (no lookahead — both timeframes intraday).
 
-Live-faithful модель:
-- Сигнал на закрытии LTF-бара (паттерн + HTF фильтр)
-- Вход на open следующего LTF-бара
-- Выход на close бара через horizon баров (фиксированный горизонт)
-- Комиссия 0.05%/сторона + slippage 0.05% (по умолчанию)
+LTF: 4h candles (signal: zone_break)
+HTF: 2h candles (zone filter)
+No causal_daily needed — 2h candles are intraday, no future data.
 
 Usage (from trading_moex/):
-    python3 scripts/backtest_mtf_confirm.py
-    python3 scripts/backtest_mtf_confirm.py --pattern zone_break --ltf 4h
+    python3 scripts/backtest_mtf_2h.py
+    python3 scripts/backtest_mtf_2h.py --pattern zone_break --ltf-zone 20 --htf-zone 20
 """
 from __future__ import annotations
 
@@ -58,13 +56,11 @@ def honest_trades(
     htf_zone: int = 20,
     horizon: int = 6,
     direction: int = 0,
-    min_hold: int = 0,
     event_mask: pd.Series | None = None,
 ) -> list[dict]:
-    """Live-faithful сделки: сигнал на close, вход на open следующего бара.
+    """Live-faithful trades: signal on close, entry on open of next bar.
 
-    ``event_mask`` — boolean Series (aligned to LTF index), True = бар в запретном
-    окне (отсечка дивидендов и т.п.), вход запрещён.
+    HTF = 2h (intraday, no lookahead). No causal_daily needed.
     """
     ltf = mtf.prepare_ohlc(ltf_df)
     htf = mtf.prepare_ohlc(htf_df)
@@ -73,7 +69,7 @@ def honest_trades(
 
     sig = mtf.mtf_signal(ltf, htf, pattern=pattern, ltf_zone=ltf_zone,
                           htf_zone=htf_zone, direction=direction,
-                          causal_daily=True)
+                          causal_daily=False)
     sig_np = sig.to_numpy(dtype=int)
     opens = ltf["open"].to_numpy(dtype=float)
     closes = ltf["close"].to_numpy(dtype=float)
@@ -88,7 +84,7 @@ def honest_trades(
 
     for i in range(len(sig_np) - 1):
         if not in_trade:
-            if sig_np[i] != 0 and not ev_mask[i + 1]:  # проверяем entry_bar = i+1
+            if sig_np[i] != 0 and not ev_mask[i + 1]:
                 entry_bar = i + 1
                 entry_side = sig_np[i]
                 in_trade = True
@@ -98,7 +94,6 @@ def honest_trades(
                 exit_bar = min(entry_bar + horizon, len(opens) - 1)
                 entry_price = opens[entry_bar]
                 exit_price = closes[exit_bar]
-                # Для шорта: PnL = (entry - exit) / entry
                 if entry_side == 1:
                     pnl_pct = (exit_price / entry_price - 1.0) * 100.0
                 else:
@@ -128,7 +123,7 @@ def run_backtest(
     direction: int = 0,
     event_mask: pd.Series | None = None,
 ) -> dict:
-    """Полный бэктест для одного тикера."""
+    """Full backtest for one ticker."""
     trades = honest_trades(ltf_df, htf_df, pattern=pattern, ltf_zone=ltf_zone,
                            htf_zone=htf_zone, horizon=horizon, direction=direction,
                            event_mask=event_mask)
@@ -146,12 +141,10 @@ def run_backtest(
     win_net = float((pnls > 0).sum()) / n * 100.0
     pnl_net = float(pnls.sum())
     avg_pnl = float(pnls.mean())
-    # Max DD of cumulative pnl
     cum = np.cumsum(pnls)
     peak = np.maximum.accumulate(cum)
     dd = peak - cum
     max_dd = float(dd.max()) if len(dd) > 0 else 0.0
-    # Sharpe (annualized, ~252 trading days / horizon)
     if len(pnls) > 1 and pnls.std() > 0:
         trades_per_year = 252.0 / max(horizon, 1)
         sharpe = float(pnls.mean() / pnls.std() * np.sqrt(trades_per_year))
@@ -172,7 +165,6 @@ def run_backtest(
 
 
 def _split_eras(ltf_df, htf_df):
-    # Split both LTF and HTF by the SAME calendar date (midpoint of LTF)
     mid_date = ltf_df.index[len(ltf_df) // 2]
     h1_ltf, h2_ltf = ltf_df[ltf_df.index < mid_date], ltf_df[ltf_df.index >= mid_date]
     h1_htf, h2_htf = htf_df[htf_df.index < mid_date], htf_df[htf_df.index >= mid_date]
@@ -183,12 +175,6 @@ def _split_eras(ltf_df, htf_df):
 
 
 def signal_hours_mask(ltf_df, allowed_hours):
-    """Build entry mask from allowed signal-bar hours.
-
-    Signal at bar i (hour S) → entry at bar i+1.  To allow signals at
-    specific hours, shift the mask so that bar i+1 is masked when bar i
-    is not in ``allowed_hours``.
-    """
     if not allowed_hours:
         return None
     ltf = mtf.prepare_ohlc(ltf_df)
@@ -198,38 +184,38 @@ def signal_hours_mask(ltf_df, allowed_hours):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MTF honest backtest")
+    parser = argparse.ArgumentParser(description="MTF backtest with 2h HTF filter")
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--ltf", default="4h", choices=["60min", "4h"])
+    parser.add_argument("--htf", default="2h", choices=["2h", "1day"])
     parser.add_argument("--pattern", default="zone_break")
     parser.add_argument("--ltf-zone", type=int, default=20)
     parser.add_argument("--htf-zone", type=int, default=20)
     parser.add_argument("--horizon", type=int, default=6)
     parser.add_argument("--direction", type=int, default=0, help="1=long, -1=short, 0=both")
     parser.add_argument("--exclude-div-days", type=int, default=0,
-                        help="Исключить входы в окне ±N дней от отсечки дивидендов (0=выкл)")
+                        help="Exclude entries ±N days from ex-dividend (0=off)")
     parser.add_argument("--signal-hours", type=str, default="",
-                        help="Разрешённые часы UTC для СИГНАЛЬНЫХ баров (запятые, напр. '4,8,12'). "
-                             "Пустая строка = все часы.")
+                        help="Allowed signal-bar hours UTC (comma-separated)")
     args = parser.parse_args()
 
     from app.event_filter import load_dividend_events, in_event_window  # noqa: E402
 
     con = sqlite3.connect(args.db)
     ltf_rows = con.execute("SELECT DISTINCT ticker FROM candles WHERE period=?", (args.ltf,)).fetchall()
-    htf_rows = con.execute("SELECT DISTINCT ticker FROM candles WHERE period='1day'").fetchall()
+    htf_rows = con.execute("SELECT DISTINCT ticker FROM candles WHERE period=?", (args.htf,)).fetchall()
     con.close()
     ltf_tickers = [r[0] for r in ltf_rows]
     htf_tickers = [r[0] for r in htf_rows]
     common = sorted(set(ltf_tickers) & set(htf_tickers))
     if not common:
-        print(f"Нет тикеров с {args.ltf} + 1day в {args.db}")
+        print(f"No tickers with {args.ltf} + {args.htf} in {args.db}")
         return
 
-    print(f"=== MTF Honest Backtest: {args.pattern} | LTF={args.ltf} zone={args.ltf_zone} | HTF=1day zone={args.htf_zone} ===")
+    print(f"=== MTF Backtest: {args.pattern} | LTF={args.ltf} zone={args.ltf_zone} | HTF={args.htf} zone={args.htf_zone} ===")
     print(f"Horizon={args.horizon} bars, cost={TOTAL_COST_PCT:.2f}%/round-trip, direction={args.direction}")
     if args.exclude_div_days > 0:
-        print(f"Dividend filter: ±{args.exclude_div_days} days around ex-div")
+        print(f"Dividend filter: ±{args.exclude_div_days} days")
     allowed_hours = sorted(set(int(x.strip()) for x in args.signal_hours.split(",") if x.strip())) if args.signal_hours else []
     if allowed_hours:
         print(f"Signal hours (UTC): {allowed_hours}")
@@ -240,11 +226,10 @@ def main():
 
     for ticker in common:
         ltf_df = load_df(ticker, args.db, args.ltf)
-        htf_df = load_df(ticker, args.db, "1day")
+        htf_df = load_df(ticker, args.db, args.htf)
         if len(ltf_df) < 60 or len(htf_df) < 60:
             continue
 
-        # Build combined mask: dividend + signal hours
         event_mask = None
         if args.exclude_div_days > 0:
             ltf_prepared = mtf.prepare_ohlc(ltf_df)
@@ -265,7 +250,6 @@ def main():
                            event_mask=event_mask)
         all_results.append(res)
 
-        # Halves
         for name, h_ltf, h_htf in _split_eras(ltf_df, htf_df):
             if len(h_ltf) >= 30 and len(h_htf) >= 30:
                 h_event_mask = None
@@ -288,7 +272,7 @@ def main():
                 halves_results[name].append(hr)
 
     if not all_results:
-        print("Нет результатов")
+        print("No results")
         return
 
     df = pd.DataFrame(all_results)

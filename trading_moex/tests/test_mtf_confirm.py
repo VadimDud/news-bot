@@ -117,13 +117,39 @@ def test_htf_state_at_no_lookahead():
 
 def test_htf_state_at_causality():
     """Добавление будущего часового бара не меняет aligned state на прошлом."""
-    daily = _daily_rising(60)
+    daily = _daily_rising(100)
     state = mtf_confirm.htf_zone_state(daily, zone=20)
     h1 = _hourly_series(200)
     h2 = _hourly_series(201)
     a1 = mtf_confirm.htf_state_at(h1, state)
     a2 = mtf_confirm.htf_state_at(h2, state)
     assert (a1.values == a2.values[: len(a1)]).all()
+
+
+def test_htf_state_at_causal_daily_excludes_same_day():
+    """causal_daily=True не использует дневной бар текущего дня для intraday баров."""
+    # Two daily bars: day 1 close=100, day 2 close=120 (rising)
+    daily = pd.DataFrame({
+        "open": [95, 100], "high": [105, 125], "low": [90, 98],
+        "close": [100, 120], "volume": [1000, 1000],
+    }, index=pd.to_datetime(["2025-07-01 00:00", "2025-07-02 00:00"]))
+    state = mtf_confirm.htf_zone_state(daily, zone=1)
+    # 4h bars on day 2: at 04:00 and 12:00
+    ltf = pd.DataFrame({
+        "open": [118, 122], "high": [119, 123], "low": [117, 121],
+        "close": [119, 121], "volume": [100, 100],
+    }, index=pd.to_datetime(["2025-07-02 04:00", "2025-07-02 12:00"]))
+
+    # Default: uses forming day-2 daily bar (close=120) → state likely +1
+    aligned_default = mtf_confirm.htf_state_at(ltf, state, causal_daily=False)
+    # Causal: excludes day-2 bar, uses day-1 bar (close=100) → state = 0
+    aligned_causal = mtf_confirm.htf_state_at(ltf, state, causal_daily=True)
+
+    assert len(aligned_default) == 2
+    assert len(aligned_causal) == 2
+    # Causal should not use day-2 state (which would be +1 if close>prev_high)
+    assert (aligned_causal.values == 0).all(), \
+        "causal_daily must exclude forming daily bar"
 
 
 # ── ltf_signals ───────────────────────────────────────────────────────────────

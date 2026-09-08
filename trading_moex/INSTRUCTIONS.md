@@ -689,6 +689,41 @@ retr_runs, retr_depth), децили + гейт-sweep с переносом.
 только с begin < signal date (без формирующегося бара); entry на open следующего
 бара; TP вычисляется только из wave 1 amplitude (без lookahead). 10 causality тестов.
 
+### Hybrid exit (Elliott TP + baseline fallback) — победитель (2026-09)
+
+**Идея**: взять ВСЕ сигналы baseline (без wave-фильтра), но когда есть волна 1-2
+ пара — использовать Elliott TP (k=1.618) вместо фиксированного close+6.
+ Когда волны нет — exit close+6 (как baseline).
+
+**Результаты** (signal-hours 4/8/12, causal 1day):
+
+| config | trades | win% | pnl% | sharpe | pos/9 | base | tp | tc |
+|---|---|---|---|---|---|---|---|---|
+| BASELINE (close+6) | 211 | 59.1 | +139.25 | 1.96 | 8/9 | 211 | 0 | 0 |
+| **HYBRID_1d_k1618_h6** | **211** | **59.7** | **+150.13** | **2.08** | **8/9** | **128** | **5** | **78** |
+| HYBRID_1d_k1618_h12 | 195 | 58.9 | +155.72 | 1.44 | 9/9 | 126 | 14 | 55 |
+| HYBRID_4h_k1618_h12 | 203 | 58.7 | +132.24 | 1.24 | 9/9 | 131 | 30 | 42 |
+| HYBRID_1d_k1_h12 | 200 | 59.4 | +130.55 | 1.32 | 9/9 | 127 | 22 | 51 |
+
+- base = exit close+6 (нет волны), tp = TP hit, tc = timecap (взята волна, но TP не сработал)
+
+**HYBRID h=6 — лучший**: +150.13% vs baseline +139.25% (+10.88%), **та же ликвидность**
+(211 trades), sharpe 2.08. TP попадает рано (bars 1-4, mean 3.0), 100% win rate.
+**HYBRID h=12**: +155.72% (+16.47%), 195 trades (16 меньше — TP-сделки держатся до
+12 баров, блокируя новые входы), sharpe 1.44, 9/9 positive.
+
+**Паттерн TP-попаданий**:
+- TP попадает редко (6-20%) но **100% win rate** — avg +6.32% (h=6), +5.40% (h=12)
+- Baseline avg pnl: +0.26% → TP avg: +6.32% = **24x лучше**
+- Маленький wave1_amp → TP ближе → выше вероятность попадания (wave1_amp miss=80.85 vs hit=36.95)
+- 61.5% TP попаданий ПОСЛЕ bar 6 — baseline уже закрыл, Elliott TP продолжает ловить ход
+
+**Ключевой инсайт**: Elliott TP не заменяет baseline, а **дополняет** его. Волна 1-2
+пара = ранний предиктор движения. Если TP срабатывает — выход лучший (100% win).
+Если нет — fallback на baseline (close+6). Не нужен wave-фильтр.
+
+**Реализация**: `scripts/backtest_mtf_hybrid.py`, 5 тестов (`tests/test_mtf_hybrid.py`).
+
 ⚠️ **Режим рынка**: весь период тестирования (2022–2026) — военное время,
 MOEX в нисходящем/боковом тренде. Это благоприятно для шорта и неблагоприятно
 для лонга. Если рынок перейдёт в устойчивый восходящий тренд (например, после
@@ -901,6 +936,9 @@ Halves-тест проходит: 1-я половина маргинально �
 - Elliott wave TP (MTF + цель): `trading_moex/scripts/backtest_mtf_elliott_tp.py`
   - Сетка: `--wave-tf 1day --k 1.618 --time-cap 12` (лучшая конфигурация)
   - Тесты: `pytest trading_moex/tests/test_mtf_elliott_tp.py -v`
+- Hybrid exit (Elliott TP + baseline fallback): `trading_moex/scripts/backtest_mtf_hybrid.py`
+  - Лучшая: `--wave-tf 1day --k 1.618 --time-cap 6` (+150.13%, 211 trades)
+  - Тесты: `pytest trading_moex/tests/test_mtf_hybrid.py -v`
 - Статистика MTF Confirmation: `trading_moex/scripts/candle_pattern_mtf_research.py`
 - MTF Confirmation нотификатор (Telegram): `trading_moex/app/mtf_notifier.py`
 - Фильтр дивидендных окон: `trading_moex/app/event_filter.py`

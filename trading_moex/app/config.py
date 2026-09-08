@@ -49,6 +49,11 @@ DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL: str = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
+# Dindindon API (OpenAI-compatible, fallback / primary for news guard)
+DINDINDON_API_KEY: str = os.environ.get("DINDINDON_API_KEY", "")
+DINDINDON_BASE_URL: str = os.environ.get("DINDINDON_BASE_URL", "https://dindindon.ru/v1")
+DINDINDON_MODEL: str = os.environ.get("DINDINDON_MODEL", "kimi-k2.7-code-highspeed")
+
 # ── ROE-signal notifier configuration ─────────────────────────────────────
 # Time of day (UTC) to run the daily ROE signal scan, after MOEX opening (07:00 UTC).
 # Default 08:30 UTC gives ~30 min for candles to appear in the local DB.

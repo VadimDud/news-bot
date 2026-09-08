@@ -61,7 +61,7 @@ async def ai_severity(title: str, summary: str, ticker: str) -> dict:
     Возвращает: {"severity": float (-1..+1), "reason": str}
     Falls back to rule-based severity если AI недоступен.
     """
-    if not config.NEWS_AI_ENABLED or not config.DEEPSEEK_API_KEY:
+    if not config.NEWS_AI_ENABLED or not (config.DINDINDON_API_KEY or config.DEEPSEEK_API_KEY):
         return _rule_based_severity(title, summary)
 
     prompt = _SEVERITY_PROMPT.format(
@@ -69,7 +69,7 @@ async def ai_severity(title: str, summary: str, ticker: str) -> dict:
     )
 
     try:
-        result = await _call_deepseek_severity(prompt)
+        result = await _call_ai_severity(prompt)
         if result and "severity" in result:
             severity = float(result["severity"])
             severity = max(-1.0, min(1.0, severity))
@@ -81,33 +81,46 @@ async def ai_severity(title: str, summary: str, ticker: str) -> dict:
     return _rule_based_severity(title, summary)
 
 
-async def _call_deepseek_severity(prompt: str) -> dict | None:
-    """Direct DeepSeek call for severity scoring (bot.ai_client is async)."""
+async def _call_ai_severity(prompt: str) -> dict | None:
+    """AI call for severity scoring — Dindindon primary, DeepSeek fallback."""
     import httpx
 
-    url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=30, proxy=None) as client:
-        resp = await client.post(url, json={
-            "model": config.DEEPSEEK_MODEL,
-            "messages": [
-                {"role": "system", "content": "Ты финансовый аналитик. Отвечай ТОЛЬКО JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 200,
-        }, headers=headers)
-        if resp.status_code != 200:
-            logger.warning("DeepSeek severity API error %d: %s", resp.status_code, resp.text[:200])
-            return None
-        text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        # Parse JSON (strip markdown fences if present)
-        text = re.sub(r"```json\s*", "", text)
-        text = re.sub(r"```\s*$", "", text)
-        return json.loads(text.strip())
+    # Priority: Dindindon → DeepSeek
+    providers = []
+    if config.DINDINDON_API_KEY:
+        providers.append((config.DINDINDON_BASE_URL, config.DINDINDON_API_KEY, config.DINDINDON_MODEL))
+    if config.DEEPSEEK_API_KEY:
+        providers.append((config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY, config.DEEPSEEK_MODEL))
+
+    for base_url, api_key, model in providers:
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30, proxy=None) as client:
+                resp = await client.post(url, json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "Ты финансовый аналитик. Отвечай ТОЛЬКО JSON."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 200,
+                }, headers=headers)
+                if resp.status_code != 200:
+                    logger.warning("AI severity API error %d (%s): %s", resp.status_code, model, resp.text[:200])
+                    continue
+                text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                text = re.sub(r"```json\s*", "", text)
+                text = re.sub(r"```\s*$", "", text)
+                return json.loads(text.strip())
+        except Exception as e:
+            logger.warning("AI severity call failed (%s): %s", model, e)
+            continue
+
+    return None
 
 
 def _rule_based_severity(title: str, summary: str) -> dict:

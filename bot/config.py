@@ -32,6 +32,11 @@ LMSTUDIO_MODEL: str = os.getenv("LMSTUDIO_MODEL", "local-model")
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
+# Dindindon API (OpenAI-compatible, testing)
+DINDINDON_API_KEY: str = os.getenv("DINDINDON_API_KEY", "")
+DINDINDON_BASE_URL: str = os.getenv("DINDINDON_BASE_URL", "https://dindindon.ru/v1")
+DINDINDON_MODEL: str = os.getenv("DINDINDON_MODEL", "hy3")
+
 # Alibaba DashScope (Qwen) API for financial analysis (fallback)
 DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")

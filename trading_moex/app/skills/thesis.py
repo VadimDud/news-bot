@@ -70,13 +70,13 @@ async def validate_thesis(
     Вызывается только в ручном режиме из дашборда.
     Если API недоступен — возвращает 'unclear' с ошибкой.
     """
-    if not config.DEEPSEEK_API_KEY:
+    if not (config.DINDINDON_API_KEY or config.DEEPSEEK_API_KEY):
         return ThesisResult(
             verdict="unclear",
             claim_clarity=0,
             evidence_quality=0,
             invalidation_clear=False,
-            error="DEEPSEEK_API_KEY не задан",
+            error="AI API ключ не задан (DINDINDON/DEEPSEEK)",
         )
 
     if not thesis_text:
@@ -100,7 +100,7 @@ async def validate_thesis(
     )
 
     try:
-        result = await _call_deepseek_thesis(prompt)
+        result = await _call_ai_thesis(prompt)
         if result and "verdict" in result:
             verdict = result["verdict"]
             if verdict not in ("ready", "unclear", "not_ready"):
@@ -133,38 +133,50 @@ async def validate_thesis(
     )
 
 
-async def _call_deepseek_thesis(prompt: str) -> dict | None:
-    """Вызов DeepSeek для валидации тезиса."""
+async def _call_ai_thesis(prompt: str) -> dict | None:
+    """AI call for thesis validation — Dindindon primary, DeepSeek fallback."""
     import httpx
 
     from ..secrets_guard import sanitize_prompt
 
     safe_prompt = sanitize_prompt(prompt)
 
-    url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=30, proxy=None) as client:
-        resp = await client.post(
-            url,
-            json={
-                "model": config.DEEPSEEK_MODEL,
-                "messages": [
-                    {"role": "system", "content": "Ты финансовый аналитик. Отвечай ТОЛЬКО JSON."},
-                    {"role": "user", "content": safe_prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 400,
-            },
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            logger.warning("DeepSeek thesis API error %d: %s", resp.status_code, resp.text[:200])
-            return None
-        text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        # Parse JSON (strip markdown fences if present)
-        text = re.sub(r"```json\s*", "", text)
-        text = re.sub(r"```\s*$", "", text)
-        return json.loads(text.strip())
+    providers = []
+    if config.DINDINDON_API_KEY:
+        providers.append((config.DINDINDON_BASE_URL, config.DINDINDON_API_KEY, config.DINDINDON_MODEL))
+    if config.DEEPSEEK_API_KEY:
+        providers.append((config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY, config.DEEPSEEK_MODEL))
+
+    for base_url, api_key, model in providers:
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30, proxy=None) as client:
+                resp = await client.post(
+                    url,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "Ты финансовый аналитик. Отвечай ТОЛЬКО JSON."},
+                            {"role": "user", "content": safe_prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 400,
+                    },
+                    headers=headers,
+                )
+                if resp.status_code != 200:
+                    logger.warning("AI thesis API error %d (%s): %s", resp.status_code, model, resp.text[:200])
+                    continue
+                text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                text = re.sub(r"```json\s*", "", text)
+                text = re.sub(r"```\s*$", "", text)
+                return json.loads(text.strip())
+        except Exception as e:
+            logger.warning("AI thesis call failed (%s): %s", model, e)
+            continue
+
+    return None

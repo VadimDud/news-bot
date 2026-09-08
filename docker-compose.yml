@@ -20,6 +20,10 @@ services:
       TINKOFF_SSL_RU_CA: "${TINKOFF_SSL_RU_CA:-true}"
       MOEX_LOGIN: "${MOEX_LOGIN:-}"
       MOEX_PASSWORD: "${MOEX_PASSWORD:-}"
+      # Dindindon API (OpenAI-compatible) for news guard + thesis
+      DINDINDON_API_KEY: "${DINDINDON_API_KEY:-}"
+      DINDINDON_BASE_URL: "${DINDINDON_BASE_URL:-https://dindindon.ru/v1}"
+      DINDINDON_MODEL: "${DINDINDON_MODEL:-kimi-k2.7-code-highspeed}"
       # Прокси только для Telegram-отправки сигналов; MOEX ходит напрямую.
       TRADER_TG_PROXY: "${TRADER_TG_PROXY:-http://127.0.0.1:31533}"
       # MOEX не заблокирован — глобальный прокси контейнеру не нужен.

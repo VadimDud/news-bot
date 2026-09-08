@@ -1,16 +1,18 @@
 """MTF Confirmation: multi-timeframe candle-pattern signal notifier.
 
-После закрытия каждого 4h-бара сканирует watchlist: ищет зон-пробой на LTF,
-подтверждённый дневным зона-режимом (S·F > 0). Отправляет админу в Telegram
-с планом входа/выхода (по бэктесту: open след. бара, close через 6 баров).
+After each 4h bar close, scans watchlist: strong_body pattern on LTF (4h),
+confirmed by 2h zone filter (S·F > 0). Sends admin Telegram notification
+with entry/exit plan (backtested: open next bar, close after 6 bars).
 
-Если Elliott TP включён (TRADER_MTF_ELLIOTT_TP_ENABLED) и на wave TF найдена
-волна 1-2 — в сообщении указывается TP-цена. Иначе — стандартный план close+6.
+Short-only (direction=-1): strategy only profitable on shorts.
+HTF = 2h (intraday, no lookahead — no causal_daily needed).
 
-Режим работы: только уведомления (без автоторговли).
-Дедупликация: PK (ticker, signal_ts, side) — повторный скан не шлёт тот же сигнал.
-Время сигнала: разрешены только бары 4/8/12 UTC (07:00–15:00 MSK),
-исключены вечер (16 UTC = 19:00 MSK) и ночь (20 UTC) — худший win-rate.
+If Elliott TP enabled and wave 1-2 found on wave TF — TP price shown.
+Otherwise — standard close+6 plan.
+
+Mode: notifications only (no auto-trading).
+Dedup: PK (ticker, signal_ts, side).
+Signal hours: only bars 4/8/12 UTC (07:00–15:00 MSK).
 """
 from __future__ import annotations
 
@@ -44,16 +46,16 @@ async def _send_tg(text: str) -> bool:
 
 def format_mtf_signal(ticker: str, side: str, close_price: float,
                       htf_state: int, bar_dt: datetime,
-                      wave_info: dict | None = None) -> str:
-    """Текст Telegram-сообщения о MTF-сигнале.
+                      wave_info: dict | None = None,
+                      htf_period: str = "2h") -> str:
+    """Telegram message for MTF signal.
 
-    ``wave_info`` — dict с полями: wave1_amp, tp_price, k, wave_tf, time_cap
-    или None (нет волны → стандартный план close+6).
+    ``wave_info`` — dict with wave1_amp, tp_price, k, wave_tf, time_cap or None.
     """
     now_msk = datetime.now(MSK).strftime("%H:%M %d.%m.%Y")
     direction = "ШОРТ" if side == "bear" else "ЛОНГ"
     signal_dir = "📉" if side == "bear" else "📈"
-    htf_label = "БЫЧИЙ (close > max(H[20]))" if htf_state == 1 else "МЕДВЕЖЬИЙ (close < min(L[20]))"
+    htf_label = "БЫЧИЙ (close > max(H[15]))" if htf_state == 1 else "МЕДВЕЖЬИЙ (close < min(L[15]))"
 
     bar_msk = bar_dt.strftime("%H:%M %d.%m.%Y") + " МСК"
     entry_time = (bar_dt + timedelta(hours=4)).strftime("%H:%M") + " МСК"
@@ -64,7 +66,7 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
         w1amp = wave_info["wave1_amp"]
         wtf = wave_info["wave_tf"]
         cap = wave_info["time_cap"]
-        cap_hours = cap * 4  # 4h bars → hours
+        cap_hours = cap * 4
 
         if side == "bear":
             plan_lines = [
@@ -93,10 +95,10 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
 
     lines = [
         f"{signal_dir} MTF СИГНАЛ {direction} — {ticker}",
-        f"Зон-пробой + дневная зона • {now_msk} МСК",
+        f"Strong body + {htf_period} зона • {now_msk} МСК",
         "",
         f"Цена (close бара): {close_price:.2f} ₽",
-        f"Дневной режим: {htf_label}",
+        f"{htf_period.upper()} режим: {htf_label}",
         f"Сигнал на баре: {bar_msk} (4h)",
         "",
         plan_header,
@@ -129,21 +131,27 @@ def _watchlist() -> list[str]:
 # ── Скан одного тикера ─────────────────────────────────────────────────────
 
 async def _scan_ticker(ticker: str) -> dict | None:
-    """Сканировать тикер: mtf_signal на последнем закрытом баре + фильтр часов."""
+    """Scan ticker: mtf_signal on last closed bar + hour filter."""
     ltf = _load_candles(ticker, "4h")
-    htf = _load_candles(ticker, "1day")
+    htf_period = trading_config.TRADER_MTF_HTF_PERIOD
+    htf = _load_candles(ticker, htf_period)
     if ltf is None or htf is None or len(ltf) < 50 or len(htf) < 25:
         return None
 
-    sig = mtf_confirm.mtf_signal(ltf, htf, pattern="zone_break",
-                                  ltf_zone=20, htf_zone=20)
+    pattern = trading_config.TRADER_MTF_PATTERN
+    direction = trading_config.TRADER_MTF_DIRECTION
+    ltf_zone = trading_config.TRADER_MTF_LTF_ZONE
+    htf_zone = trading_config.TRADER_MTF_HTF_ZONE
+
+    sig = mtf_confirm.mtf_signal(ltf, htf, pattern=pattern,
+                                  ltf_zone=ltf_zone, htf_zone=htf_zone,
+                                  direction=direction)
     if sig.empty or sig.iloc[-1] == 0:
         return None
 
     last_idx = len(sig) - 1
     last_bar_hour = ltf.index[last_idx].hour
 
-    # Фильтр по часам: пропускаем бары вне разрешённых
     allowed_hours = trading_config.TRADER_MTF_SIGNAL_HOURS
     if last_bar_hour not in allowed_hours:
         logger.debug("Пропуск %s: бар %d UTC вне разрешённых %s",
@@ -158,17 +166,14 @@ async def _scan_ticker(ticker: str) -> dict | None:
     signal_ts = bar_dt.isoformat()
     close_price = float(ltf["close"].iloc[last_idx])
 
-    # Дедуп
     prev = storage.get_mtf_signal(ticker)
     if prev["signal_ts"] == signal_ts and prev["side"] == side:
         logger.debug("MTF-сигнал для %s уже отправлен (ts=%s, side=%s)", ticker, signal_ts, side)
         return None
 
-    # Дневной режим для сообщения
-    htf_state_series = mtf_confirm.htf_zone_state(htf, zone=20)
+    htf_state_series = mtf_confirm.htf_zone_state(htf, zone=htf_zone)
     htf_state_val = int(htf_state_series.iloc[-1]) if len(htf_state_series) > 0 else 0
 
-    # Elliott TP: поиск волны 1-2 для определения Take-Profit
     wave_info = None
     if trading_config.TRADER_MTF_ELLIOTT_TP_ENABLED:
         try:
@@ -178,7 +183,6 @@ async def _scan_ticker(ticker: str) -> dict | None:
             k = trading_config.TRADER_MTF_ELLIOTT_K
             time_cap = trading_config.TRADER_MTF_ELLIOTT_TIME_CAP
 
-            # Классифицируем свечи wave TF
             if wave_tf == "4h":
                 wave_df = classify_candles(ltf.copy())
             else:
@@ -192,7 +196,6 @@ async def _scan_ticker(ticker: str) -> dict | None:
                 wave_pos = int(completed_mask.sum()) - 1 if completed_mask.any() else -1
 
             if wave_pos >= 0:
-                # Ищем wave 1-2 пару: две последовательные волны разного направления
                 waves = detect_waves(wave_df)
                 pairs = []
                 for wi in range(len(waves) - 1):
@@ -200,21 +203,19 @@ async def _scan_ticker(ticker: str) -> dict | None:
                     w2 = waves[wi + 1]
                     if w1.direction == w2.direction:
                         continue
-                    direction = "long" if w1.direction == "bull" else "short"
+                    direction_str = "long" if w1.direction == "bull" else "short"
                     w1_slice = wave_df.iloc[w1.start_idx:w1.end_idx + 1]
                     w1_amp = float(w1_slice["high"].max() - w1_slice["low"].min())
                     pairs.append({
                         "pair_end_idx": w2.end_idx,
-                        "direction": direction,
+                        "direction": direction_str,
                         "wave1_amp": w1_amp,
                     })
 
-                # Ближайшая пара, завершённая до сигнала
                 valid = [p for p in pairs if p["pair_end_idx"] < wave_pos]
                 if valid:
                     pair = valid[-1]
                     pair_direction = pair["direction"]
-                    # Проверяем соответствие: long → bull wave, short → bear wave
                     if (side == "bull" and pair_direction == "long") or \
                        (side == "bear" and pair_direction == "short"):
                         L = pair["wave1_amp"]
@@ -235,7 +236,8 @@ async def _scan_ticker(ticker: str) -> dict | None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Elliott TP расчёт для %s не удался: %s", ticker, exc)
 
-    msg = format_mtf_signal(ticker, side, close_price, htf_state_val, bar_dt, wave_info=wave_info)
+    msg = format_mtf_signal(ticker, side, close_price, htf_state_val, bar_dt,
+                            wave_info=wave_info, htf_period=htf_period)
     sent = await _send_tg(msg)
 
     if sent:
@@ -278,13 +280,15 @@ def _needs_sync(ticker: str, period: str) -> bool:
 
 
 async def mtf_data_sync_task() -> None:
-    """Фоновая синхронизация 4h+1day свечей MTF-тикеров с MOEX."""
+    """Background sync of 4h+HTF candles for MTF tickers from MOEX."""
     from . import data as data_module
+
+    htf_period = trading_config.TRADER_MTF_HTF_PERIOD
 
     while True:
         try:
             for ticker in _watchlist():
-                for period in ("4h", "1day"):
+                for period in ("4h", htf_period):
                     if not _needs_sync(ticker, period):
                         continue
                     try:

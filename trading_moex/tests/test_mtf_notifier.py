@@ -157,22 +157,24 @@ class TestScanTicker:
     @pytest.mark.asyncio
     async def test_no_signal_when_bar_hour_not_allowed(self):
         """Бар с hour=16 (19:00 MSK) не отправляется."""
-        # 4h-данные: 50+ баров, финальный на 16 UTC — zone_break bear на фоне downtrend
         closes_4h = list(np.linspace(200, 100, 70))
-        closes_daily = list(np.linspace(220, 100, 200))
+        closes_htf = list(np.linspace(220, 100, 200))
 
         ltf = _make_4h_closes(closes_4h)
-        htf = _make_daily_closes(closes_daily)
+        htf = _make_daily_closes(closes_htf)
 
         _save_candles("TEST", ltf, "4h")
-        _save_candles("TEST", htf, "1day")
+        _save_candles("TEST", htf, "2h")
 
         with patch("app.mtf_notifier.trading_config") as mc:
             mc.TRADER_MTF_SIGNAL_HOURS = [4, 8, 12]
+            mc.TRADER_MTF_PATTERN = "strong_body"
+            mc.TRADER_MTF_DIRECTION = -1
+            mc.TRADER_MTF_LTF_ZONE = 20
+            mc.TRADER_MTF_HTF_ZONE = 15
+            mc.TRADER_MTF_HTF_PERIOD = "2h"
             with patch("app.mtf_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
-                # Override ltf to end at 16 UTC bar
                 ltf_16 = ltf.copy()
-                # Rename last bar to 16 UTC
                 ltf_16.index = ltf_16.index[:-1].append(
                     pd.DatetimeIndex([pd.Timestamp("2026-03-15 16:00", tzinfo=timezone.utc)])
                 )
@@ -190,23 +192,27 @@ class TestScanTicker:
     async def test_dedup_same_signal_not_resend(self):
         """Тот же сигнал (ts + side) не отправляется повторно."""
         closes_4h = list(np.linspace(200, 100, 70))
-        closes_daily = list(np.linspace(220, 100, 200))
+        closes_htf = list(np.linspace(220, 100, 200))
 
         ltf = _make_4h_closes(closes_4h)
-        htf = _make_daily_closes(closes_daily)
+        htf = _make_daily_closes(closes_htf)
         _save_candles("DEDUP", ltf, "4h")
-        _save_candles("DEDUP", htf, "1day")
+        _save_candles("DEDUP", htf, "2h")
 
         signal_ts = "2026-03-15T08:00:00+00:00"
         storage.save_mtf_signal("DEDUP", signal_ts, "bear", 100.0)
 
         with patch("app.mtf_notifier.trading_config") as mc:
             mc.TRADER_MTF_SIGNAL_HOURS = [4, 8, 12]
+            mc.TRADER_MTF_PATTERN = "strong_body"
+            mc.TRADER_MTF_DIRECTION = -1
+            mc.TRADER_MTF_LTF_ZONE = 20
+            mc.TRADER_MTF_HTF_ZONE = 15
+            mc.TRADER_MTF_HTF_PERIOD = "2h"
             with patch("app.mtf_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
                 with patch("app.mtf_notifier._load_candles") as mock_load:
                     def _load(ticker, period):
                         if period == "4h":
-                            # Force last bar to match saved signal_ts
                             ltf2 = ltf.copy()
                             ltf2.index = ltf2.index[:-1].append(
                                 pd.DatetimeIndex([pd.Timestamp(signal_ts)])
@@ -272,7 +278,7 @@ class TestDataSync:
             calls.append((ticker, period))
             return None
 
-        fake_cfg = type("C", (), {"TRADER_MTF_TICKERS": ["STALE1", "FRESH"]})()
+        fake_cfg = type("C", (), {"TRADER_MTF_TICKERS": ["STALE1", "FRESH"], "TRADER_MTF_HTF_PERIOD": "2h"})()
         monkeypatch.setattr("app.mtf_notifier.trading_config", fake_cfg)
         monkeypatch.setattr("app.mtf_notifier._needs_sync", lambda t, p: t == "STALE1")
         # data импортируется внутри функции как from . import data → патчим app.data
@@ -289,5 +295,5 @@ class TestDataSync:
         finally:
             mn.asyncio.sleep = original_sleep
         assert ("STALE1", "4h") in calls
-        assert ("STALE1", "1day") in calls
+        assert ("STALE1", "2h") in calls
         assert not any(t == "FRESH" for t, _ in calls)

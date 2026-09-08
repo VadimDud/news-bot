@@ -196,15 +196,23 @@ TRADER_MTF_SCANS: list[tuple[int, int]] = [
 TRADER_MTF_SIGNAL_HOURS: list[int] = [
     int(h.strip()) for h in os.environ.get("TRADER_MTF_SIGNAL_HOURS", "4,8,12").split(",") if h.strip()
 ]
-# Подтверждённые тикеры (бэктест win>0 на 13 мес. данных, без MOEX).
+# Подтверждённые тикеры.
 TRADER_MTF_TICKERS: list[str] = [
     t.strip() for t in os.environ.get(
         "TRADER_MTF_TICKERS",
         "CHMF,GAZP,LKOH,MTSS,NLMK,NVTK,T,TATN",
     ).split(",") if t.strip()
 ]
+# LTF паттерн и направление (backtested: strong_body short-only + 2h HTF = +36%)
+TRADER_MTF_PATTERN: str = os.environ.get("TRADER_MTF_PATTERN", "strong_body")
+TRADER_MTF_DIRECTION: int = int(os.environ.get("TRADER_MTF_DIRECTION", "-1"))  # -1=short only
+TRADER_MTF_HORIZON: int = int(os.environ.get("TRADER_MTF_HORIZON", "6"))  # bars to hold
+TRADER_MTF_LTF_ZONE: int = int(os.environ.get("TRADER_MTF_LTF_ZONE", "20"))
+TRADER_MTF_HTF_ZONE: int = int(os.environ.get("TRADER_MTF_HTF_ZONE", "15"))
+# HTF таймфрейм (2h = intraday, no lookahead; 1day = legacy, requires causal_daily)
+TRADER_MTF_HTF_PERIOD: str = os.environ.get("TRADER_MTF_HTF_PERIOD", "2h")
 # Elliott TP: когда волна 1-2 найдена — TP-цена вместо close+6
 TRADER_MTF_ELLIOTT_TP_ENABLED: bool = os.environ.get("TRADER_MTF_ELLIOTT_TP_ENABLED", "true").lower() in ("1", "true")
 TRADER_MTF_ELLIOTT_K: float = float(os.environ.get("TRADER_MTF_ELLIOTT_K", "1.618"))
 TRADER_MTF_ELLIOTT_TIME_CAP: int = int(os.environ.get("TRADER_MTF_ELLIOTT_TIME_CAP", "12"))
-TRADER_MTF_ELLIOTT_WAVE_TF: str = os.environ.get("TRADER_MTF_ELLIOTT_WAVE_TF", "1day")
+TRADER_MTF_ELLIOTT_WAVE_TF: str = os.environ.get("TRADER_MTF_ELLIOTT_WAVE_TF", "2h")

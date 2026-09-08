@@ -198,3 +198,8 @@ TRADER_MTF_TICKERS: list[str] = [
         "CHMF,GAZP,LKOH,MTSS,NLMK,NVTK,T,TATN",
     ).split(",") if t.strip()
 ]
+# Elliott TP: когда волна 1-2 найдена — TP-цена вместо close+6
+TRADER_MTF_ELLIOTT_TP_ENABLED: bool = os.environ.get("TRADER_MTF_ELLIOTT_TP_ENABLED", "true").lower() in ("1", "true")
+TRADER_MTF_ELLIOTT_K: float = float(os.environ.get("TRADER_MTF_ELLIOTT_K", "1.618"))
+TRADER_MTF_ELLIOTT_TIME_CAP: int = int(os.environ.get("TRADER_MTF_ELLIOTT_TIME_CAP", "12"))
+TRADER_MTF_ELLIOTT_WAVE_TF: str = os.environ.get("TRADER_MTF_ELLIOTT_WAVE_TF", "1day")

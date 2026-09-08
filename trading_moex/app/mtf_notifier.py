@@ -4,6 +4,9 @@
 подтверждённый дневным зона-режимом (S·F > 0). Отправляет админу в Telegram
 с планом входа/выхода (по бэктесту: open след. бара, close через 6 баров).
 
+Если Elliott TP включён (TRADER_MTF_ELLIOTT_TP_ENABLED) и на wave TF найдена
+волна 1-2 — в сообщении указывается TP-цена. Иначе — стандартный план close+6.
+
 Режим работы: только уведомления (без автоторговли).
 Дедупликация: PK (ticker, signal_ts, side) — повторный скан не шлёт тот же сигнал.
 Время сигнала: разрешены только бары 4/8/12 UTC (07:00–15:00 MSK),
@@ -40,14 +43,53 @@ async def _send_tg(text: str) -> bool:
 # ── Форматирование ──────────────────────────────────────────────────────────
 
 def format_mtf_signal(ticker: str, side: str, close_price: float,
-                      htf_state: int, bar_dt: datetime) -> str:
-    """Текст Telegram-сообщения о MTF-сигнале."""
+                      htf_state: int, bar_dt: datetime,
+                      wave_info: dict | None = None) -> str:
+    """Текст Telegram-сообщения о MTF-сигнале.
+
+    ``wave_info`` — dict с полями: wave1_amp, tp_price, k, wave_tf, time_cap
+    или None (нет волны → стандартный план close+6).
+    """
     now_msk = datetime.now(MSK).strftime("%H:%M %d.%m.%Y")
     direction = "ШОРТ" if side == "bear" else "ЛОНГ"
     signal_dir = "📉" if side == "bear" else "📈"
     htf_label = "БЫЧИЙ (close > max(H[20]))" if htf_state == 1 else "МЕДВЕЖЬИЙ (close < min(L[20]))"
 
     bar_msk = bar_dt.strftime("%H:%M %d.%m.%Y") + " МСК"
+    entry_time = (bar_dt + timedelta(hours=4)).strftime("%H:%M") + " МСК"
+
+    if wave_info is not None:
+        tp = wave_info["tp_price"]
+        k = wave_info["k"]
+        w1amp = wave_info["wave1_amp"]
+        wtf = wave_info["wave_tf"]
+        cap = wave_info["time_cap"]
+        cap_hours = cap * 4  # 4h bars → hours
+
+        if side == "bear":
+            plan_lines = [
+                f"  Вход: ШОРТ на open {entry_time}",
+                f"  Take-Profit: {tp:.2f} ₽ (−{k}× волна 1, амплитуда {w1amp:.2f})",
+                f"  Стоп: нет (выход по времени — {cap} баров ≈ {cap_hours} ч)",
+                f"  Время удержания: до {cap} 4h-баров",
+                f"  Если TP не сработал → exit на close {cap}-го бара",
+            ]
+        else:
+            plan_lines = [
+                f"  Вход: ЛОНГ на open {entry_time}",
+                f"  Take-Profit: {tp:.2f} ₽ (+{k}× волна 1, амплитуда {w1amp:.2f})",
+                f"  Стоп: нет (выход по времени — {cap} баров ≈ {cap_hours} ч)",
+                f"  Время удержания: до {cap} 4h-баров",
+                f"  Если TP не сработал → exit на close {cap}-го бара",
+            ]
+
+        plan_header = f"📋 План (Elliott TP, волна {wtf}):"
+    else:
+        plan_lines = [
+            f"  Вход: {'ЛОНГ' if side == 'bull' else 'ШОРТ'} на open {entry_time}",
+            f"  Выход: на close через 6 баров (≈ 24 ч)",
+        ]
+        plan_header = "📋 План (baseline):"
 
     lines = [
         f"{signal_dir} MTF СИГНАЛ {direction} — {ticker}",
@@ -57,10 +99,10 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
         f"Дневной режим: {htf_label}",
         f"Сигнал на баре: {bar_msk} (4h)",
         "",
-        f"📋 План:",
-        f"  Вход: на open СЛЕДУЮЩЕГО 4h-бара (~{(bar_dt + timedelta(hours=4)).strftime('%H:%M')} МСК)",
-        f"  Выход: на close через 6 баров (≈ 24 ч)",
-        f"  Комиссия: 0.05%/сторона + 0.05% проскальзывание",
+        plan_header,
+        *plan_lines,
+        "",
+        f"Комиссия: 0.05%/сторона + 0.05% проскальзывание",
         "",
         f"⚠️ Не является индивидуальной инвестиционной рекомендацией.",
     ]
@@ -126,7 +168,74 @@ async def _scan_ticker(ticker: str) -> dict | None:
     htf_state_series = mtf_confirm.htf_zone_state(htf, zone=20)
     htf_state_val = int(htf_state_series.iloc[-1]) if len(htf_state_series) > 0 else 0
 
-    msg = format_mtf_signal(ticker, side, close_price, htf_state_val, bar_dt)
+    # Elliott TP: поиск волны 1-2 для определения Take-Profit
+    wave_info = None
+    if trading_config.TRADER_MTF_ELLIOTT_TP_ENABLED:
+        try:
+            from .elliott_candles import classify_candles, detect_waves
+
+            wave_tf = trading_config.TRADER_MTF_ELLIOTT_WAVE_TF
+            k = trading_config.TRADER_MTF_ELLIOTT_K
+            time_cap = trading_config.TRADER_MTF_ELLIOTT_TIME_CAP
+
+            # Классифицируем свечи wave TF
+            if wave_tf == "4h":
+                wave_df = classify_candles(ltf.copy())
+            else:
+                wave_df = classify_candles(htf.copy())
+
+            signal_time = ltf.index[last_idx]
+            if wave_tf == "4h":
+                wave_pos = wave_df.index.searchsorted(signal_time, side="right") - 1
+            else:
+                completed_mask = wave_df.index < signal_time.normalize()
+                wave_pos = int(completed_mask.sum()) - 1 if completed_mask.any() else -1
+
+            if wave_pos >= 0:
+                # Ищем wave 1-2 пару: две последовательные волны разного направления
+                waves = detect_waves(wave_df)
+                pairs = []
+                for wi in range(len(waves) - 1):
+                    w1 = waves[wi]
+                    w2 = waves[wi + 1]
+                    if w1.direction == w2.direction:
+                        continue
+                    direction = "long" if w1.direction == "bull" else "short"
+                    w1_slice = wave_df.iloc[w1.start_idx:w1.end_idx + 1]
+                    w1_amp = float(w1_slice["high"].max() - w1_slice["low"].min())
+                    pairs.append({
+                        "pair_end_idx": w2.end_idx,
+                        "direction": direction,
+                        "wave1_amp": w1_amp,
+                    })
+
+                # Ближайшая пара, завершённая до сигнала
+                valid = [p for p in pairs if p["pair_end_idx"] < wave_pos]
+                if valid:
+                    pair = valid[-1]
+                    pair_direction = pair["direction"]
+                    # Проверяем соответствие: long → bull wave, short → bear wave
+                    if (side == "bull" and pair_direction == "long") or \
+                       (side == "bear" and pair_direction == "short"):
+                        L = pair["wave1_amp"]
+                        if L > 0:
+                            if side == "bull":
+                                tp_price = close_price + k * L
+                            else:
+                                tp_price = close_price - k * L
+                            wave_info = {
+                                "wave1_amp": L,
+                                "tp_price": tp_price,
+                                "k": k,
+                                "wave_tf": wave_tf,
+                                "time_cap": time_cap,
+                            }
+                            logger.info("Elliott TP для %s: wave1_amp=%.2f, tp=%.2f, k=%.3f, tf=%s",
+                                        ticker, L, tp_price, k, wave_tf)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Elliott TP расчёт для %s не удался: %s", ticker, exc)
+
+    msg = format_mtf_signal(ticker, side, close_price, htf_state_val, bar_dt, wave_info=wave_info)
     sent = await _send_tg(msg)
 
     if sent:

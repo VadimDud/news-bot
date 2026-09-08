@@ -80,6 +80,35 @@ class TestFormat:
         assert "145.50" in msg
         assert "МЕДВЕЖЬИЙ" in msg
 
+    def test_bull_with_wave_tp(self):
+        wave = {"wave1_amp": 45.30, "tp_price": 2651.80, "k": 1.618, "wave_tf": "1day", "time_cap": 12}
+        msg = format_mtf_signal("LKOH", "bull", 2625.50, 1,
+                                datetime(2026, 9, 8, 4, 0, tzinfo=timezone.utc),
+                                wave_info=wave)
+        assert "Elliott TP" in msg
+        assert "2651.80" in msg
+        assert "1.618" in msg
+        assert "45.30" in msg
+        assert "1day" in msg
+        assert "12 4h-баров" in msg
+
+    def test_bear_with_wave_tp(self):
+        wave = {"wave1_amp": 3.20, "tp_price": 160.10, "k": 1.618, "wave_tf": "1day", "time_cap": 12}
+        msg = format_mtf_signal("GAZP", "bear", 165.30, -1,
+                                datetime(2026, 9, 8, 4, 0, tzinfo=timezone.utc),
+                                wave_info=wave)
+        assert "Elliott TP" in msg
+        assert "160.10" in msg
+        assert "ШОРТ" in msg
+
+    def test_no_wave_baseline_plan(self):
+        msg = format_mtf_signal("GAZP", "bear", 165.30, -1,
+                                datetime(2026, 9, 8, 4, 0, tzinfo=timezone.utc),
+                                wave_info=None)
+        assert "baseline" in msg
+        assert "close через 6 баров" in msg
+        assert "Elliott" not in msg
+
 
 # ---------------------------------------------------------------------------
 # Storage roundtrip

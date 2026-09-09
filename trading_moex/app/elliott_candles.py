@@ -423,6 +423,10 @@ class Cycle:
     direction: Literal["bull", "bear"]   # wave direction (signal is opposite)
     quality: float
     trades: list[Trade] = field(default_factory=list)
+    # Lowest realized/floating PnL reached while the cycle was open. This is
+    # needed because a recovered Martingale/hold-add cycle can hide a large
+    # intra-cycle drawdown if metrics use only its final PnL.
+    worst_pnl: float = 0.0
 
     @property
     def total_pnl(self) -> float:
@@ -448,6 +452,7 @@ def _run_cycle(
     base_pct: float = 0.25,
     max_steps: int = 3,
     commission: float = 0.0005,
+    slippage: float = 0.0,
     start_idx: int | None = None,
     hold_add: int = 0,
     hold_days: int = 1,
@@ -463,9 +468,9 @@ def _run_cycle(
       open→close одной свечи; при минусе — ре-вход удвоенным лотом на open
       следующей свечи (позиция ночь не переносится);
     - ``hold_add=1``: при минусе на закрытии свечи позиция НЕ закрывается,
-      а на открытии следующей свечи ДОБАВЛЯЕТСЯ лот (25→50→100%); выход
-      всей позиции при суммарном плюсе на закрытии или после последнего
-      шага (перенос через ночь реален: гэп учитывается).
+      а на открытии следующей свечи добавляется лот (25%→50%→остаток 25%;
+      суммарная позиция не выше 100% капитала); выход всей позиции при
+      суммарном плюсе на закрытии или после последнего шага.
 
     Returns (cycle, new_equity, last_consumed_idx).
     """
@@ -488,8 +493,10 @@ def _run_cycle(
     # свечей снижает влияние затрат на сделку (см. scripts/backtest_elliott_v2.py).
     if hold_days > 1:
         if cur_idx + hold_days - 1 < len(df):
-            entry = float(df["open"].iloc[cur_idx])
-            exit_ = float(df["close"].iloc[cur_idx + hold_days - 1])
+            entry_raw = float(df["open"].iloc[cur_idx])
+            exit_raw = float(df["close"].iloc[cur_idx + hold_days - 1])
+            entry = entry_raw * (1 + slippage) if fade_dir == "long" else entry_raw * (1 - slippage)
+            exit_ = exit_raw * (1 - slippage) if fade_dir == "long" else exit_raw * (1 + slippage)
             size_pct = base_pct
             size_value = equity_at_start * min(size_pct, 1.0)
             if fade_dir == "long":
@@ -515,14 +522,25 @@ def _run_cycle(
                 quality=cycle.quality,
             ))
             equity += pnl
+            # Include daily closes and next-session opens while a position is held.
+            for mark_idx in range(cur_idx, cur_idx + hold_days):
+                marks = [float(df["close"].iloc[mark_idx])]
+                if mark_idx > cur_idx:
+                    marks.append(float(df["open"].iloc[mark_idx]))
+                for mark_raw in marks:
+                    mark = mark_raw * (1 - slippage) if fade_dir == "long" else mark_raw * (1 + slippage)
+                    gross = (mark - entry) / entry if fade_dir == "long" else (entry - mark) / entry
+                    cycle.worst_pnl = min(cycle.worst_pnl, size_value * (gross - cost))
             last_consumed = cur_idx + hold_days - 1
         return cycle, equity, last_consumed
 
     if not hold_add:
         while step < max_steps and cur_idx < len(df):
             step += 1
-            entry = float(df["open"].iloc[cur_idx])
-            exit_ = float(df["close"].iloc[cur_idx])
+            entry_raw = float(df["open"].iloc[cur_idx])
+            exit_raw = float(df["close"].iloc[cur_idx])
+            entry = entry_raw * (1 + slippage) if fade_dir == "long" else entry_raw * (1 - slippage)
+            exit_ = exit_raw * (1 - slippage) if fade_dir == "long" else exit_raw * (1 + slippage)
             size_pct = base_pct * (2 ** (step - 1))
             size_value = equity_at_start * min(size_pct, 1.0)  # cap at 100 %
 
@@ -550,6 +568,7 @@ def _run_cycle(
                 wave_len=wave.candle_count,
                 quality=cycle.quality,
             ))
+            cycle.worst_pnl = min(cycle.worst_pnl, cycle.total_pnl)
             equity += pnl
             last_consumed = cur_idx
 
@@ -563,14 +582,33 @@ def _run_cycle(
     # ── hold_add: удержание убыточной позиции + добавление на открытии ──────
     legs: list[dict] = []  # {price, size, dt, step}
     while step < max_steps and cur_idx < len(df):
+        # A carried position is exposed to the next session's opening gap before
+        # the new lot can be added. Record that mark-to-market drawdown.
+        if legs:
+            mark_raw = float(df["open"].iloc[cur_idx])
+            mark = mark_raw * (1 - slippage) if fade_dir == "long" else mark_raw * (1 + slippage)
+            open_pnl = 0.0
+            for leg in legs:
+                gross = (mark - leg["price"]) / leg["price"] if fade_dir == "long" else (leg["price"] - mark) / leg["price"]
+                open_pnl += leg["size"] * (gross - 2 * commission)
+            cycle.worst_pnl = min(cycle.worst_pnl, open_pnl)
         step += 1
-        entry = float(df["open"].iloc[cur_idx])
-        size_pct = base_pct * (2 ** (step - 1))
-        size_value = equity_at_start * min(size_pct, 1.0)
+        entry_raw = float(df["open"].iloc[cur_idx])
+        entry = entry_raw * (1 + slippage) if fade_dir == "long" else entry_raw * (1 - slippage)
+        target_pct = min(base_pct * (2 ** (step - 1)), 1.0)
+        # Unlike the classic re-entry mode, hold_add keeps earlier legs open.
+        # Cap the combined cash-long exposure at the cycle equity: 25+50+25,
+        # not an implicit 25+50+100 = 175% leveraged position.
+        used_value = sum(leg["size"] for leg in legs)
+        size_value = min(equity_at_start * target_pct, equity_at_start - used_value)
+        if size_value <= 0:
+            break
+        size_pct = size_value / equity_at_start
         legs.append({"price": entry, "size": size_value, "dt": str(df.index[cur_idx]),
-                     "step": step, "size_pct": min(size_pct, 1.0)})
+                     "step": step, "size_pct": size_pct})
 
-        exit_ = float(df["close"].iloc[cur_idx])
+        exit_raw = float(df["close"].iloc[cur_idx])
+        exit_ = exit_raw * (1 - slippage) if fade_dir == "long" else exit_raw * (1 + slippage)
         total_pnl = 0.0
         for leg in legs:
             if fade_dir == "long":
@@ -578,6 +616,7 @@ def _run_cycle(
             else:
                 gross = (leg["price"] - exit_) / leg["price"]
             total_pnl += leg["size"] * (gross - 2 * commission)
+        cycle.worst_pnl = min(cycle.worst_pnl, total_pnl)
 
         if total_pnl >= 0 or step == max_steps:
             # выход всей позиции на закрытии текущей свечи
@@ -620,6 +659,7 @@ def run_backtest(
     base_pct: float = 0.25,
     max_steps: int = 3,
     commission: float = 0.0005,
+    slippage: float = 0.0,
     body_ratio_min: float = 0.6,
     atr_period: int = 14,
     atr_k: float = 0.5,
@@ -646,8 +686,9 @@ def run_backtest(
     subsequent candles.
 
     ``hold_add=1`` — при минусе на закрытии позиция не закрывается, а на
-    открытии следующей свечи добавляется лот (25→50→100% капитала цикла);
-    выход при суммарном плюсе или после ``max_steps`` шагов.
+    открытии следующей свечи добавляется лот (25%→50%→остаток 25%; суммарно
+    не более 100% капитала цикла); выход при суммарном плюсе или после
+    ``max_steps`` шагов.
 
     ``hold_days>1`` — вместо мартингейла один фейд-вход размером
     ``base_pct`` на открытии свечи после сигнала с удержанием ``hold_days``
@@ -661,6 +702,9 @@ def run_backtest(
     candles (up to ``macro_max_candles``). The signal is known only when the
     structure breaks (correction too long/deep, wave-4 overlap, cap reached)
     and entry is at the open of the candle after the break.
+
+    ``slippage`` applies adverse execution on every entry/exit price; it is
+    separate from ``commission`` and defaults to zero for compatibility.
 
     ``quality_min > 0`` skips waves whose micro-Elliott quality score is
     below the threshold (same semantics as the live notifier).
@@ -760,7 +804,7 @@ def run_backtest(
                 continue
         seen_entries.add(entry_idx)
         cycle, equity, last_consumed = _run_cycle(
-            classified, wave, equity, base_pct, max_steps, commission,
+            classified, wave, equity, base_pct, max_steps, commission, slippage,
             start_idx=entry_idx, hold_add=hold_add, hold_days=hold_days,
         )
         all_cycles.append(cycle)
@@ -792,11 +836,14 @@ def _compute_metrics(
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
 
-    # max drawdown from equity curve
+    # Max drawdown includes the floating/recovered loss inside a cycle.
     running = initial
     peak = running
     max_dd = 0.0
     for c in cycles:
+        trough = running + c.worst_pnl
+        if peak > 0:
+            max_dd = max(max_dd, (peak - trough) / peak)
         running += c.total_pnl
         peak = max(peak, running)
         dd = (peak - running) / peak if peak > 0 else 0

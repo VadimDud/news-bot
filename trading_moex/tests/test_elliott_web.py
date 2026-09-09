@@ -177,7 +177,7 @@ class TestRegistry:
             "base_pct", "max_steps", "quality_min",
             "use_corrections", "macro_min_legs", "macro_max_candles",
             "corr_max_bars", "corr_max_retr", "w4_no_overlap", "hold_add",
-            "hold_days", "impulse_strong_k", "impulse_strong_min", "direction",
+            "hold_days", "impulse_strong_k", "impulse_strong_min", "direction", "slippage",
         }
 
     def test_strategy_defaults_resolve(self):
@@ -191,6 +191,7 @@ class TestRegistry:
         assert d["hold_add"] == 1
         assert d["direction"] == 1
         assert d["impulse_strong_k"] == 1.0
+        assert d["slippage"] == 0.0005
 
     def test_per_ticker_view_without_cls(self):
         from app.web.app import _strategies_for_ticker

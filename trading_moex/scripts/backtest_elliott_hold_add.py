@@ -2,7 +2,8 @@
 """Hold-add vs классический мартингейл Elliott (per-ticker, 10M депозит).
 
 Режим hold_add: при минусе на закрытии свечи позиция НЕ закрывается, а на
-открытии СЛЕДУЮЩЕЙ свечи добавляется лот (25→50→100% капитала цикла).
+открытии СЛЕДУЮЩЕЙ свечи добавляется лот (25%→50%→остаток 25%; суммарная
+экспозиция не выше 100% капитала цикла).
 Выход всей позиции при суммарном плюсе на закрытии или после max_steps
 шагов (перенос через ночь/гэпы учитываются честно).
 
@@ -76,11 +77,11 @@ def main() -> None:
         if not df.empty:
             dfs[t] = df
     print(f"Elliott HOLD-ADD | депозит={DEPOSIT:,.0f} ₽ на тикер | 1day | "
-          f"мартингейл 25→50→100, комиссия {args.commission*100:.2f}%/"
+          f"докупка 25%→50%→остаток 25% (суммарно ≤100%), комиссия {args.commission*100:.2f}%/"
           f"слайпедж {args.slippage*100:.2f}%\n")
 
     base = {"wave_min": 3, "wave_max": 5, "base_pct": 0.25, "max_steps": 3,
-            "commission": args.commission}
+            "commission": args.commission, "slippage": args.slippage}
 
     def table(label: str, params: dict) -> None:
         print(f"\n{label}")

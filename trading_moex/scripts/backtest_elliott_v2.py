@@ -521,7 +521,6 @@ def _long_add_hold_cycle(p: dict, s: dict, H: int, comm: float, slip: float) -> 
 def _run_long_add(tickers, db, period, qmin, strong_k, mode, comm, slip, H=6):
     """Прогон только-лонг докуток/удержаний. mode='engine'/'holdmin'."""
     res = []
-    comm_total = comm + slip
     for t in tickers:
         p = prep(t, db, period=period)
         sig_list = sorted(sigs(p), key=lambda x: x["ent"])
@@ -549,7 +548,8 @@ def _run_long_add(tickers, db, period, qmin, strong_k, mode, comm, slip, H=6):
             else:  # engine hold_add (выход при суммарном плюсе, до 3 добавок)
                 df = load_df(t, db, period)
                 bt = ec.run_backtest(df, initial_equity=DEPOSIT, wave_min=3, wave_max=5,
-                                     base_pct=0.25, max_steps=3, commission=comm_total,
+                                     base_pct=0.25, max_steps=3, commission=comm,
+                                     slippage=slip,
                                      quality_min=qmin, impulse_strong_k=strong_k,
                                      impulse_strong_min=1, direction=1, hold_add=1)
                 # единственный исполняемый цикл — берём все; busy-перекрытие движок учёл
@@ -615,14 +615,12 @@ def run_final(db: str, comm: float, slip: float) -> None:
     print("\n" + "=" * 78)
     print("FINAL. Проверка q>=0.8 + hold_days=3 (все тикеры) через прод-движок")
     print("=" * 78)
-    # у run_backtest нет slippage — считаем по завышенной комиссии (0.09%/сторона)
-    comm_total = comm + slip
     agg = {"net": 0.0, "n": 0, "w": 0}
     for t in ALL_TICKERS:
         df = load_df(t, db)
         bt = ec.run_backtest(df, initial_equity=DEPOSIT, wave_min=3, wave_max=5,
-                             base_pct=0.25, quality_min=0.8, commission=comm_total,
-                             hold_days=3)
+                             base_pct=0.25, quality_min=0.8, commission=comm,
+                             slippage=slip, hold_days=3)
         m = bt["metrics"]
         cycles = bt["cycles"]
         pnls = [c.total_pnl for c in cycles]
@@ -634,7 +632,7 @@ def run_final(db: str, comm: float, slip: float) -> None:
               f"net={net:>+12,.0f} maxDD={m.get('max_drawdown_pct', 0):5.1f}%")
     if agg["n"]:
         print(f"  ИТОГО циклов={agg['n']} win={agg['w'] / agg['n'] * 100:.1f}% "
-              f"net={agg['net']:+,.0f} (комиссия {comm_total * 100:.2f}%/сторона ≈ 0.04%+слайп)")
+              f"net={agg['net']:+,.0f} (комиссия {comm * 100:.2f}% + слайп {slip * 100:.2f}%/сторона)")
 
 
 # ---------------------------------------------------------------------------

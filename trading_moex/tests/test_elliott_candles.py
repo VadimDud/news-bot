@@ -361,6 +361,9 @@ class TestHoldAdd:
         assert c.trades[0].size_pct == pytest.approx(0.25)
         assert c.trades[1].size_pct == pytest.approx(0.5)
         assert c.total_pnl > 0
+        # Цикл восстановился, но первый лот был в плавающем минусе.
+        assert c.worst_pnl < 0
+        assert bt["metrics"]["max_drawdown_pct"] > 0
 
     def test_hold_through_overnight_gap(self):
         """Гэп вниз на open дня 2 учитывается в PnL первой ноги (позиция держится)."""
@@ -375,6 +378,8 @@ class TestHoldAdd:
         assert c.trades[0].exit_price == pytest.approx(99.0)
         assert c.trades[1].entry_price == pytest.approx(90.0)
         assert c.total_pnl > 0
+        # The first held lot is ~10% down at the next open before averaging.
+        assert c.worst_pnl < -2_000
 
     def test_all_steps_lose(self):
         """Три минусовых дня → позиция закрывается на закрытии 3-го дня."""
@@ -389,6 +394,19 @@ class TestHoldAdd:
         assert c.steps_used == 3
         assert len(c.trades) == 3
         assert c.total_pnl < 0
+
+    def test_total_long_exposure_is_capped_at_equity(self):
+        """Удерживаемые лоты не должны создавать скрытое плечо 175%."""
+        bear = _bear_candles(3, step=1.0)
+        df = bear
+        for close_, open_ in ((98, 100), (94, 98), (90, 94)):
+            df = _append_candle(df, close_, open_, days_offset=1)
+        bt = run_backtest(df, wave_min=3, wave_max=5, initial_equity=100_000,
+                          base_pct=0.25, max_steps=3, commission=0.0005,
+                          body_ratio_min=0.6, atr_k=0.01, hold_add=1)
+        c = bt["cycles"][0]
+        assert [t.size_pct for t in c.trades] == pytest.approx([0.25, 0.5, 0.25])
+        assert sum(t.size_pct for t in c.trades) == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +506,16 @@ class TestImpulseStrong:
                           body_ratio_min=0.6, atr_k=0.01, impulse_strong_k=0.4,
                           impulse_strong_min=4)
         assert bt["cycles"] == []
+
+    def test_slippage_reduces_single_trade_pnl(self):
+        bear = _bear_candles(3, step=1.0)
+        df = _append_candle(bear, 104, 100, days_offset=1)
+        common = dict(wave_min=3, wave_max=5, initial_equity=100_000,
+                      base_pct=0.25, max_steps=1, commission=0.0005,
+                      body_ratio_min=0.6, atr_k=0.01)
+        no_slip = run_backtest(df, **common)
+        with_slip = run_backtest(df, **common, slippage=0.01)
+        assert with_slip["cycles"][0].total_pnl < no_slip["cycles"][0].total_pnl
 
 
 # ---------------------------------------------------------------------------

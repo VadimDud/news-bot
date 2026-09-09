@@ -147,6 +147,11 @@ def explain_roe_signal(
             score_info.get("s_mom", 0.0), score_info.get("s_stab", 0.0)
         )
     )
+    lines.append(
+        "   • Дивидендная доходность: {:.2f}".format(
+            score_info.get("s_div", 0.0)
+        )
+    )
     lines.append(f"📈 Моментум {momentum_months} мес: {_fmt_pct(mom_pct)}")
     lines.append("")
 

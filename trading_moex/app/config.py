@@ -186,10 +186,11 @@ TRADER_FIB_USE_HTF: int = int(os.environ.get("TRADER_FIB_USE_HTF", "1"))
 # ── MTF Confirmation: multi-timeframe candle-pattern notifier ──────────────
 TRADER_MTF_ENABLED: bool = os.environ.get("TRADER_MTF_ENABLED", "true").lower() in ("1", "true")
 TRADER_MTF_RUN_ON_STARTUP: bool = os.environ.get("TRADER_MTF_RUN_ON_STARTUP", "true").lower() in ("1", "true")
-# Скан после закрытия каждого 4h-бара: 08:00 (закрытие 04:00 бара), 12:00, 16:00 UTC.
+# Скан через две минуты после закрытия каждого 4h-бара: даём MOEX опубликовать
+# финальные данные, затем принудительно обновляем свечи перед проверкой.
 TRADER_MTF_SCANS: list[tuple[int, int]] = [
     (int(h), int(m))
-    for h, m in (p.split(":") for p in os.environ.get("TRADER_MTF_SCANS", "08:00,12:00,16:00").split(",") if p.strip())
+    for h, m in (p.split(":") for p in os.environ.get("TRADER_MTF_SCANS", "08:02,12:02,16:02").split(",") if p.strip())
 ]
 # Разрешённые часы UTC для СИГНАЛЬНЫХ баров (4=07:00 MSK, 8=11:00, 12=15:00).
 # Бары 16 (19:00 MSK) и 20 (23:00 MSK) исключены — худший win-rate.
@@ -211,8 +212,12 @@ TRADER_MTF_LTF_ZONE: int = int(os.environ.get("TRADER_MTF_LTF_ZONE", "20"))
 TRADER_MTF_HTF_ZONE: int = int(os.environ.get("TRADER_MTF_HTF_ZONE", "15"))
 # HTF таймфрейм (2h = intraday, no lookahead; 1day = legacy, requires causal_daily)
 TRADER_MTF_HTF_PERIOD: str = os.environ.get("TRADER_MTF_HTF_PERIOD", "2h")
-# Elliott TP: когда волна 1-2 найдена — TP-цена вместо close+6
-TRADER_MTF_ELLIOTT_TP_ENABLED: bool = os.environ.get("TRADER_MTF_ELLIOTT_TP_ENABLED", "true").lower() in ("1", "true")
+# Старые сигналы не отправляем при стартовом скане: цена входа из бэктеста уже
+# недоступна после открытия следующего 4h-бара.
+TRADER_MTF_MAX_SIGNAL_AGE_MINUTES: int = int(os.environ.get("TRADER_MTF_MAX_SIGNAL_AGE_MINUTES", "30"))
+# Elliott TP не подтверждён для текущей 2h-стратегии. Бэктест +36% использует
+# только выход на close через horizon 4h-баров.
+TRADER_MTF_ELLIOTT_TP_ENABLED: bool = os.environ.get("TRADER_MTF_ELLIOTT_TP_ENABLED", "false").lower() in ("1", "true")
 TRADER_MTF_ELLIOTT_K: float = float(os.environ.get("TRADER_MTF_ELLIOTT_K", "1.618"))
 TRADER_MTF_ELLIOTT_TIME_CAP: int = int(os.environ.get("TRADER_MTF_ELLIOTT_TIME_CAP", "12"))
 TRADER_MTF_ELLIOTT_WAVE_TF: str = os.environ.get("TRADER_MTF_ELLIOTT_WAVE_TF", "2h")

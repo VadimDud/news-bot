@@ -173,6 +173,7 @@ class TestScanTicker:
             mc.TRADER_MTF_LTF_ZONE = 20
             mc.TRADER_MTF_HTF_ZONE = 15
             mc.TRADER_MTF_HTF_PERIOD = "2h"
+            mc.TRADER_MTF_MAX_SIGNAL_AGE_MINUTES = 30
             with patch("app.mtf_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
                 ltf_16 = ltf.copy()
                 ltf_16.index = ltf_16.index[:-1].append(
@@ -209,6 +210,7 @@ class TestScanTicker:
             mc.TRADER_MTF_LTF_ZONE = 20
             mc.TRADER_MTF_HTF_ZONE = 15
             mc.TRADER_MTF_HTF_PERIOD = "2h"
+            mc.TRADER_MTF_MAX_SIGNAL_AGE_MINUTES = 30
             with patch("app.mtf_notifier._send_tg", new_callable=AsyncMock, return_value=True) as mock_send:
                 with patch("app.mtf_notifier._load_candles") as mock_load:
                     def _load(ticker, period):
@@ -220,9 +222,32 @@ class TestScanTicker:
                             return ltf2
                         return htf
                     mock_load.side_effect = _load
-                    result = await _scan_ticker("DEDUP")
+                    result = await _scan_ticker(
+                        "DEDUP", now=datetime(2026, 3, 15, 12, 5, tzinfo=timezone.utc)
+                    )
                     assert result is None
                     mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_forming_last_bar_is_excluded(self):
+        """Сигнал считается только на закрытых 4h-барах."""
+        ltf = _make_4h_closes(list(np.linspace(200, 100, 70)))
+        htf = _make_daily_closes(list(np.linspace(220, 100, 200)))
+        captured = {}
+
+        def fake_signal(ltf_arg, *_args, **_kwargs):
+            captured["last_bar"] = ltf_arg.index[-1]
+            return pd.Series(0, index=ltf_arg.index)
+
+        with patch("app.mtf_notifier.trading_config") as mc:
+            mc.TRADER_MTF_HTF_PERIOD = "2h"
+            with patch("app.mtf_notifier._load_candles", side_effect=lambda _t, p: ltf if p == "4h" else htf):
+                with patch("app.mtf_notifier.mtf_confirm.mtf_signal", side_effect=fake_signal):
+                    await _scan_ticker(
+                        "FORMING", now=datetime(2025, 8, 8, 14, 0, tzinfo=timezone.utc)
+                    )
+
+        assert captured["last_bar"] == pd.Timestamp("2025-08-08 08:00", tz="UTC")
 
 
 # ---------------------------------------------------------------------------

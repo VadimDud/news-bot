@@ -47,7 +47,8 @@ async def _send_tg(text: str) -> bool:
 def format_mtf_signal(ticker: str, side: str, close_price: float,
                       htf_state: int, bar_dt: datetime,
                       wave_info: dict | None = None,
-                      htf_period: str = "2h") -> str:
+                      htf_period: str = "2h", htf_zone: int = 15,
+                      horizon: int = 6) -> str:
     """Telegram message for MTF signal.
 
     ``wave_info`` — dict with wave1_amp, tp_price, k, wave_tf, time_cap or None.
@@ -55,7 +56,8 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
     now_msk = datetime.now(MSK).strftime("%H:%M %d.%m.%Y")
     direction = "ШОРТ" if side == "bear" else "ЛОНГ"
     signal_dir = "📉" if side == "bear" else "📈"
-    htf_label = "БЫЧИЙ (close > max(H[15]))" if htf_state == 1 else "МЕДВЕЖЬИЙ (close < min(L[15]))"
+    htf_label = (f"БЫЧИЙ (close > max(H[{htf_zone}]))" if htf_state == 1
+                 else f"МЕДВЕЖЬИЙ (close < min(L[{htf_zone}]))")
 
     bar_msk = bar_dt.strftime("%H:%M %d.%m.%Y") + " МСК"
     entry_time = (bar_dt + timedelta(hours=4)).strftime("%H:%M") + " МСК"
@@ -70,7 +72,7 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
 
         if side == "bear":
             plan_lines = [
-                f"  Вход: ШОРТ на open {entry_time}",
+                f"  Вход: ШОРТ по рынку после уведомления (бэктест: open {entry_time})",
                 f"  Take-Profit: {tp:.2f} ₽ (−{k}× волна 1, амплитуда {w1amp:.2f})",
                 f"  Стоп: нет (выход по времени — {cap} баров ≈ {cap_hours} ч)",
                 f"  Время удержания: до {cap} 4h-баров",
@@ -78,7 +80,7 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
             ]
         else:
             plan_lines = [
-                f"  Вход: ЛОНГ на open {entry_time}",
+                f"  Вход: ЛОНГ по рынку после уведомления (бэктест: open {entry_time})",
                 f"  Take-Profit: {tp:.2f} ₽ (+{k}× волна 1, амплитуда {w1amp:.2f})",
                 f"  Стоп: нет (выход по времени — {cap} баров ≈ {cap_hours} ч)",
                 f"  Время удержания: до {cap} 4h-баров",
@@ -88,8 +90,9 @@ def format_mtf_signal(ticker: str, side: str, close_price: float,
         plan_header = f"📋 План (Elliott TP, волна {wtf}):"
     else:
         plan_lines = [
-            f"  Вход: {'ЛОНГ' if side == 'bull' else 'ШОРТ'} на open {entry_time}",
-            f"  Выход: на close через 6 баров (≈ 24 ч)",
+            f"  Вход: {'ЛОНГ' if side == 'bull' else 'ШОРТ'} по рынку после уведомления "
+            f"(бэктест: open {entry_time})",
+            f"  Выход: на close через {horizon} баров (≈ {horizon * 4} ч)",
         ]
         plan_header = "📋 План (baseline):"
 
@@ -130,12 +133,27 @@ def _watchlist() -> list[str]:
 
 # ── Скан одного тикера ─────────────────────────────────────────────────────
 
-async def _scan_ticker(ticker: str) -> dict | None:
+async def _scan_ticker(ticker: str, now: datetime | None = None) -> dict | None:
     """Scan ticker: mtf_signal on last closed bar + hour filter."""
     ltf = _load_candles(ticker, "4h")
     htf_period = trading_config.TRADER_MTF_HTF_PERIOD
     htf = _load_candles(ticker, htf_period)
     if ltf is None or htf is None or len(ltf) < 50 or len(htf) < 25:
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_ts = pd.Timestamp(now)
+    if ltf.index.tz is None:
+        now_ts = now_ts.tz_localize(None)
+    else:
+        now_ts = now_ts.tz_convert(ltf.index.tz)
+    # SQLite stores bars by their opening time. The latest row can be a live
+    # bar; it must never produce a close-based signal.
+    completed = ltf.index + pd.Timedelta(hours=4) <= now_ts
+    ltf = ltf.loc[completed]
+    if len(ltf) < 50:
         return None
 
     pattern = trading_config.TRADER_MTF_PATTERN
@@ -163,6 +181,10 @@ async def _scan_ticker(ticker: str) -> dict | None:
     bar_dt = ltf.index[last_idx].to_pydatetime()
     if bar_dt.tzinfo is None:
         bar_dt = bar_dt.replace(tzinfo=timezone.utc)
+    bar_closed_at = bar_dt + timedelta(hours=4)
+    if now - bar_closed_at > timedelta(minutes=trading_config.TRADER_MTF_MAX_SIGNAL_AGE_MINUTES):
+        logger.debug("Пропуск %s: MTF-бар %s устарел", ticker, bar_dt.isoformat())
+        return None
     signal_ts = bar_dt.isoformat()
     close_price = float(ltf["close"].iloc[last_idx])
 
@@ -172,7 +194,7 @@ async def _scan_ticker(ticker: str) -> dict | None:
         return None
 
     htf_state_series = mtf_confirm.htf_zone_state(htf, zone=htf_zone)
-    htf_state_val = int(htf_state_series.iloc[-1]) if len(htf_state_series) > 0 else 0
+    htf_state_val = int(mtf_confirm.htf_state_at(ltf, htf_state_series).iloc[-1])
 
     wave_info = None
     if trading_config.TRADER_MTF_ELLIOTT_TP_ENABLED:
@@ -237,7 +259,9 @@ async def _scan_ticker(ticker: str) -> dict | None:
             logger.warning("Elliott TP расчёт для %s не удался: %s", ticker, exc)
 
     msg = format_mtf_signal(ticker, side, close_price, htf_state_val, bar_dt,
-                            wave_info=wave_info, htf_period=htf_period)
+                            wave_info=wave_info, htf_period=htf_period,
+                            htf_zone=htf_zone,
+                            horizon=trading_config.TRADER_MTF_HORIZON)
     sent = await _send_tg(msg)
 
     if sent:
@@ -264,7 +288,7 @@ async def run_mtf_scan() -> list[dict]:
     return sent
 
 
-# ── Доскачивание данных (4h + 1day) ─────────────────────────────────────────
+# ── Доскачивание данных (4h + HTF) ──────────────────────────────────────────
 
 _MTF_SYNC_HOURS = 6  # период повторной синхронизации данных
 
@@ -279,25 +303,29 @@ def _needs_sync(ticker: str, period: str) -> bool:
     return (datetime.now(timezone.utc) - last_dt) > timedelta(hours=_MTF_SYNC_HOURS)
 
 
-async def mtf_data_sync_task() -> None:
-    """Background sync of 4h+HTF candles for MTF tickers from MOEX."""
+async def sync_mtf_data_once(force: bool = False) -> None:
+    """Synchronize MTF candles once; ``force`` refreshes the tail unconditionally."""
     from . import data as data_module
 
     htf_period = trading_config.TRADER_MTF_HTF_PERIOD
+    for ticker in _watchlist():
+        for period in ("4h", htf_period):
+            if not force and not _needs_sync(ticker, period):
+                continue
+            try:
+                end = date.today()
+                start = end - timedelta(days=400)
+                await asyncio.to_thread(data_module.fetch_history, ticker, period, start, end)
+                logger.info("Свечи синхронизированы: %s %s", ticker, period)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Синхронизация %s %s не удалась: %s", period, ticker, exc)
 
+
+async def mtf_data_sync_task() -> None:
+    """Background sync of 4h+HTF candles for MTF tickers from MOEX."""
     while True:
         try:
-            for ticker in _watchlist():
-                for period in ("4h", htf_period):
-                    if not _needs_sync(ticker, period):
-                        continue
-                    try:
-                        end = date.today()
-                        start = end - timedelta(days=400)
-                        await asyncio.to_thread(data_module.fetch_history, ticker, period, start, end)
-                        logger.info("Свечи синхронизированы: %s %s", ticker, period)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Синхронизация %s %s не удалась: %s", period, ticker, exc)
+            await sync_mtf_data_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -330,6 +358,7 @@ async def mtf_scan_loop() -> None:
     )
     if trading_config.TRADER_MTF_RUN_ON_STARTUP:
         try:
+            await sync_mtf_data_once(force=True)
             sent = await run_mtf_scan()
             if sent:
                 logger.info("Стартовый MTF-скан: отправлено %d сигналов", len(sent))
@@ -345,6 +374,7 @@ async def mtf_scan_loop() -> None:
             logger.info("Следующий MTF-скан: %s (через %.0f c)",
                         next_run.isoformat(timespec="seconds"), delay)
             await asyncio.sleep(delay)
+            await sync_mtf_data_once(force=True)
             sent = await run_mtf_scan()
             if sent:
                 logger.info("MTF-скан: отправлено %d сигналов", len(sent))

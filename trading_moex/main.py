@@ -18,6 +18,79 @@ logging.basicConfig(
 logger = logging.getLogger("moex_trader")
 
 
+def report_startup_state(live_trader) -> None:
+    """Логирует сводку конфигурации сканеров/уведомлений без секретов.
+
+    Помогает понять, что фактически включено после применения env.
+    """
+    logger.info("── Стартовая конфигурация уведомлений ────────────────────────────")
+    logger.info("Telegram: %s, chat=%s, proxy=%s",
+                "токен задан" if config.TELEGRAM_BOT_TOKEN else "токен ОТСУТСТВУЕТ",
+                "задан" if config.TELEGRAM_CHAT_ID else "ОТСУТСТВУЕТ",
+                config.TRADER_TG_PROXY or "нет")
+    notifiers = [
+        ("ROE+P/B", config.TRADER_SIGNALS_ENABLED, config.TRADER_SIGNALS_RUN_ON_STARTUP),
+        ("Elliott", config.TRADER_ELLIOTT_ENABLED, config.TRADER_ELLIOTT_RUN_ON_STARTUP),
+        ("Fibonacci", config.TRADER_FIB_ENABLED, config.TRADER_FIB_RUN_ON_STARTUP),
+        ("MTF", config.TRADER_MTF_ENABLED, config.TRADER_MTF_RUN_ON_STARTUP),
+    ]
+    for name, enabled, on_startup in notifiers:
+        logger.info("Сканер %-9s: enabled=%s, run_on_startup=%s", name, enabled, on_startup)
+    logger.info("Live: dry_run=%s, token=%s, стратегия=%s, навыки=%s(%s)",
+                config.DRY_RUN,
+                "задан" if config.TINKOFF_API_TOKEN else "не задан",
+                live_trader.strategy,
+                config.TRADER_SKILLS_ENABLED, config.TRADER_SKILLS_MODE)
+    logger.info("Watchlist: %s", config.WATCH_TICKERS)
+    logger.info("──────────────────────────────────────────────────────────────")
+
+
+def _dead_tasks(tasks: dict[str, asyncio.Task | None]) -> list[str]:
+    """Имена задач, завершившихся не по штатной отмене и с исключением (краш)."""
+    dead = []
+    for name, task in tasks.items():
+        if task is None:
+            continue
+        # Крашем считаем только завершение с необработанным исключением.
+        # Штатное завершение (return) и отмена (cancelled) не считаются.
+        if task.done() and not task.cancelled() and task.exception() is not None:
+            dead.append(name)
+    return dead
+
+
+async def _notify_dead(tasks: dict[str, asyncio.Task | None], logged: set[str]) -> None:
+    """Один проход watchdog: алерт в Telegram по крашнутым и ещё не логированным задачам."""
+    from app.signal_notifier import send_telegram_message
+
+    for name in _dead_tasks(tasks):
+        if name in logged:
+            continue
+        task = tasks[name]
+        exc = task.exception()
+        logger.error("Watchdog: задача %s неожиданно завершилась: %s", name, exc)
+        logged.add(name)
+        msg = (
+            f"⚠️ WATCHDOG MOEX-трейдера\nЗадача «{name}» неожиданно "
+            f"завершилась: {exc}\nСканер больше не работает — проверьте логи."
+        )
+        try:
+            await send_telegram_message(msg)
+        except Exception:  # noqa: BLE001
+            logger.exception("Watchdog: не удалось отправить алерт в Telegram")
+
+
+async def _watchdog(tasks: dict[str, asyncio.Task | None]) -> None:
+    """Мониторинг фоновых задач: алерт в Telegram при неожиданной смерти.
+
+    CancelledError (штатная остановка) игнорируется — алерт только на
+    реальный краш (task.done() с исключением).
+    """
+    logged: set[str] = set()
+    while True:
+        await asyncio.sleep(300)  # проверка раз в 5 минут
+        await _notify_dead(tasks, logged)
+
+
 async def main() -> None:
     storage.init_db()
 
@@ -106,10 +179,27 @@ async def main() -> None:
     else:
         logger.info("MTF Confirmation notifier disabled via TRADER_MTF_ENABLED")
 
+    report_startup_state(live_trader)
+
+    # Watchdog: если таск сканера неожиданно умер (исключение вне цикла),
+    # поднимаем Telegram-алерт, чтобы падение не осталось незамеченным.
+    watched = {
+        "ROE": signal_task,
+        "Elliott": elliott_task,
+        "Fib": fib_task,
+        "Fib-data": fib_data_task,
+        "MTF": mtf_task,
+        "MTF-data": mtf_data_task,
+    }
+    watchdog_task = asyncio.create_task(_watchdog(watched))
+
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
+        watchdog_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog_task
         if signal_task is not None:
             signal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

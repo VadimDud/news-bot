@@ -169,6 +169,8 @@ def _params_from_config() -> dict:
         "rsi_oversold": trading_config.TRADER_FIB_RSI_OVERSOLD,
         "regime_adx_min": trading_config.TRADER_FIB_REGIME_ADX_MIN,
         "regime_atr_vol_max": trading_config.TRADER_FIB_REGIME_ATR_VOL_MAX,
+        "min_rr": trading_config.TRADER_FIB_MIN_RR,
+        "use_htf": int(trading_config.TRADER_FIB_USE_HTF),
     }
 
 
@@ -182,7 +184,7 @@ def ticker_settings(ticker: str) -> dict:
     """
     params = _params_from_config()
     direction = 0  # 0 — оба направления (лонг и шорт)
-    timeframe = "4h"  # сканер по умолчанию работает на 4h
+    timeframe = trading_config.TRADER_FIB_TIMEFRAME  # глобальный ТФ из конфига (4h по умолчанию)
 
     from .strategies import TICKER_OVERRIDES as _TO
 
@@ -239,7 +241,11 @@ async def _scan_ticker(ticker: str) -> dict | None:
     if df is None:
         return None
 
-    htf = _load_htf(ticker) if int(trading_config.TRADER_FIB_USE_HTF) else None
+    if _is_stale(df):
+        logger.warning("Свечи %s устарели — Fib-сигнал заблокирован", ticker)
+        return None
+
+    htf = _load_htf(ticker) if int(params.get("use_htf", 0)) else None
     retrace_center = (trading_config.TRADER_FIB_FIB_IN_LOW + trading_config.TRADER_FIB_FIB_IN_HIGH) / 2.0
 
     # Лонг-setup

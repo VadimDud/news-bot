@@ -29,13 +29,15 @@ from app.fib_notifier import (  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_df(closes, opens=None, freq="h", start="2023-01-01"):
+def _make_df(closes, opens=None, freq="h", start=None):
     n = len(closes)
     close = np.array(closes, dtype=float)
     if opens is None:
         opens = np.append(close[0], close[:-1])
     highs = np.maximum(opens, close) + 0.4
     lows = np.minimum(opens, close) - 0.4
+    if start is None:
+        start = pd.Timestamp.now().normalize() - pd.Timedelta(days=7)
     idx = pd.date_range(start, periods=n, freq=freq)
     return pd.DataFrame({
         "open": opens, "high": highs, "low": lows, "close": close,
@@ -137,7 +139,9 @@ class TestStale:
 class TestParams:
     def test_params_only_accepts_detector_keys(self, monkeypatch):
         # _params_from_config не должен содержать ключей, не входящих в
-        # сигнатуру детектора (mini_rr и т.п.), иначе TypeError.
+        # сигнатуру детектора (mini_rr и т.п.), иначе TypeError. min_rr и
+        # use_htf обрабатываются отдельно (gating/HTF-фильтр), но должны быть
+        # валидными ключами детектора / безопасно отсекаться _detector_params.
         with patch("app.fib_notifier.trading_config") as mc:
             mc.TRADER_FIB_SWING_BARS = 10
             mc.TRADER_FIB_FIB_IN_LOW = 0.5
@@ -147,10 +151,13 @@ class TestParams:
             mc.TRADER_FIB_RSI_OVERSOLD = 50.0
             mc.TRADER_FIB_REGIME_ADX_MIN = 0.0
             mc.TRADER_FIB_REGIME_ATR_VOL_MAX = 0.0
+            mc.TRADER_FIB_MIN_RR = 1.5
+            mc.TRADER_FIB_USE_HTF = 1
             params = _params_from_config()
             assert set(params) <= {
                 "swing_bars", "fib_in_low", "fib_in_high", "trend_period",
                 "confluence_min", "rsi_oversold", "regime_adx_min", "regime_atr_vol_max",
+                "min_rr", "use_htf",
             }
 
 

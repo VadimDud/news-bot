@@ -385,6 +385,20 @@ def _freshness_issues(ticker: str) -> list[str]:
     return issues
 
 
+def _candles_stale(ticker: str) -> bool:
+    """Блокирующая проверка: свечи протухли настолько, что сигнал не считается.
+
+    В отличие от _freshness_issues (которое лишь предупреждает), эта функция
+    жёстко блокирует расчёт позиции при отсутствии свежих цен. Отчётность
+    стареет естественно (годовая), поэтому её возраст не блокирует сигнал.
+    """
+    last = storage.last_candle_time(ticker, "1day")
+    if not last:
+        return True
+    age = (_today() - pd.Timestamp(last).date()).days
+    return age > trading_config.TRADER_SIGNALS_MAX_STALE_DAYS
+
+
 def _format_data_alert(issues_by_ticker: dict[str, list[str]]) -> str:
     now_msk = datetime.now(MSK).strftime("%d.%m.%Y %H:%M")
     lines = [f"⚠️ ПРОБЛЕМА ДАННЫХ ROE-сканера • {now_msk} МСК", ""]
@@ -479,6 +493,9 @@ async def run_daily_scan() -> list[dict]:
             df_raw = storage.get_candles(ticker, "1day")
             if df_raw.empty or len(df_raw) < 3:
                 logger.info("Нет свечей по %s — пропуск", ticker)
+                continue
+            if _candles_stale(ticker):
+                logger.warning("Свечи %s устарели — сигнал заблокирован", ticker)
                 continue
             # индекс-даты нужны сигнальным функциям (prices.index)
             df = df_raw.copy()

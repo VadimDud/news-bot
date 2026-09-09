@@ -48,6 +48,13 @@ services:
     network_mode: host
     env_file:
       - .env
+    environment:
+      # Прокси нужен только для Telegram; API (deepseek, relaymodels и т.д.) идут напрямую.
+      HTTP_PROXY: "${HTTP_PROXY:-http://127.0.0.1:31533}"
+      HTTPS_PROXY: "${HTTP_PROXY:-http://127.0.0.1:31533}"
+      ALL_PROXY: "${HTTP_PROXY:-http://127.0.0.1:31533}"
+      no_proxy: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,.local,api.relaymodels.com,relaymodels.com,api.deepseek.com,api.moonshot.cn,open.bigmodel.cn,opencode.ai,dindindon.ru"
+      NO_PROXY: "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,.local,api.relaymodels.com,relaymodels.com,api.deepseek.com,api.moonshot.cn,open.bigmodel.cn,opencode.ai,dindindon.ru"
     volumes:
       - ./dbdata:/app/dbdata
       - /home/vadman1/.config/opencode:/home/botuser/.config/opencode:ro

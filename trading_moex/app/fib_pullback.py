@@ -513,6 +513,32 @@ def fib_score_breakdown(
     return out
 
 
+def _rr_gate_ok(breakdown: dict, *, short: bool, **params) -> bool:
+    """R:R-гейт для setup-а: reward (до цели 0 %) / risk (до экстремума) ≥ min_rr.
+
+    Лонг: цель = swing high, стоп = swing low (за экстремум импульса).
+    Шорт: цель = swing low, стоп = swing high (зеркально).
+    Если stop_dist <= 0 или min_rr <= 0 — гейт выключен (пропускаем).
+    """
+    min_rr = float(params.get("min_rr", 0.0) or 0.0)
+    if min_rr <= 0:
+        return True
+    close = breakdown.get("close")
+    sw_high = breakdown.get("swing_high")
+    sw_low = breakdown.get("swing_low")
+    if close is None or sw_high is None or sw_low is None or sw_high <= sw_low:
+        return True
+    if short:
+        stop_dist = sw_high - close
+        reward = close - sw_low
+    else:
+        stop_dist = close - sw_low
+        reward = sw_high - close
+    if stop_dist <= 0 or reward <= 0:
+        return False
+    return (reward / stop_dist) >= min_rr
+
+
 def detect_latest_setup(
     df: pd.DataFrame,
     htf_df: pd.DataFrame | None = None,
@@ -531,6 +557,8 @@ def detect_latest_setup(
     st = _compute_arrays(df, htf_df, **_detector_params(params))
     st["close"] = df["close"].values
     if not _entry_ok(st, i):
+        return None
+    if not _rr_gate_ok(breakdown, short=False, **params):
         return None
     breakdown["index"] = int(i)
     breakdown["open_next"] = None
@@ -555,6 +583,8 @@ def detect_latest_short_setup(
     st = _compute_arrays(df, htf_df, **_detector_params(params))
     st["close"] = df["close"].values
     if not _entry_ok_short(st, i):
+        return None
+    if not _rr_gate_ok(breakdown, short=True, **params):
         return None
     breakdown["index"] = int(i)
     breakdown["open_next"] = None

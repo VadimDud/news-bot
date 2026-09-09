@@ -225,6 +225,48 @@ def _setup_id(info: dict) -> str | None:
     return f"{float(sw_low):.4f}->{float(sw_high):.4f}"
 
 
+def _skip_reason(ticker: str, breakdown: dict, params: dict, *, short: bool) -> str:
+    """Диагностика: почему тикер не дал сигнал (для журнала пропусков).
+
+    Возвращает список отвергающих условий в читаемом виде. Использует
+    breakdown от ``fib_pullback.fib_score_breakdown`` (если пуст — данных мало).
+    """
+    reasons: list[str] = []
+    if not breakdown:
+        return "недостаточно данных для breakdown"
+
+    if short:
+        if not breakdown.get("in_premium"):
+            reasons.append("не в premium-зоне (откат вверх вне 50–61.8 %)")
+        if breakdown.get("trend_up"):
+            reasons.append("тренд вверх (шорт требует вниз)")
+        factors = breakdown.get("factors_short", 0)
+    else:
+        if not breakdown.get("in_discount"):
+            reasons.append("не в discount-зоне")
+        if not breakdown.get("trend_up"):
+            reasons.append("тренд вниз (лонг требует вверх)")
+        factors = breakdown.get("factors", 0)
+
+    conf = int(params.get("confluence_min", 2))
+    if factors < conf:
+        reasons.append(f"конфлюэнция {factors}<{conf}")
+
+    seg = breakdown.get("segment")
+    if seg is not None and seg <= 0:
+        reasons.append("нет импульса (segment<=0)")
+
+    rsi = breakdown.get("rsi")
+    rsi_over = params.get("rsi_overbought", 70.0)
+    rsi_under = params.get("rsi_oversold", 30.0)
+    if short and rsi is not None and rsi < rsi_over:
+        reasons.append(f"RSI {rsi}<{rsi_over} (нет перекупленности)")
+    if not short and rsi is not None and rsi > rsi_under:
+        reasons.append(f"RSI {rsi}>{rsi_under} (нет перепроданности)")
+
+    return "; ".join(reasons)
+
+
 async def _scan_ticker(ticker: str) -> dict | None:
     """Сканировать один тикер: детект setup-а (long и short), дедуп, отправка.
 
@@ -256,6 +298,9 @@ async def _scan_ticker(ticker: str) -> dict | None:
                                            retrace_center=retrace_center)
             if result is not None:
                 return result
+        else:
+            bd = fib_pullback.fib_score_breakdown(df, htf_df=htf, **params)
+            logger.info("Fib-лонг пропуск %s: %s", ticker, _skip_reason(ticker, bd, params, short=False))
 
     # Шорт-setup
     if direction <= 0:
@@ -263,6 +308,9 @@ async def _scan_ticker(ticker: str) -> dict | None:
         if info is not None:
             return await _dispatch_setup(ticker, df, info, params, short=True,
                                          retrace_center=retrace_center)
+        else:
+            bd = fib_pullback.fib_score_breakdown(df, htf_df=htf, **params)
+            logger.info("Fib-шорт пропуск %s: %s", ticker, _skip_reason(ticker, bd, params, short=True))
 
     logger.debug("Нет завершённого Fib-setup (long/short) по %s", ticker)
     return None

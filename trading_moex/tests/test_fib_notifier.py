@@ -21,6 +21,7 @@ from app.fib_notifier import (  # noqa: E402
     _is_stale,
     _params_from_config,
     _dispatch_setup,
+    _skip_reason,
     ticker_settings,
 )
 
@@ -130,6 +131,28 @@ class TestStale:
         with patch("app.fib_notifier.trading_config") as mc:
             mc.TRADER_SIGNALS_MAX_STALE_DAYS = 1
             assert _is_stale(df) is True
+
+
+class TestSkipReason:
+    def test_empty_breakdown(self):
+        assert _skip_reason("X", {}, {}, short=False) == "недостаточно данных для breakdown"
+
+    def test_long_wrong_trend_and_zone(self):
+        bd = {"in_discount": False, "trend_up": False,
+              "close": 100.0, "swing_low": 90.0, "swing_high": 120.0,
+              "segment": 30.0, "rsi": 55.0, "factors": 0, "factors_short": 0}
+        reason = _skip_reason("X", bd, {"confluence_min": 2, "rsi_oversold": 30.0}, short=False)
+        assert "не в discount-зоне" in reason
+        assert "тренд вниз" in reason
+        assert "конфлюэнция" in reason
+
+    def test_short_wrong_trend(self):
+        bd = {"in_premium": True, "trend_up": True,
+              "close": 100.0, "swing_low": 90.0, "swing_high": 120.0,
+              "segment": 30.0, "rsi": 60.0, "factors": 3, "factors_short": 3}
+        reason = _skip_reason("X", bd, {"confluence_min": 1, "rsi_overbought": 70.0}, short=True)
+        assert "тренд вверх" in reason
+        assert "RSI" in reason
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.fib_pullback import (  # noqa: E402
     _adx,
     _confirmed_pivots,
+    _rr_gate_ok,
     fib_pullback_signal,
     fib_score_breakdown,
     detect_latest_setup,
@@ -187,6 +188,33 @@ def test_detect_latest_setup_none_when_not_in_zone():
     df = _make_candles(np.linspace(100, 120, 120))
     setup = detect_latest_setup(df, confluence_min=2, rsi_oversold=40, trend_period=200)
     assert setup is None
+
+
+class TestRRGate:
+    def test_disabled_when_min_rr_zero(self):
+        bd = {"close": 105.0, "swing_low": 100.0, "swing_high": 120.0}
+        assert _rr_gate_ok(bd, short=False, min_rr=0.0) is True
+
+    def test_long_passes_when_rr_high(self):
+        # цена 105 → стоп 100 (risk 5), цель 120 (reward 15) → rr 3.0
+        bd = {"close": 105.0, "swing_low": 100.0, "swing_high": 120.0}
+        assert _rr_gate_ok(bd, short=False, min_rr=2.0) is True
+
+    def test_long_blocks_when_rr_low(self):
+        # цена 112 → стоп 100 (risk 12), цель 120 (reward 8) → rr 0.67
+        bd = {"close": 112.0, "swing_low": 100.0, "swing_high": 120.0}
+        assert _rr_gate_ok(bd, short=False, min_rr=1.5) is False
+
+    def test_short_passes_and_blocks_mirror(self):
+        # шорт: цена 115 → стоп 120 (risk 5), цель 100 (reward 15) → rr 3.0
+        bd = {"close": 115.0, "swing_low": 100.0, "swing_high": 120.0}
+        assert _rr_gate_ok(bd, short=True, min_rr=2.0) is True
+        bd2 = {"close": 108.0, "swing_low": 100.0, "swing_high": 120.0}
+        assert _rr_gate_ok(bd2, short=True, min_rr=1.5) is False
+
+    def test_none_values_pass(self):
+        bd = {"close": None, "swing_low": None, "swing_high": None}
+        assert _rr_gate_ok(bd, short=False, min_rr=1.5) is True
 
 
 def test_detect_latest_setup_consistent_with_signal_pos():

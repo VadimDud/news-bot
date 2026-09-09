@@ -354,6 +354,24 @@ def test_freshness_issues_direct():
     assert sn._freshness_issues("UNKNOWN") != []  # нет ни свечей, ни отчётности
 
 
+def test_candles_stale_blocks_signal(monkeypatch):
+    """Протухшие свечи → _candles_stale True; сканер пропускает тикер."""
+    from app import config as cfg
+    monkeypatch.setattr(sn.storage, "last_candle_time", lambda *a, **k: "2020-01-01")
+    monkeypatch.setattr(cfg, "TRADER_SIGNALS_MAX_STALE_DAYS", 5)
+    assert sn._candles_stale("SBER") is True
+
+
+def test_candles_fresh_allowed(monkeypatch):
+    import datetime as dt
+    from app import config as cfg
+    today = dt.date.today().isoformat()
+    monkeypatch.setattr(sn.storage, "last_candle_time",
+                        lambda *a, **k: today)
+    monkeypatch.setattr(cfg, "TRADER_SIGNALS_MAX_STALE_DAYS", 5)
+    assert sn._candles_stale("SBER") is False
+
+
 async def test_data_alert_interval_disabled(monkeypatch):
     """TRADER_SIGNALS_DATA_ALERT_INTERVAL_DAYS=0 → алерты отключены."""
     from app import config as cfg

@@ -7,6 +7,7 @@
 """
 
 import logging
+import time as _time
 from datetime import date, datetime, time, timedelta
 from typing import Callable
 
@@ -16,6 +17,12 @@ from . import settings
 from . import storage
 
 logger = logging.getLogger("moex_trader.data")
+
+# Повторы сетевых запросов к MOEX при транзиентных сбоях (Connection reset,
+# таймауты). Без них один сбой роняет обновление всего тикера и шлёт ложный
+# алерт «ошибка обновления свечей».
+MOEX_FETCH_RETRIES = 3
+MOEX_FETCH_BACKOFF_SEC = 1.5
 
 # Периоды, поддерживаемые moexalgo (обычные свечи доступны без авторизации)
 PERIODS = {
@@ -151,15 +158,21 @@ def _fetch_ranges(
 
 
 def _fetch_raw(ticker: str, period: str, start: date, end: date) -> list[dict]:
-    """Свечи с MOEX через moexalgo (нативный таймфрейм, без ресэмпла)."""
+    """Свечи с MOEX через moexalgo (нативный таймфрейм, без ресэмпла).
+
+    Сетевые вызовы оборачиваются в retry с экспоненциальной паузой: MOEX
+    периодически сбрасывает соединение ([Errno 104] Connection reset by peer),
+    и один такой сбой не должен ронять обновление тикера.
+    """
     from moexalgo import Ticker
 
     ticker_obj = Ticker(ticker)
     rows: list[dict] = []
     offset = 0
     while True:
-        raw = ticker_obj.candles(start, end, period=period, offset=offset)
-        batch = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
+        batch = _fetch_batch_with_retry(ticker_obj, ticker, period, start, end, offset)
+        if batch is None:
+            break
         if batch.empty:
             break
         rows.extend(batch.to_dict("records"))
@@ -167,6 +180,36 @@ def _fetch_raw(ticker: str, period: str, start: date, end: date) -> list[dict]:
             break
         offset += len(batch)
     return rows
+
+
+def _fetch_batch_with_retry(
+    ticker_obj, ticker: str, period: str, start: date, end: date, offset: int
+) -> pd.DataFrame | None:
+    """Один батч свечей с повторами при транзиентных сетевых ошибках.
+
+    Возвращает DataFrame (возможно пустой) или None, если после всех попыток
+    сеть так и не ответила — тогда вызывающий прекращает чтение (частичный
+    результат лучше, чем исключение и потеря уже загруженных батчей).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, MOEX_FETCH_RETRIES + 1):
+        try:
+            raw = ticker_obj.candles(start, end, period=period, offset=offset)
+            return raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < MOEX_FETCH_RETRIES:
+                delay = MOEX_FETCH_BACKOFF_SEC * (2 ** (attempt - 1))
+                logger.warning(
+                    "MOEX %s %s: попытка %d/%d не удалась (%s), повтор через %.1f c",
+                    ticker, period, attempt, MOEX_FETCH_RETRIES, exc, delay,
+                )
+                _time.sleep(delay)
+    logger.error(
+        "MOEX %s %s: все %d попыток не удались (%s) — батч offset=%d пропущен",
+        ticker, period, MOEX_FETCH_RETRIES, last_exc, offset,
+    )
+    return None
 
 
 def fetch_history(

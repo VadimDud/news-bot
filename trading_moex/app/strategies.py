@@ -993,6 +993,16 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     # Значения 1.272/1.618 = Fib-расширения за swing low. Default 1.0 — прод не меняется.
     ("fib_target_mult", 1.0),
     ("fib_stop_mult", 1.0),
+    # Pyramiding шорта: добавка к позиции на коррекции (отскоке вверх) внутри
+    # сделки. fib_pyramid_frac=0 — выключено (прод-поведение не меняется).
+    # Добавляем долю fib_pyramid_frac от исходного размера, максимум
+    # fib_pyramid_max раз, когда 4h-close ВЫШЕ текущего среднего входа (отскок).
+    ("fib_pyramid_frac", 0.0),
+    ("fib_pyramid_max", 0),
+    # Триггер добавки: 0=любой отскок выше среднего входа; 1=медвежья
+    # разворотная свеча (close<open) после отскока; 2=отскок в Fib-зону
+    # 50–78.6% хода к цели (структурно глубокая коррекция).
+    ("fib_pyramid_trigger", 0),
 )
 
 
@@ -1020,6 +1030,13 @@ class FibPullbackStrategy(RiskAwareStrategy):
         self._last_swing_high: float | None = None
         self._day_peak: float | None = None
         self._day_date = None
+        # Pyramiding: исходный размер позиции и число добавок в текущей сделке.
+        self._pyramid_base_size: int = 0
+        self._pyramid_adds: int = 0
+        # Зафиксированные на входе стоп/тейк шорта (не пересчитываются при
+        # добавках pyramiding — иначе стоп «ползёт» от цены добавки).
+        self._short_stop_price: float | None = None
+        self._short_target_price: float | None = None
         # Окно истории для расчёта пивотов: по сути всей доступной истории
         # (кап — только чтобы сдерживать расход памяти). Пивоты — подтверждённые
         # локальные экстремумы, зависящие от прошлого; усечённое окно (например,
@@ -1183,10 +1200,77 @@ class FibPullbackStrategy(RiskAwareStrategy):
         max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
         size = max(min(size, max_by_cash), 1) if max_by_cash > 0 else size
         if size > 0:
+            self._pyramid_base_size = size
+            self._pyramid_adds = 0
+            # Новый вход — сброс зафиксированных уровней (будут заданы в bracket).
+            self._short_stop_price = None
+            self._short_target_price = None
             self.sell(size=size)  # SL/TP выставляются в notify_order после исполнения
+
+    def _try_pyramid_short(self) -> None:
+        """Добавить к шорту на коррекции (отскоке вверх).
+
+        Условие: 4h-close ВЫШЕ текущего среднего входа (цена отскочила),
+        добавок меньше ``fib_pyramid_max``. Добавляем долю ``fib_pyramid_frac``
+        от исходного размера. Цель/стоп перевыставляются на увеличенную позицию
+        с тем же структурным стопом (swing high).
+        """
+        if self._avg_orders:
+            return  # уже есть отложенная добавка
+        frac = float(getattr(self.p, "fib_pyramid_frac", 0.0) or 0.0)
+        max_adds = int(getattr(self.p, "fib_pyramid_max", 0) or 0)
+        if frac <= 0 or max_adds <= 0:
+            return
+        if self._pyramid_base_size <= 0 or self._pyramid_adds >= max_adds:
+            return
+        close = float(self.data.close[0])
+        open_ = float(self.data.open[0])
+        avg_entry = self.position.price  # средний вход текущей позиции
+        if avg_entry <= 0 or close <= avg_entry:
+            return  # нет отскока выше среднего входа
+        trig = int(getattr(self.p, "fib_pyramid_trigger", 0) or 0)
+        if trig == 1:
+            # медвежья разворотная свеча (согласна с шортом)
+            if close >= open_:
+                return
+        elif trig == 2:
+            # отскок в Fib-зону 50–78.6% хода к цели (swing low)
+            sl = self._last_swing_low
+            if sl is None or sl <= 0 or sl >= avg_entry:
+                return
+            move = avg_entry - sl
+            if move <= 0:
+                return
+            # глубина отскока вверх от avg_entry (в долях хода к цели)
+            fib = (close - avg_entry) / move
+            if not (0.50 <= fib <= 0.786):
+                return
+        add_qty = max(int(self._pyramid_base_size * frac), 1)
+        self._pyramid_adds += 1
+        # sell добавит к шорту; брекет перевыставится в notify_order
+        self._avg_orders.append(self.sell(size=add_qty))
 
     def _place_short_bracket(self) -> None:
         if self.position.size >= 0:
+            return
+        # При pyramiding-добавке переиспользуем стоп/тейк, зафиксированные на
+        # первом входе, чтобы уровень стопа не «полз» от цены добавки.
+        # Работает ТОЛЬКО при включённом pyramiding (frac>0) — при выключенном
+        # поведение идентично прежнему (нулевое влияние на baseline).
+        pyramid_on = (float(getattr(self.p, "fib_pyramid_frac", 0.0) or 0.0) > 0
+                      and int(getattr(self.p, "fib_pyramid_max", 0) or 0) > 0)
+        if (pyramid_on and self._short_stop_price is not None
+                and self._short_target_price is not None):
+            stop = self._short_stop_price
+            target = self._short_target_price
+            size = abs(self.position.size)
+            # Снять старые брекет-ордера, иначе они сложатся с новыми (двойное
+            # покрытие) — при добавке размер позиции вырос.
+            for pending in (self._sl_order, self._tp_order):
+                if pending is not None:
+                    self.cancel(pending)
+            self._sl_order = self.buy(exectype=bt.Order.Stop, price=stop, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit, price=target, size=size)
             return
         price = float(self.data.close[0])
         stop_dist = self._short_stop_distance()
@@ -1213,6 +1297,9 @@ class FibPullbackStrategy(RiskAwareStrategy):
         if not (0 < target < price):
             # последний пол: тейк на 0.5% ниже входа, но всегда положительный
             target = price * 0.995
+        # Фиксируем уровни на входе (для последующих добавок).
+        self._short_stop_price = stop
+        self._short_target_price = target
         size = abs(self.position.size)
         self._sl_order = self.buy(exectype=bt.Order.Stop, price=stop, size=size)
         self._tp_order = self.buy(exectype=bt.Order.Limit, price=target, size=size)
@@ -1244,10 +1331,18 @@ class FibPullbackStrategy(RiskAwareStrategy):
                         self.cancel(pending)
                 self._sl_order = None
                 self._tp_order = None
+                self._pyramid_base_size = 0
+                self._pyramid_adds = 0
+                self._short_stop_price = None
+                self._short_target_price = None
         else:
             # sell
             if size < 0:
-                # вход в шорт исполнился — выставить шорт-брекет
+                # вход в шорт исполнился (или добавка pyramiding) — переставить
+                # шорт-брекет на текущий размер. Сначала снять старые ордера.
+                for pending in (self._sl_order, self._tp_order):
+                    if pending is not None and pending is not order:
+                        self.cancel(pending)
                 self._sl_order = None
                 self._tp_order = None
                 self._place_short_bracket()
@@ -1302,6 +1397,9 @@ class FibPullbackStrategy(RiskAwareStrategy):
                 cover_sig = True  # закрыть по правилу EOD/выходных
             if cover_sig:
                 self._cover()
+            else:
+                # Pyramiding: добавка на отскоке (close выше среднего входа).
+                self._try_pyramid_short()
         else:  # без позиции
             if self._drawdown_blocked():
                 return

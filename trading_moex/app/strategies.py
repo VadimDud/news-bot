@@ -988,6 +988,11 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     # 1 — закрывать в конце дня и ре-входить утром при живом сетапе,
     # 2 — закрывать только в пятницу (не переносить через выходные).
     ("flat_mode", 0),
+    # Fibonacci-цель/стоп: множитель расстояния до swing low (цель) и до стопа.
+    # 1.0 = текущее поведение (цель = swing low, стоп = swing-экстремум).
+    # Значения 1.272/1.618 = Fib-расширения за swing low. Default 1.0 — прод не меняется.
+    ("fib_target_mult", 1.0),
+    ("fib_stop_mult", 1.0),
 )
 
 
@@ -1187,7 +1192,10 @@ class FibPullbackStrategy(RiskAwareStrategy):
         stop_dist = self._short_stop_distance()
         if stop_dist <= 0:
             return
-        stop = price + stop_dist  # стоп выше входа
+        # Fibonacci-множители (default 1.0 — поведение не меняется).
+        stop_mult = float(getattr(self.p, "fib_stop_mult", 1.0) or 1.0)
+        target_mult = float(getattr(self.p, "fib_target_mult", 1.0) or 1.0)
+        stop = price + stop_dist * stop_mult  # стоп выше входа
         # Тейк — Фибо-цель 0% (swing low на входе); 2R от стопа — только фолбэк.
         # Бэктест 2021-2026: тейк по swing low даёт перевес на MTSS/GAZP/CHMF/NVTK,
         # тейк 2R недостижим и шорт убыточен.
@@ -1197,7 +1205,8 @@ class FibPullbackStrategy(RiskAwareStrategy):
         if sl_arr is not None and st.get("idx") is not None:
             v = float(sl_arr[st["idx"]])
             if v == v and v > 0 and v < price:  # не NaN и ниже входа
-                target = v
+                # Fib-расширение: цель = entry - target_mult*(entry - swing_low)
+                target = price - target_mult * (price - v)
         if target is None or not (0 < target < price):
             # фолбэк 2R от стопа
             target = price - stop_dist * float(self.p.rr_ratio)

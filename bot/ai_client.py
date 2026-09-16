@@ -137,10 +137,42 @@ async def _call_dashscope(system_prompt: str, user_message: str,
     return None
 
 
+@async_retry(max_retries=2, base_delay=1.0)
+async def _call_relaymodels(system_prompt: str, user_message: str,
+                            temperature: float = 0.2, max_tokens: int = 4096,
+                            timeout: int = 30) -> str | None:
+    """RelayModels (OpenAI-compatible aggregator, e.g. DeepSeek V4 Flash).
+
+    Used as a fallback so its API key never leaves the legitimate provider.
+    """
+    if not config.RELAYMODELS_API_KEY:
+        return None
+    url = f"{config.RELAYMODELS_BASE_URL.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {config.RELAYMODELS_API_KEY}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, proxy=None) as client:
+            resp = await client.post(url, json={
+                "model": config.RELAYMODELS_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }, headers=headers)
+            if resp.status_code == 200:
+                return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.warning("RelayModels API error %d: %s", resp.status_code, resp.text[:200])
+    except httpx.HTTPError as e:
+        logger.warning("RelayModels unreachable: %s", e)
+    return None
+
+
 _AVAILABLE_PROVIDERS: dict[str, Callable] = {
     "lmstudio": _call_lmstudio,
     "deepseek": _call_deepseek,
     "gemini": _call_gemini,
+    "relaymodels": _call_relaymodels,
     "dashscope": _call_dashscope,
 }
 

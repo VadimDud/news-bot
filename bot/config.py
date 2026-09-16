@@ -37,6 +37,11 @@ DINDINDON_API_KEY: str = os.getenv("DINDINDON_API_KEY", "")
 DINDINDON_BASE_URL: str = os.getenv("DINDINDON_BASE_URL", "https://dindindon.ru/v1")
 DINDINDON_MODEL: str = os.getenv("DINDINDON_MODEL", "hy3")
 
+# RelayModels API (OpenAI-compatible fallback, e.g. DeepSeek V4 Flash)
+RELAYMODELS_API_KEY: str = os.getenv("RELAYMODELS_API_KEY", "")
+RELAYMODELS_BASE_URL: str = os.getenv("RELAYMODELS_BASE_URL", "https://api.relaymodels.com/v1")
+RELAYMODELS_MODEL: str = os.getenv("RELAYMODELS_MODEL", "deepseek-v4-flash")
+
 # Alibaba DashScope (Qwen) API for financial analysis (fallback)
 DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")

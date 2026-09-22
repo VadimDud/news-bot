@@ -117,6 +117,14 @@ def test_htf_levels_are_causal_and_have_no_level_in_new_price_area():
     assert levels["resistance"].notna().any()
 
 
+def test_directional_art_alignment_accepts_non_15m_entry_bars():
+    frame = _htf_fixture([100, 130, 110, 150, 120], [90, 100, 95, 105, 100])
+    long_15, _ = _closed_htf_directional_wave_ranges(frame, pivot_q=1, n_waves=1, ltf_bar_minutes=15)
+    long_60, _ = _closed_htf_directional_wave_ranges(frame, pivot_q=1, n_waves=1, ltf_bar_minutes=60)
+
+    assert long_60.notna().sum() >= long_15.notna().sum()
+
+
 def test_reversal_setup_requires_impulse_compression_and_reexpansion():
     config = StrategyConfig(atr_period=1, ema_period=1, compression_min_bars=2, compression_max_bars=4)
     engine = StrategyEngine(config)

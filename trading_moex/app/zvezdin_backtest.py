@@ -103,6 +103,7 @@ def _closed_htf_directional_wave_ranges(
     pivot_q: int = 3,
     n_waves: int = 4,
     selection: str = "latest_mean",
+    ltf_bar_minutes: int = 15,
 ) -> tuple[pd.Series, pd.Series]:
     """Return mean completed 4h up-wave and down-wave amplitudes.
 
@@ -115,6 +116,8 @@ def _closed_htf_directional_wave_ranges(
 
     if n_waves < 1:
         raise ValueError("n_waves must be positive")
+    if ltf_bar_minutes < 1:
+        raise ValueError("ltf_bar_minutes must be positive")
     if selection not in {"latest_mean", "last", "longest_mean", "longest"}:
         raise ValueError("unsupported directional wave selection")
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -159,7 +162,7 @@ def _closed_htf_directional_wave_ranges(
     long_values: list[float | None] = []
     short_values: list[float | None] = []
     for timestamp in df.index:
-        decision_time = timestamp + pd.Timedelta(minutes=15)
+        decision_time = timestamp + pd.Timedelta(minutes=ltf_bar_minutes)
         available = int((htf_ends <= decision_time).sum())
         while event_cursor < len(confirmation_events) and confirmation_events[event_cursor][0] < available:
             pivot = confirmation_events[event_cursor][1]

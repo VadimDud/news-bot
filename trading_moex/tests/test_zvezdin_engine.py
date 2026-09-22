@@ -32,6 +32,7 @@ from app.zvezdin_backtest import (
     walk_forward_optimize,
     _closed_htf_wave_ranges,
     _closed_htf_directional_wave_ranges,
+    _closed_htf_levels,
 )
 from app.zvezdin_contract import load_default_config, strategy_config_for_ticker, strategy_config_from_contract
 from app.zvezdin_calendar import SessionCalendar, load_calendar
@@ -100,6 +101,20 @@ def test_directional_wave_atr_keeps_up_and_down_wave_averages_separate():
     assert long_art.loc[point] == pytest.approx(55.0)
     assert short_art.loc[point] == pytest.approx(35.0)
     assert long_art.loc[point] != short_art.loc[point]
+
+
+def test_htf_levels_are_causal_and_have_no_level_in_new_price_area():
+    frame = _htf_fixture([100, 130, 110, 150, 120, 145], [90, 100, 95, 105, 100, 110])
+    levels = _closed_htf_levels(frame, "1h", pivot_q=1, ltf_bar_minutes=15)
+    extended = frame.copy()
+    extended.iloc[-16:, extended.columns.get_loc("high")] = 200.0
+    extended.iloc[-16:, extended.columns.get_loc("close")] = 195.0
+    extended_levels = _closed_htf_levels(extended, "1h", pivot_q=1, ltf_bar_minutes=15)
+
+    cutoff = frame.index[-17]
+    assert extended_levels.loc[cutoff].to_dict() == levels.loc[cutoff].to_dict()
+    assert levels["support"].notna().any()
+    assert levels["resistance"].notna().any()
 
 
 def test_reversal_setup_requires_impulse_compression_and_reexpansion():

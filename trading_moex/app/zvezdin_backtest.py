@@ -232,6 +232,70 @@ def _closed_htf_atr(
     return pd.Series(values, index=df.index, dtype="float64", name="htf_atr")
 
 
+def _closed_htf_levels(
+    df: pd.DataFrame,
+    rule: str,
+    pivot_q: int = 2,
+    ltf_bar_minutes: int = 5,
+) -> pd.DataFrame:
+    """Return causal nearest confirmed support/resistance for each LTF bar."""
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("HTF levels require a DatetimeIndex")
+    grouped = df[["open", "high", "low", "close", "volume"]].resample(
+        rule, closed="left", label="left"
+    ).agg({
+        "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum",
+    }).dropna(subset=["open", "high", "low", "close"])
+    htf_bars = [
+        Bar(i, float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume))
+        for i, (_, row) in enumerate(grouped.iterrows())
+    ]
+    events: dict[int, list[tuple[int, float, ZoneType]]] = {}
+    for tau in range(len(htf_bars)):
+        confirmation = tau + pivot_q
+        if confirmation >= len(htf_bars):
+            break
+        if is_pivot_high(htf_bars, tau, pivot_q):
+            events.setdefault(confirmation, []).append(
+                (tau, float(grouped.iloc[tau].high), ZoneType.RESISTANCE)
+            )
+        if is_pivot_low(htf_bars, tau, pivot_q):
+            events.setdefault(confirmation, []).append(
+                (tau, float(grouped.iloc[tau].low), ZoneType.SUPPORT)
+            )
+
+    htf_ends = grouped.index + pd.Timedelta(rule)
+    confirmed: list[tuple[int, float, ZoneType]] = []
+    cursor = 0
+    ordered_events = sorted(
+        (confirmation, pivot) for confirmation, pivots in events.items() for pivot in pivots
+    )
+    rows = []
+    for timestamp, row in df.iterrows():
+        decision_time = timestamp + pd.Timedelta(minutes=ltf_bar_minutes)
+        available = int((htf_ends <= decision_time).sum())
+        while cursor < len(ordered_events) and ordered_events[cursor][0] < available:
+            confirmed.append(ordered_events[cursor][1])
+            cursor += 1
+        close = float(row["close"])
+        supports = [item for item in confirmed if item[2] is ZoneType.SUPPORT and item[1] <= close]
+        resistances = [item for item in confirmed if item[2] is ZoneType.RESISTANCE and item[1] >= close]
+        support = max(supports, key=lambda item: item[1]) if supports else None
+        resistance = min(resistances, key=lambda item: item[1]) if resistances else None
+        rows.append({
+            "support": support[1] if support else None,
+            "support_pivot_bar": support[0] if support else None,
+            "support_pivot_time": str(grouped.index[support[0]]) if support else None,
+            "resistance": resistance[1] if resistance else None,
+            "resistance_pivot_bar": resistance[0] if resistance else None,
+            "resistance_pivot_time": str(grouped.index[resistance[0]]) if resistance else None,
+            "distance_to_support": close - support[1] if support else None,
+            "distance_to_resistance": resistance[1] - close if resistance else None,
+        })
+    return pd.DataFrame(rows, index=df.index)
+
+
 @dataclass(frozen=True)
 class BacktestResult:
     trades: tuple[Trade, ...]

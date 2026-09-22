@@ -224,6 +224,20 @@ class TestTickerSettings:
         storage.delete_fib_ticker_setting("TESTFIB")
         assert "TESTFIB" not in storage.list_fib_ticker_settings()
 
+    def test_strategy_profile_roundtrip_is_disabled_by_default(self):
+        storage.save_fib_strategy_profile(
+            "fib_short_flip_candidate",
+            "fib_pullback",
+            -1,
+            {"flip_on_stop": 1, "timeframe": "4h"},
+            {"net": 30003, "oos_net_delta": -11685},
+            timeframe="4h",
+        )
+        profile = storage.get_fib_strategy_profile("fib_short_flip_candidate")
+        assert profile["params"]["flip_on_stop"] == 1
+        assert profile["metrics"]["oos_net_delta"] == -11685
+        assert profile["enabled"] is False
+
     def test_timeframe_override_sber_stays_1day(self):
         storage.delete_fib_ticker_setting("SBER")
         s = ticker_settings("SBER")

@@ -558,10 +558,16 @@ async def sub_profile(callback: CallbackQuery, user_lang: str):
     username = callback.from_user.full_name or callback.from_user.username or "—"
     info = await db.get_access_info(user_id)
     if info["has_access"]:
+        if info["until"] is None:
+            until_txt = "бессрочно" if user_lang == "ru" else "unlimited"
+            days_txt = "∞"
+        else:
+            until_txt = info["until"]
+            days_txt = info["days_left"]
         text = t(user_lang, "profile_text",
                  user_id=user_id, username=username,
                  status="✅ Активна" if user_lang == "ru" else "✅ Active",
-                 until=info["until"], days=info["days_left"])
+                 until=until_txt, days=days_txt)
     else:
         text = t(user_lang, "profile_no_access", user_id=user_id, username=username)
     kb = InlineKeyboardBuilder()
@@ -701,10 +707,16 @@ async def text_button_handler(message: Message, user_lang: str):
         username = message.from_user.full_name or message.from_user.username or "—"
         info = await db.get_access_info(user_id)
         if info["has_access"]:
+            if info["until"] is None:
+                until_txt = "бессрочно" if user_lang == "ru" else "unlimited"
+                days_txt = "∞"
+            else:
+                until_txt = info["until"]
+                days_txt = info["days_left"]
             text = t(user_lang, "profile_text",
                      user_id=user_id, username=username,
                      status="✅ Активна" if user_lang == "ru" else "✅ Active",
-                     until=info["until"], days=info["days_left"])
+                     until=until_txt, days=days_txt)
         else:
             text = t(user_lang, "profile_no_access", user_id=user_id, username=username)
         kb = InlineKeyboardBuilder()

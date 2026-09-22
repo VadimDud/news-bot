@@ -19,7 +19,9 @@ class LanguageMiddleware(BaseMiddleware):
             if user_data:
                 data["user_lang"] = user_data.get("language", "ru")
                 until_str = user_data.get("access_until")
-                if until_str:
+                if db.has_permanent_access(until_str):
+                    data["is_subscriber"] = True
+                elif until_str:
                     import datetime
                     try:
                         data["is_subscriber"] = datetime.datetime.fromisoformat(until_str) > datetime.datetime.now()

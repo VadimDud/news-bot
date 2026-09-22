@@ -1,0 +1,184 @@
+{
+  "version": "1.1.0",
+  "usage": "TESTING_ONLY_NOT_FOR_TRADING",
+  "ticker_profiles": {
+    "CHMF": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "GAZP": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "LKOH": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "MOEX": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "MTSS": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "NLMK": {
+      "component_window_acceleration": 2,
+      "component_window_atr_completion": 8,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 8,
+      "component_window_reverse_impulse": 1
+    },
+    "NVTK": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "SBER": {
+      "component_window_acceleration": 2,
+      "component_window_atr_completion": 8,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 8,
+      "component_window_reverse_impulse": 1
+    },
+    "T": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    },
+    "TATN": {
+      "component_window_acceleration": 1,
+      "component_window_atr_completion": 1,
+      "component_window_strong_level": 1,
+      "component_window_volume_participant": 1,
+      "component_window_reverse_impulse": 1
+    }
+  },
+  "hyperparameters": {
+    "pivot_q": 3,
+    "atr_period": 14,
+    "ema_period": 200,
+    "n_waves": 4,
+    "wave_selection": "latest_mean",
+    "reversal_setup_enabled": true,
+    "compression_min_bars": 2,
+    "compression_max_bars": 4,
+    "compression_range_ratio": 0.6,
+    "compression_body_ratio": 0.6,
+    "reexpansion_ratio": 1.2,
+    "impulse_art_eta": 0.85,
+    "exhaustion_eta": 0.85,
+    "zone_cluster_atr_ratio": 0.15,
+    "zone_width_atr_ratio": 0.1,
+    "true_breakout_beta": 0.25,
+    "price_discovery_enabled": true,
+    "max_touches": 3,
+    "max_age_bars": 150,
+    "zone_idle_max_bars": 150,
+    "stale_level_enabled": true,
+    "stale_level_atr_min": 0.85,
+    "stale_level_atr_max": 1.25,
+    "stale_level_require_art": true,
+    "uncertain_rsi_enabled": true,
+    "rsi_period": 14,
+    "rsi_oversold": 35.0,
+    "rsi_overbought": 65.0,
+    "rvol_days_D": 20,
+    "rvol_k_v": 2.5,
+    "rvol_k_std": 2.0,
+    "max_gap_atr_ratio": 0.2,
+    "risk_reward_ratio": 2.5,
+    "tick_size": 0.01,
+    "spread_model": "FIXED",
+    "slippage_model": "FIXED",
+    "fixed_spread": 0.0,
+    "fixed_slippage": 0.0,
+    "slippage_atr_ratio": 0.0,
+    "session_start_minute": 0,
+    "session_end_minute": 1439,
+    "slot_minutes": 15,
+    "zone_signal_mode": "STRICT",
+    "near_zone_atr_ratio": 0.1,
+    "relaxation_pct": 0.0,
+    "signal_mode": "AND",
+    "min_soft_score": 5,
+    "emergency_exit": true,
+    "exhaustion_mode": "WAVE_ATR",
+    "flat_at_day_boundary": true,
+    "score_requires_flow": true,
+    "component_window_acceleration": 1,
+    "component_window_atr_completion": 1,
+    "component_window_strong_level": 1,
+    "component_window_volume_participant": 1,
+    "component_window_reverse_impulse": 1,
+    "volume_entry_filter": true,
+    "post_entry_volume_management": false,
+    "volume_stop_buffer_atr_ratio": 0.1,
+    "volume_target_extension_r": 0.5,
+    "commission_rate": 0.0003,
+    "max_concurrent_positions": 1
+  },
+  "indicators": {
+    "atr": {
+      "name": "WILDER_ATR",
+      "formula": "TR=max(H-L,abs(H-prevC),abs(L-prevC)); seed=mean(first P TR); ATR=((P-1)*prevATR+TR)/P",
+      "lookback_source": "closed bars through t-1 for signal decisions"
+    },
+    "ema": {
+      "name": "EMA",
+      "formula": "alpha=2/(N+1); EMA=alpha*C+(1-alpha)*prevEMA",
+      "lookback_source": "closed bars through t"
+    },
+    "rvol": {
+      "name": "WINSORIZED_MEDIAN_RVOL",
+      "formula": "same-slot prior D sessions; winsorize at nearest-rank Q05/Q95; sigma=max(volume_floor,0.05*median,1.4826*MAD); V>=k_v*median and V>=median+k_std*sigma",
+      "lookback_source": "prior valid sessions only, excluding current session"
+    },
+    "wave_atr": {
+      "name": "DIRECTIONAL_MEAN_HTF_FRACTAL_WAVE",
+      "formula": "WAVE_ATR long=mean(latest n completed 4h low-to-high waves), short=mean(latest n completed 4h high-to-low waves); CURRENT_ATR=ATR[t-1]",
+      "lookback_source": "completed 4h bars and direction-specific fractals confirmed no later than the current 15m bar close"
+    }
+  },
+    "fsm_states": {
+    "zone_statuses": ["ACTIVE", "EXPIRED_TOUCHES", "EXPIRED_AGE", "INVALIDATED_BROKEN"],
+    "position_statuses": ["IDLE", "SIGNAL_PENDING", "IN_POSITION"],
+    "reversal_phases": ["IDLE", "IMPULSE_REACHED", "COMPRESSION", "RE_EXPANSION"]
+  },
+  "zone_rules": {
+    "cluster_logic": "same zone type; abs(pivot-center)<=zone_cluster_atr_ratio*ATR[t-1]; choose minimum distance then zone_id",
+    "frozen_geometry": "center=pivot seed; width=max(tick_size,zone_width_atr_ratio*ATR[t-1]); eligible_from=created_at+1",
+    "breakout_logic": "resistance: close>max_price+beta*ATR[t-1]; support: close<min_price-beta*ATR[t-1]",
+    "touch_logic": "high>=min_price AND low<=max_price AND previous_overlap is false; deactivate when touches>max_touches",
+    "tie_breaker": "nearest price, then highest hits, then lowest zone_id"
+  },
+  "candle_rules": {
+    "single_candle_pinbar": "range>=max(2*tick_size,0.5*ATR[t-1]); body<=0.30*range; dominant wick>=0.60*range; opposite wick<=0.15*range; close in outer 35 percent; close beyond zone edge",
+    "two_candle_engulfing": "prior climax body>=0.60*range and current opposite candle closes beyond prior open; body>=0.80*prior body; no new extreme beyond one tick"
+  },
+  "execution_rules": {
+    "tick_priority": ["EMERGENCY_EXIT", "CANCEL_PENDING_ENTRY", "ORDINARY_ENTRY"],
+    "order_type": "OPEN_NEXT_BAR_MARKET",
+    "worst_case_intrabar": true,
+    "pnl_formula": "directional price difference*quantity - entry fee - exit fee"
+  }
+}

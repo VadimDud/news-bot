@@ -12,6 +12,7 @@ import pandas as pd
 
 from . import candle_patterns as candle_module
 from . import fib_pullback as fibp
+from . import ict_sweep_fvg as ict_module
 from . import kinetic as kinetic_module
 from . import risk as risk_module
 from . import signals as sig
@@ -1003,6 +1004,12 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     # разворотная свеча (close<open) после отскока; 2=отскок в Fib-зону
     # 50–78.6% хода к цели (структурно глубокая коррекция).
     ("fib_pyramid_trigger", 0),
+    # Реверс на стопе («перекладка»): 0=выкл (прод-поведение). Если шорт
+    # остановлен пробоем вверх за структурный уровень (swing high) и свеча
+    # закрылась ЗА уровнем — открыть лонг (и зеркально для лонга). Значение
+    # ``flip_on_stop``: 1 = реверс по закрытию за уровнем; 2 = реверс только
+    # при подтверждении (close за уровнем И свеча в сторону пробоя).
+    ("flip_on_stop", 0),
 )
 
 
@@ -1037,6 +1044,10 @@ class FibPullbackStrategy(RiskAwareStrategy):
         # добавках pyramiding — иначе стоп «ползёт» от цены добавки).
         self._short_stop_price: float | None = None
         self._short_target_price: float | None = None
+        # Реверс на стопе: сработал ли стоп-ордер на последней сделке и в каком
+        # направлении была позиция (для «перекладки» в противоположную сторону).
+        self._stopped_dir: int = 0
+        self._stopped_level: float | None = None
         # Окно истории для расчёта пивотов: по сути всей доступной истории
         # (кап — только чтобы сдерживать расход памяти). Пивоты — подтверждённые
         # локальные экстремумы, зависящие от прошлого; усечённое окно (например,
@@ -1317,6 +1328,16 @@ class FibPullbackStrategy(RiskAwareStrategy):
             if order is self._tp_order:
                 self._tp_order = None
             return
+        # Реверс на стопе: стоп-ордер сработал и закрыл позицию. Определяем это
+        # по типу ордера (Stop) и его направлению, а не по identity: bracket-стоп
+        # может быть уже снят из состояния к моменту колбэка (см. _cancel_bracket).
+        if order.exectype == bt.Order.Stop and self.position.size == 0:
+            if order.issell() and self._stopped_dir == 0:
+                self._stopped_dir = 1   # остановлен лонг (stop-sell ниже входа)
+                self._stopped_level = float(order.executed.price or order.price)
+            elif order.isbuy() and self._stopped_dir == 0:
+                self._stopped_dir = -1  # остановлен шорт (stop-buy выше входа)
+                self._stopped_level = float(order.executed.price or order.price)
         size = self.position.size
         if order.isbuy():
             if size > 0:
@@ -1377,6 +1398,90 @@ class FibPullbackStrategy(RiskAwareStrategy):
             return self._is_last_bar_of_day() and self.data.datetime.date(0).weekday() == 4
         return False
 
+    def _flip_confirms(self, stopped_dir: int) -> bool:
+        """Подтверждён ли разворот после стопа: close за структурным уровнем.
+
+        ``stopped_dir=+1`` — был лонг, стоп сработал вниз; разворот в шорт
+        валиден, если свеча закрылась НИЖЕ swing low (структура сломана вниз).
+        ``stopped_dir=-1`` — был шорт; разворот в лонг, если close ВЫШЕ swing high.
+        ``flip_on_stop=2`` дополнительно требует «свечу в сторону пробоя»
+        (close < open для шорта / close > open для лонга).
+        """
+        # Уровень исполнения стопа фиксируем до пересчёта текущего swing.
+        # Close должен продолжить пробой за стопом, иначе это обычный прокол.
+        level = self._stopped_level
+        if level is None:
+            level = self._last_swing_low if stopped_dir == 1 else self._last_swing_high
+        if level is None:
+            return False
+        close = float(self.data.close[0])
+        open_ = float(self.data.open[0])
+        if stopped_dir == 1:
+            if not (close < level):
+                return False
+            return int(self.p.flip_on_stop) < 2 or close < open_
+        if not (close > level):
+            return False
+        return int(self.p.flip_on_stop) < 2 or close > open_
+
+    def _try_flip(self) -> None:
+        """Переложить позицию в противоположную после стопа (``flip_on_stop``).
+
+        Шорт остановлен пробоем вверх и свеча закрылась за swing high → лонг
+        (и зеркально). Размер и стоп считаются от новой (противоположной)
+        структуры, цель — по R:R. За один стоп — одна перекладка.
+        """
+        if int(getattr(self.p, "flip_on_stop", 0) or 0) <= 0:
+            self._stopped_dir = 0
+            self._stopped_level = None
+            return
+        stopped = self._stopped_dir
+        self._stopped_dir = 0
+        if stopped == 0 or self.position.size != 0:
+            self._stopped_level = None
+            return
+        if self._drawdown_blocked():
+            return
+        self._fib_state()
+        if not self._flip_confirms(stopped):
+            self._stopped_level = None
+            return
+        self._stopped_level = None
+        if stopped == -1:
+            self._open_flip_long()   # был шорт → лонг
+        else:
+            self._open_flip_short()  # был лонг → шорт
+
+    def _open_flip_long(self) -> None:
+        """Реверс-лонг после стопа шорта: без трендового фильтра (пробой = сигнал)."""
+        price = float(self.data.close[0])
+        stop_dist = self._stop_distance()
+        if stop_dist <= 0:
+            return
+        size = self._risk_size()
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        size = min(size, max_by_cash) if max_by_cash > 0 else size
+        if size > 0:
+            self.buy(size=size)
+
+    def _open_flip_short(self) -> None:
+        """Реверс-шорт после стопа лонга: без трендового фильтра (пробой = сигнал)."""
+        price = float(self.data.close[0])
+        stop_dist = self._short_stop_distance()
+        if stop_dist <= 0:
+            return
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), self._risk_fraction(), stop_dist, price
+        )
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        size = min(size, max_by_cash) if max_by_cash > 0 else size
+        if size > 0:
+            self._pyramid_base_size = size
+            self._pyramid_adds = 0
+            self._short_stop_price = None
+            self._short_target_price = None
+            self.sell(size=size)
+
     def next(self):
         self._update_day_peak()
         direction = int(getattr(self.p, "direction", 1))
@@ -1401,6 +1506,11 @@ class FibPullbackStrategy(RiskAwareStrategy):
                 # Pyramiding: добавка на отскоке (close выше среднего входа).
                 self._try_pyramid_short()
         else:  # без позиции
+            # Реверс на стопе имеет приоритет над обычным входом.
+            if self._stopped_dir != 0:
+                self._try_flip()
+                if self.position.size != 0:
+                    return
             if self._drawdown_blocked():
                 return
             self._fib_state()
@@ -2292,6 +2402,208 @@ class ZoneBreakStrategy(TradeRecordingStrategy):
                 self._open_short(close)
 
 
+# Параметры ICT (Liquidity Sweep + FVG). Разворотный сетап: sweep пула
+# ликвидности → displacement/FVG → ретест по 50 % (Equilibrium) → вход.
+# min_rr=2.5 — жёсткий порог по ТЗ (риск/прибыль ≥ 1:2.5). Фильтры
+# (kill_zones, mss_required, fvg_ob_required, htf_confirmation_required)
+# по умолчанию выключены: в репо систематически подтверждается, что
+# включение входных фильтров режет net. Их эффект проверяется бэктестом.
+_ICT_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("direction", 0),
+    ("atr_period", 14),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.5),
+    ("min_rr", 2.5),
+    ("trend_period", 100),
+    ("swing_bars", 10),
+    ("ext_weight", 1),
+    ("int_levels", 0),
+    ("wick_frac", 0.5),
+    ("body_atr_k", 1.0),
+    ("body_ratio_min", 0.6),
+    ("fvg_ob_required", 0),
+    ("ob_overlap_min", 0.5),
+    ("eq_frac", 0.50),
+    ("retest_bars", 3),
+    ("kill_zones", 0),
+    ("mss_required", 0),
+    ("htf_confirmation_required", 0),
+    ("use_htf", 0),
+    ("htf_trend_period", 50),
+    ("precomputed", None),
+)
+
+
+class IctSweepFvgStrategy(RiskAwareStrategy):
+    """ICT Liquidity Sweep + Fair Value Gap (разворотный сетап).
+
+    Полностью переиспользует чистую логику ``ict_sweep_fvg`` на окне свечей
+    (паритет с live/pandas-сигналом и юнит-тестами). Вход — по подтверждённому
+    сигналу ``entry_ok_long``/``entry_ok_short``; стоп/тейк берутся из
+    рассчитанных уровней (стоп за FVG+экстремум sweep, тейк — противоположный
+    пул ликвидности с R:R-fallback). Р:R-гейт ``min_rr`` (по умолчанию 2.5)
+    встроен в детектор.
+    """
+
+    params = _ICT_PARAMS_TUPLE
+
+    def __init__(self):
+        super().__init__()
+        self._last_state: dict = {}
+        self._window = 1000
+        self._ict_sl = 0.0
+        self._ict_tp = 0.0
+
+    def _ict_frame(self) -> pd.DataFrame:
+        m = min(int(self.data.buflen()), int(self._window))
+        m = max(m, 3)
+
+        def col(name):
+            line = getattr(self.data, name)
+            return [float(line[-k]) for k in range(m - 1, -1, -1)]
+
+        idx = [self.data.datetime.datetime(-k) for k in range(m - 1, -1, -1)]
+        return pd.DataFrame(
+            {
+                "open": col("open"), "high": col("high"),
+                "low": col("low"), "close": col("close"), "volume": col("volume"),
+            },
+            index=pd.DatetimeIndex(idx, name="datetime"),
+        )
+
+    def _ict_state(self) -> dict:
+        # Быстрый путь бэктеста: массивы предрассчитаны один раз на всю историю
+        # (передаются параметром ``precomputed``). Иначе — пересчёт на окне
+        # (live-путь, паритет).
+        pre = getattr(self.p, "precomputed", None) if hasattr(self.p, "precomputed") else None
+        if pre:
+            pos = min(len(self) - 1, len(pre["entry_ok_long"]) - 1)
+            st = dict(pre)
+            st["idx"] = pos
+            self._last_state = st
+            return st
+        df = self._ict_frame()
+        params = {
+            "swing_bars": int(self.p.swing_bars),
+            "ext_weight": int(getattr(self.p, "ext_weight", 1)),
+            "int_levels": int(getattr(self.p, "int_levels", 0)),
+            "wick_frac": float(self.p.wick_frac),
+            "body_atr_k": float(self.p.body_atr_k),
+            "body_ratio_min": float(self.p.body_ratio_min),
+            "fvg_ob_required": int(getattr(self.p, "fvg_ob_required", 0)),
+            "ob_overlap_min": float(self.p.ob_overlap_min),
+            "eq_frac": float(self.p.eq_frac),
+            "retest_bars": int(self.p.retest_bars),
+            "kill_zones": int(getattr(self.p, "kill_zones", 0)),
+            "mss_required": int(getattr(self.p, "mss_required", 0)),
+            "htf_confirmation_required": int(getattr(self.p, "htf_confirmation_required", 0)),
+            "trend_period": int(self.p.trend_period),
+            "atr_period": int(self.p.atr_period),
+            "min_rr": float(self.p.min_rr),
+            "use_htf": int(getattr(self.p, "use_htf", 0)),
+            "htf_trend_period": int(self.p.htf_trend_period),
+        }
+        st = ict_module._compute_arrays(df, None, **params)
+        st["idx"] = len(df) - 1
+        self._last_state = st
+        return st
+
+    def _entry_levels(self, side: int) -> tuple[float, float]:
+        st = self._last_state
+        i = st["idx"]
+        return float(st["stop_price"][i]), float(st["target_price"][i])
+
+    def _size_from_risk(self, price: float, stop_dist: float) -> int:
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), self._risk_fraction(), stop_dist, price
+        )
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        return max(min(size, max_by_cash), 1) if max_by_cash > 0 else size
+
+    def _open_long_ict(self) -> None:
+        price = float(self.data.close[0])
+        sl, tp = self._entry_levels(1)
+        stop_dist = price - sl
+        if stop_dist <= 0:
+            return
+        size = self._size_from_risk(price, stop_dist)
+        if size <= 0:
+            return
+        self._ict_sl = sl
+        self._ict_tp = tp
+        self.buy(size=size)
+
+    def _open_short_ict(self) -> None:
+        price = float(self.data.close[0])
+        sl, tp = self._entry_levels(-1)
+        stop_dist = sl - price
+        if stop_dist <= 0:
+            return
+        size = self._size_from_risk(price, stop_dist)
+        if size <= 0:
+            return
+        self._ict_sl = sl
+        self._ict_tp = tp
+        self.sell(size=size)
+
+    def _place_bracket(self) -> None:
+        if self.position.size == 0:
+            return
+        size = abs(self.position.size)
+        if self.position.size > 0:
+            self._sl_order = self.sell(exectype=bt.Order.Stop, price=self._ict_sl, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit, price=self._ict_tp, size=size)
+        else:
+            self._sl_order = self.buy(exectype=bt.Order.Stop, price=self._ict_sl, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit, price=self._ict_tp, size=size)
+
+    def _cancel_bracket(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        size = self.position.size
+        if order.isbuy():
+            if size > 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+        else:
+            if size < 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+
+    def next(self):
+        if self.position.size != 0:
+            return
+        self._ict_state()
+        i = self._last_state["idx"]
+        side = int(self.p.direction)
+        if side >= 0 and self._last_state["entry_ok_long"][i]:
+            self._ict_sl = 0.0
+            self._ict_tp = 0.0
+            self._open_long_ict()
+        elif side <= 0 and self._last_state["entry_ok_short"][i]:
+            self._ict_sl = 0.0
+            self._ict_tp = 0.0
+            self._open_short_ict()
+
+
 STRATEGIES = {
     "sma_cross": {
         "name": "SMA Crossover",
@@ -2448,6 +2760,7 @@ STRATEGIES = {
             {"key": "daily_drawdown_pct", "label": "Дневная просадка-блокировка, % (0 = выкл)", "type": "float", "default": 0.0},
             {"key": "direction", "label": "Направление: 1=только лонг, -1=только шорт, 0=оба", "type": "int", "default": 1},
             {"key": "flat_mode", "label": "Перенос через ночь: 0=держать до цели, 1=EOD (закрыть в конце дня), 2=не переносить через выходные", "type": "int", "default": 0},
+            {"key": "flip_on_stop", "label": "Реверс после стопа: 0=выкл, 1=пробой уровня, 2=пробой + свеча", "type": "int", "default": 0},
             {"key": "vol_min_rel", "label": "Объём: мин. относительный (vol/SMA) для входа (0 = выкл)", "type": "float", "default": 0.0},
             {"key": "vol_max_rel", "label": "Объём: макс. относительный (0 = без потолка)", "type": "float", "default": 0.0},
             {"key": "long_need_bull_vol", "label": "Лонг: мин. доля быков на баре (0 = выкл)", "type": "float", "default": 0.0},
@@ -2512,6 +2825,34 @@ STRATEGIES = {
             {"key": "atr_k", "label": "Сильная свеча: тело ≥ k×ATR", "type": "float", "default": 1.0},
             {"key": "body_ratio_min", "label": "Сильная свеча: тело ≥ доли диапазона", "type": "float", "default": 0.6},
             {"key": "exit_zone", "label": "Выход: зона за N баров (0 = та же)", "type": "int", "default": 0},
+        ],
+    },
+    "ict_sweep_fvg": {
+        "name": "ICT: снятие ликвидности + FVG (разворот)",
+        "cls": IctSweepFvgStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "direction", "label": "Направление: 1=лонг, -1=шорт, 0=оба", "type": "int", "default": 0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 14},
+            {"key": "atr_stop_mult", "label": "Стоп: буфер за FVG/экстремум, ATR", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R, фолбэк)", "type": "float", "default": 2.5},
+            {"key": "min_rr", "label": "Мин. риск/доход для входа (RR)", "type": "float", "default": 2.5},
+            {"key": "trend_period", "label": "Трендовый EMA (контекст)", "type": "int", "default": 100},
+            {"key": "swing_bars", "label": "Свинг-пивоты (внутр. ликвидность)", "type": "int", "default": 10},
+            {"key": "ext_weight", "label": "Приоритет внешних пулов (Daily/session)", "type": "int", "default": 1},
+            {"key": "int_levels", "label": "Использовать внутр. свинги как пул (1 = да)", "type": "int", "default": 0},
+            {"key": "wick_frac", "label": "Ложный пробой: мин. доля тени", "type": "float", "default": 0.5},
+            {"key": "body_atr_k", "label": "Displacement: тело ≥ k×ATR", "type": "float", "default": 1.0},
+            {"key": "body_ratio_min", "label": "Displacement: тело ≥ доли диапазона", "type": "float", "default": 0.6},
+            {"key": "fvg_ob_required", "label": "FVG обязан перекрываться с Order Block (1 = да)", "type": "int", "default": 0},
+            {"key": "ob_overlap_min", "label": "OB: мин. доля перекрытия с FVG", "type": "float", "default": 0.5},
+            {"key": "eq_frac", "label": "Вход: глубина FVG (0.5 = 50% Equilibrium)", "type": "float", "default": 0.50},
+            {"key": "retest_bars", "label": "Окно ретеста FVG, баров", "type": "int", "default": 3},
+            {"key": "kill_zones", "label": "Фильтр Kill Zones (часы UTC) (1 = да)", "type": "int", "default": 0},
+            {"key": "mss_required", "label": "Требовать Market Structure Shift (1 = да)", "type": "int", "default": 0},
+            {"key": "htf_confirmation_required", "label": "Контртренд: требовать внешний пул (1 = да)", "type": "int", "default": 0},
+            {"key": "use_htf", "label": "Фильтр тренда старшего ТФ (1 = да)", "type": "int", "default": 0},
+            {"key": "htf_trend_period", "label": "HTF: период EMA тренда", "type": "int", "default": 50},
         ],
     },
 }

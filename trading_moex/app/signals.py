@@ -829,6 +829,21 @@ def _zone_break_signal(df: pd.DataFrame, **kwargs):
     return cpattern.zone_break_position(df, **params)
 
 
+def _ict_sweep_fvg_signal(df: pd.DataFrame, **kwargs):
+    """Обёртка ICT (Liquidity Sweep + FVG): чистая логика из ``ict_sweep_fvg``.
+
+    Риск-менеджментские параметры (risk_pct, atr_stop_mult и пр.) отсекаются
+    внутри детектора (``_detector_params``).
+
+    ⚠️ НЕ внесена в SIGNAL_FUNCS намеренно: стратегия не подтверждена бэктестом
+    и не должна быть доступна в live-цикле до подтверждения (см. INSTRUCTIONS.md).
+    """
+    from . import ict_sweep_fvg as ict
+
+    htf_df = kwargs.pop("htf_df", None)
+    return ict.ict_sweep_fvg_signal(df, htf_df=htf_df, **kwargs)
+
+
 SIGNAL_FUNCS = {
     "sma_cross": sma_cross_position,
     "rsi": rsi_position,

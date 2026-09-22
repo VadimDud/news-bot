@@ -7,23 +7,8 @@ services:
     # api.telegram.org (сигналы ROE). Порт 8081 слушается приложением напрямую.
     network_mode: host
     env_file:
-      - .env
+      - .env.trader
     environment:
-      TRADER_DRY_RUN: "${TRADER_DRY_RUN:-true}"
-      TRADER_POLL_INTERVAL: "${TRADER_POLL_INTERVAL:-60}"
-      TRADER_WATCH_TICKERS: "${TRADER_WATCH_TICKERS:-SBER,LKOH}"
-      TRADER_WEB_PORT: "${TRADER_WEB_PORT:-8081}"
-      TRADER_WEB_PASSWORD: "${TRADER_WEB_PASSWORD:-}"
-      TRADER_QUANTITY: "${TRADER_QUANTITY:-1}"
-      TRADER_LIVE_INTERVAL: "${TRADER_LIVE_INTERVAL:-hour}"
-      TINKOFF_API_TOKEN: "${TINKOFF_API_TOKEN:-}"
-      TINKOFF_SSL_RU_CA: "${TINKOFF_SSL_RU_CA:-true}"
-      MOEX_LOGIN: "${MOEX_LOGIN:-}"
-      MOEX_PASSWORD: "${MOEX_PASSWORD:-}"
-      # Dindindon API (OpenAI-compatible) for news guard + thesis
-      DINDINDON_API_KEY: "${DINDINDON_API_KEY:-}"
-      DINDINDON_BASE_URL: "${DINDINDON_BASE_URL:-https://dindindon.ru/v1}"
-      DINDINDON_MODEL: "${DINDINDON_MODEL:-kimi-k2.7-code-highspeed}"
       # Прокси только для Telegram-отправки сигналов; MOEX ходит напрямую.
       TRADER_TG_PROXY: "${TRADER_TG_PROXY:-http://127.0.0.1:31533}"
       # MOEX не заблокирован — глобальный прокси контейнеру не нужен.
@@ -40,6 +25,12 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.socket(); s.settimeout(3); sys.exit(0 if s.connect_ex(('127.0.0.1',8081))==0 else 1)\""]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   bot:
     build: .

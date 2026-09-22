@@ -62,7 +62,10 @@ async def admin_handler(callback: CallbackQuery, user_lang: str):
             lines = []
             for i, u in enumerate(users, 1):
                 uname = f"@{u['username']}" if u["username"] else u["full_name"]
-                until = (u.get("access_until") or "—")[:10]
+                if db.has_permanent_access(u.get("access_until")):
+                    until = "∞"
+                else:
+                    until = (u.get("access_until") or "—")[:10]
                 lines.append(f"<code>{i:2}</code>. <b>{u['user_id']}</b>  {html.escape(str(uname))}  [{u['language']}]  до {until}")
             table = "\n".join(lines)
         await callback.message.edit_text(

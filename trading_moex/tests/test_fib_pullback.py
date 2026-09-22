@@ -432,6 +432,15 @@ def test_volume_gates_default_off():
     assert keys.get("short_need_bear_vol", 0) == 0
 
 
+def test_flip_on_stop_default_off():
+    """Реверс после стопа экспериментальный и не меняет baseline по умолчанию."""
+    keys = dict((k, v) for k, v in _FIB_PULLBACK_PARAMS_TUPLE)
+    assert keys["flip_on_stop"] == 0
+    from app.strategies import STRATEGIES
+    params = {p["key"]: p["default"] for p in STRATEGIES["fib_pullback"]["params"]}
+    assert params["flip_on_stop"] == 0
+
+
 def test_volume_features_in_breakdown():
     # fib_score_breakdown должен отдавать vol_rel и bull_bear_in (для сигнала).
     df = _trend_series(200.0, -0.2, direction=-1)

@@ -167,6 +167,24 @@ def init_db() -> None:
             )
             """
         )
+        # Backtest profiles are stored separately from live Fib scanner settings.
+        # This allows keeping profitable in-sample candidates without activating
+        # them in production before an out-of-sample check.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fib_strategy_profiles (
+                profile_key TEXT PRIMARY KEY,
+                strategy TEXT NOT NULL,
+                direction INTEGER NOT NULL DEFAULT 0,
+                timeframe TEXT,
+                params TEXT,
+                metrics TEXT,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                source TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         # graceful-миграция: у старых таблиц может не быть колонки timeframe
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(fib_ticker_settings)").fetchall()]
@@ -520,6 +538,86 @@ def delete_fib_ticker_setting(ticker: str) -> None:
     """Удалить per-ticker настройку (вернуться к TICKER_OVERRIDES/дефолту)."""
     with _connect() as conn:
         conn.execute("DELETE FROM fib_ticker_settings WHERE ticker = ?", (ticker.upper(),))
+
+
+def save_fib_strategy_profile(
+    profile_key: str,
+    strategy: str,
+    direction: int,
+    params: dict,
+    metrics: dict | None = None,
+    timeframe: str | None = None,
+    enabled: bool = False,
+    source: str = "backtest",
+) -> None:
+    """Сохранить результат/настройки бэктеста без автоматической активации."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO fib_strategy_profiles
+                (profile_key, strategy, direction, timeframe, params, metrics,
+                 enabled, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_key) DO UPDATE SET
+                strategy=excluded.strategy,
+                direction=excluded.direction,
+                timeframe=excluded.timeframe,
+                params=excluded.params,
+                metrics=excluded.metrics,
+                enabled=excluded.enabled,
+                source=excluded.source,
+                updated_at=excluded.updated_at
+            """,
+            (
+                profile_key,
+                strategy,
+                int(direction),
+                timeframe,
+                json.dumps(params, ensure_ascii=False),
+                json.dumps(metrics or {}, ensure_ascii=False),
+                int(bool(enabled)),
+                source,
+                now,
+            ),
+        )
+
+
+def list_fib_strategy_profiles() -> dict[str, dict]:
+    """Вернуть сохранённые Fib-профили с JSON-полями в виде dict."""
+    out: dict[str, dict] = {}
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT profile_key, strategy, direction, timeframe, params, metrics,
+                   enabled, source, updated_at
+            FROM fib_strategy_profiles
+            """
+        ).fetchall()
+    for key, strategy, direction, timeframe, params, metrics, enabled, source, updated_at in rows:
+        def parse(value):
+            try:
+                parsed = json.loads(value) if value else {}
+                return parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError):
+                return {}
+
+        out[key] = {
+            "strategy": strategy,
+            "direction": int(direction or 0),
+            "timeframe": timeframe,
+            "params": parse(params),
+            "metrics": parse(metrics),
+            "enabled": bool(enabled),
+            "source": source,
+            "updated_at": updated_at,
+        }
+    return out
+
+
+def get_fib_strategy_profile(profile_key: str) -> dict | None:
+    """Вернуть профиль бэктеста или None."""
+    return list_fib_strategy_profiles().get(profile_key)
 
 
 def set_watchlist(tickers: list[str]) -> None:

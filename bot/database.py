@@ -6,6 +6,13 @@ from . import config
 
 _db: aiosqlite.Connection | None = None
 
+# Значение access_until для постоянного доступа (до явной отмены).
+FOREVER = "forever"
+
+
+def has_permanent_access(access_until: str | None) -> bool:
+    return (access_until or "").strip().lower() == FOREVER
+
 
 async def init_db():
     global _db
@@ -368,6 +375,8 @@ async def has_access(user_id: int) -> bool:
     user = await get_user(user_id)
     if not user or not user["access_until"]:
         return False
+    if has_permanent_access(user["access_until"]):
+        return True
     try:
         until = datetime.datetime.fromisoformat(user["access_until"])
         return until > datetime.datetime.now()
@@ -378,6 +387,8 @@ async def has_access(user_id: int) -> bool:
 async def grant_trial(user_id: int, days: int = 30):
     user = await get_user(user_id)
     if user and user.get("access_until"):
+        if has_permanent_access(user["access_until"]):
+            return False
         try:
             if datetime.datetime.fromisoformat(user["access_until"]) > datetime.datetime.now():
                 return False
@@ -397,6 +408,8 @@ async def grant_access(user_id: int, days: int):
     user = await get_user(user_id)
     now = datetime.datetime.now()
     if user and user["access_until"]:
+        if has_permanent_access(user["access_until"]):
+            return user["access_until"]
         try:
             base = datetime.datetime.fromisoformat(user["access_until"])
             if base > now:
@@ -415,6 +428,26 @@ async def grant_access(user_id: int, days: int):
     return until
 
 
+async def grant_permanent_access(user_id: int) -> None:
+    """Постоянный доступ до явной отмены (access_until='forever')."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE users SET access_until = ? WHERE user_id = ?",
+        (FOREVER, user_id),
+    )
+    await db.commit()
+
+
+async def revoke_access(user_id: int) -> None:
+    """Забрать доступ (в т.ч. постоянный)."""
+    db = await _get_db()
+    await db.execute(
+        "UPDATE users SET access_until = NULL WHERE user_id = ?",
+        (user_id,),
+    )
+    await db.commit()
+
+
 async def get_access_info(user_id: int) -> dict:
     user = await get_user(user_id)
     if not user:
@@ -422,6 +455,8 @@ async def get_access_info(user_id: int) -> dict:
     until_str = user["access_until"]
     if not until_str:
         return {"has_access": False, "until": None, "days_left": 0}
+    if has_permanent_access(until_str):
+        return {"has_access": True, "until": None, "days_left": None}
     try:
         until = datetime.datetime.fromisoformat(until_str)
         now = datetime.datetime.now()
@@ -437,6 +472,7 @@ async def get_users_expiring_soon(days: int = 2) -> list[dict]:
     async with db.execute(
         "SELECT user_id, username, access_until FROM users "
         "WHERE access_until IS NOT NULL "
+        "AND lower(trim(access_until)) != 'forever' "
         "AND access_until > datetime('now') "
         "AND access_until <= datetime('now', '+' || ? || ' days')",
         (days,),
@@ -492,7 +528,8 @@ async def get_active_users_with_assets() -> list[dict]:
         FROM users u
         INNER JOIN user_channels uc ON u.user_id = uc.user_id
         WHERE u.access_until IS NOT NULL
-          AND u.access_until > datetime('now')
+          AND (lower(trim(u.access_until)) = 'forever'
+               OR u.access_until > datetime('now'))
     """) as cur:
         return [dict(row) for row in await cur.fetchall()]
 
@@ -645,7 +682,8 @@ async def get_all_user_channels() -> list[dict]:
         FROM user_channels uc
         INNER JOIN users u ON uc.user_id = u.user_id
         WHERE u.access_until IS NOT NULL
-          AND u.access_until > datetime('now')
+          AND (lower(trim(u.access_until)) = 'forever'
+               OR u.access_until > datetime('now'))
     """) as cur:
         results = []
         for row in await cur.fetchall():

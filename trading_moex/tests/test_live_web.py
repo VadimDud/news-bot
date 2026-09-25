@@ -129,3 +129,13 @@ async def test_adaptive_candles_endpoint_limits_and_serializes(monkeypatch):
     assert body["ticker"] == "T"
     assert len(body["candles"]) == 25
     assert set(body["candles"][-1]) == {"time", "open", "high", "low", "close"}
+
+
+@pytest.mark.asyncio
+async def test_market_data_status_never_enables_orders(monkeypatch):
+    monkeypatch.setattr(web_app, "config", web_app.config)
+    response = await web_app.adaptive_market_data_status(_Request(path="/api/adaptive/market-data/status"))
+    body = json.loads(response.text)
+
+    assert response.status == 200
+    assert body["orders_enabled"] is False

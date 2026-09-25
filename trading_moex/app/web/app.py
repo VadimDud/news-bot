@@ -1134,6 +1134,12 @@ async def adaptive_candles(request: web.Request) -> web.Response:
     return web.json_response({"ticker": ticker, "timeframe": "15min", "candles": candles})
 
 
+async def adaptive_market_data_status(request: web.Request) -> web.Response:
+    from ..market_data import stream_status
+
+    return web.json_response(stream_status())
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
@@ -1182,5 +1188,6 @@ def create_app() -> web.Application:
     app.router.add_post("/api/adaptive/maneuver", adaptive_maneuver)
     app.router.add_get("/api/adaptive/status", adaptive_status)
     app.router.add_get("/api/adaptive/{ticker}/candles", adaptive_candles)
+    app.router.add_get("/api/adaptive/market-data/status", adaptive_market_data_status)
     app.router.add_static("/static", Path(__file__).resolve().parent / "static")
     return app

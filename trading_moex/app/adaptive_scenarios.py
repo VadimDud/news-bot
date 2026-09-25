@@ -57,6 +57,9 @@ class DynamicScenario(BaseModel):
     recommended_tp: float = Field(gt=0)
     historical_win_rate: float = Field(ge=0, le=1)
     historical_samples_count: int = Field(ge=0)
+    confidence_low: float = Field(ge=0, le=1)
+    confidence_high: float = Field(ge=0, le=1)
+    sample_warning: Literal["OK", "LOW_SAMPLE", "NO_DATA"]
     projected_path: list[PricePoint]
 
 
@@ -100,6 +103,15 @@ class PatternRecord:
     forward_return_5: float | None
     forward_return_8: float | None
     success: bool | None
+
+
+@dataclass(frozen=True)
+class NearestStats:
+    win_rate: float
+    samples: int
+    confidence_low: float
+    confidence_high: float
+    warning: Literal["OK", "LOW_SAMPLE", "NO_DATA"]
 
 
 def _connect(path: str | Path) -> sqlite3.Connection:
@@ -210,15 +222,37 @@ def store_pattern_records(db_path: str | Path, records: list[PatternRecord]) -> 
         return len(records)
 
 
-def _load_records(db_path: str | Path, ticker: str, scenario: str) -> list[tuple[np.ndarray, bool]]:
+def _load_records(
+    db_path: str | Path,
+    ticker: str,
+    scenario: str,
+    before: pd.Timestamp | None = None,
+) -> list[tuple[np.ndarray, bool, pd.Timestamp]]:
     import json
 
+    query = "SELECT feature_json, success, pattern_ts FROM adaptive_patterns WHERE ticker = ? AND scenario = ? AND success IS NOT NULL"
+    params: list[object] = [ticker.upper(), scenario]
+    if before is not None:
+        query += " AND pattern_ts < ?"
+        params.append(str(before))
     with _connect(db_path) as connection:
-        rows = connection.execute(
-            "SELECT feature_json, success FROM adaptive_patterns WHERE ticker = ? AND scenario = ? AND success IS NOT NULL",
-            (ticker.upper(), scenario),
-        ).fetchall()
-    return [(np.asarray(json.loads(row["feature_json"]), dtype=float), bool(row["success"])) for row in rows]
+        rows = connection.execute(query, params).fetchall()
+    return [(
+        np.asarray(json.loads(row["feature_json"]), dtype=float),
+        bool(row["success"]),
+        pd.Timestamp(row["pattern_ts"]),
+    ) for row in rows]
+
+
+def _wilson_interval(successes: float, effective_n: float, z: float = 1.959963984540054) -> tuple[float, float]:
+    """Wilson interval for weighted Bernoulli observations."""
+    if effective_n <= 0:
+        return 0.0, 1.0
+    p = successes / effective_n
+    denominator = 1.0 + z * z / effective_n
+    center = (p + z * z / (2.0 * effective_n)) / denominator
+    margin = z * math.sqrt(p * (1.0 - p) / effective_n + z * z / (4.0 * effective_n * effective_n)) / denominator
+    return max(0.0, center - margin), min(1.0, center + margin)
 
 
 def _nearest_stats(
@@ -227,14 +261,35 @@ def _nearest_stats(
     scenario: Literal["BREAKOUT", "BOUNCE"],
     vector: tuple[float, ...],
     k: int = 50,
-) -> tuple[float, int]:
-    records = _load_records(db_path, ticker, scenario)
+    before: pd.Timestamp | None = None,
+) -> NearestStats:
+    records = _load_records(db_path, ticker, scenario, before=before)
     if not records:
-        return 0.5, 0
+        return NearestStats(0.5, 0, 0.0, 1.0, "NO_DATA")
     target = np.asarray(vector, dtype=float)
-    distances = sorted((float(np.linalg.norm(features - target)), success) for features, success in records)
+    matrix = np.vstack([features for features, _, _ in records])
+    median = np.median(matrix, axis=0)
+    scale = np.subtract(*np.percentile(matrix, [75, 25], axis=0))
+    scale = np.where(scale > 1e-12, scale, 1.0)
+    normalized_target = (target - median) / scale
+    normalized_matrix = (matrix - median) / scale
+    distances = sorted(
+        (float(np.linalg.norm(features - normalized_target)), success, timestamp)
+        for features, (_, success, timestamp) in zip(normalized_matrix, records)
+    )
     nearest = distances[: min(k, len(distances))]
-    return float(np.mean([success for _, success in nearest])), len(nearest)
+    as_of = max(timestamp for _, _, timestamp in nearest)
+    half_life_days = 180.0
+    weights = np.asarray([
+        math.exp(-math.log(2.0) * max(0.0, (as_of - timestamp).total_seconds()) / (half_life_days * 86400.0))
+        for _, _, timestamp in nearest
+    ])
+    successes = float(sum(weight for weight, (_, success, _) in zip(weights, nearest) if success))
+    effective_n = float(weights.sum() ** 2 / max(np.square(weights).sum(), 1e-12))
+    rate = successes / max(weights.sum(), 1e-12)
+    low, high = _wilson_interval(successes, effective_n)
+    warning: Literal["OK", "LOW_SAMPLE", "NO_DATA"] = "OK" if effective_n >= 30 else "LOW_SAMPLE"
+    return NearestStats(rate, len(nearest), low, high, warning)
 
 
 def build_live_context(frame: pd.DataFrame, ticker: str = "T") -> LiveChartContext | None:
@@ -270,14 +325,12 @@ def generate_forecast(
     atr = context.current_atr
     entry = context.current_price
     base_time = int(pd.Timestamp(prepared.iloc[-1]["timestamp"]).timestamp())
+    before = pd.Timestamp(prepared.iloc[-1]["timestamp"])
     scenarios: list[DynamicScenario] = []
     probabilities: dict[str, float] = {}
     for scenario_id, title in (("BREAKOUT", "Импульсный пробой"), ("BOUNCE", "Отскок от уровня")):
-        win_rate, samples = _nearest_stats(db_path, ticker, scenario_id, vector)
-        prior = 0.5 if samples == 0 else win_rate
-        if scenario_id == "BOUNCE":
-            prior = 1.0 - prior if samples else 0.5
-        probabilities[scenario_id] = prior
+        stats = _nearest_stats(db_path, ticker, scenario_id, vector, before=before)
+        probabilities[scenario_id] = stats.win_rate
     total = sum(probabilities.values()) or 1.0
     for scenario_id, title in (("BREAKOUT", "Импульсный пробой"), ("BOUNCE", "Отскок от уровня")):
         probability = probabilities[scenario_id] / total
@@ -290,11 +343,15 @@ def generate_forecast(
             stop = min(stop, entry - 0.5 * atr)
             target = entry + 2.5 * (entry - stop)
             path = [entry, context.nearest_level_price, target]
+        stats = _nearest_stats(db_path, ticker, scenario_id, vector, before=before)
         scenarios.append(DynamicScenario(
             id=scenario_id, title=title, probability=probability,
             recommended_entry=entry, recommended_sl=stop, recommended_tp=target,
-            historical_win_rate=probabilities[scenario_id] if probabilities[scenario_id] else 0.5,
-            historical_samples_count=_nearest_stats(db_path, ticker, scenario_id, vector)[1],
+            historical_win_rate=stats.win_rate,
+            historical_samples_count=stats.samples,
+            confidence_low=stats.confidence_low,
+            confidence_high=stats.confidence_high,
+            sample_warning=stats.warning,
             projected_path=[PricePoint(time=base_time + i * 900, price=float(price)) for i, price in enumerate(path)],
         ))
     maneuver = None

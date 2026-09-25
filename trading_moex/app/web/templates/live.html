@@ -145,6 +145,7 @@
   let adaptiveChart = null;
   let candleSeries = null;
   let scenarioLines = [];
+  let projectedLines = [];
   const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
   const setMessage = value => { adaptiveMessage.textContent = value; };
   async function refreshAdaptiveStatus() {
@@ -193,14 +194,19 @@
   function drawScenarioPaths(scenarios) {
     scenarioLines.forEach(line => candleSeries.removePriceLine(line));
     scenarioLines = [];
+    projectedLines.forEach(line => adaptiveChart.removeSeries(line));
+    projectedLines = [];
     if (!candleSeries || !scenarios) return;
     scenarios.forEach(scenario => {
-      scenarioLines.push(candleSeries.createPriceLine({
-        price: scenario.recommended_tp,
-        color: scenario.id === 'BREAKOUT' ? '#4f8cff' : '#d6a85e',
-        lineWidth: 2, lineStyle: 2, axisLabelVisible: true,
-        title: scenario.id + ' ' + (scenario.probability * 100).toFixed(0) + '%',
-      }));
+      const color = scenario.id === 'BREAKOUT' ? '#4f8cff' : '#d6a85e';
+      scenarioLines.push(candleSeries.createPriceLine({price: scenario.recommended_tp, color, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: scenario.id + ' TP ' + (scenario.probability * 100).toFixed(0) + '%'}));
+      scenarioLines.push(candleSeries.createPriceLine({price: scenario.recommended_sl, color: '#ff5d5d', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: scenario.id + ' SL'}));
+      scenarioLines.push(candleSeries.createPriceLine({price: scenario.recommended_entry, color: '#9aa3b8', lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: scenario.id + ' Entry'}));
+      if (scenario.projected_path.length > 1 && adaptiveChart) {
+        const path = adaptiveChart.addLineSeries({color, lineWidth: 2, lineStyle: 1, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false});
+        path.setData(scenario.projected_path);
+        projectedLines.push(path);
+      }
     });
   }
 
@@ -232,13 +238,14 @@
         + '<span class="chip">Сжатие: ' + escapeHtml(context.volatility_compression_score.toFixed(2)) + '</span>';
       scenariosEl.innerHTML = data.scenarios.map(scenario =>
         '<div class="card"><h3>' + escapeHtml(scenario.title) + ' · ' + escapeHtml((scenario.probability * 100).toFixed(1)) + '%</h3>'
-        + '<p>История: ' + escapeHtml((scenario.historical_win_rate * 100).toFixed(1)) + '% / n=' + escapeHtml(scenario.historical_samples_count) + '</p>'
+        + '<p>История: ' + escapeHtml((scenario.historical_win_rate * 100).toFixed(1)) + '% / n=' + escapeHtml(scenario.historical_samples_count) + ' · CI ' + escapeHtml((scenario.confidence_low * 100).toFixed(1)) + '–' + escapeHtml((scenario.confidence_high * 100).toFixed(1)) + '%</p>'
+        + '<p class="hint">' + escapeHtml(scenario.sample_warning) + '</p>'
         + '<p>Entry <b>' + escapeHtml(scenario.recommended_entry.toFixed(2)) + '</b> · SL <b>' + escapeHtml(scenario.recommended_sl.toFixed(2)) + '</b> · TP <b>' + escapeHtml(scenario.recommended_tp.toFixed(2)) + '</b></p></div>'
       ).join('');
-      drawScenarioPaths(data.scenarios);
       maneuverForm.style.display = 'block';
       setMessage(data.suggested_maneuver ? 'Предложение: ' + data.suggested_maneuver : 'Сценарии обновлены.');
       await loadAdaptiveChart();
+      drawScenarioPaths(data.scenarios);
     } catch (error) { setMessage(error.message); }
   });
 

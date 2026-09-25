@@ -31,6 +31,43 @@ POLL_INTERVAL = int(os.environ.get("TRADER_POLL_INTERVAL", "60"))
 WATCH_TICKERS = [t.strip() for t in os.environ.get("TRADER_WATCH_TICKERS", "SBER,LKOH").split(",") if t.strip()]
 TRADER_QUANTITY = os.environ.get("TRADER_QUANTITY", "1")
 TRADER_LIVE_INTERVAL = os.environ.get("TRADER_LIVE_INTERVAL", "hour")
+# Жёсткий лимит рыночной стоимости одной новой позиции относительно equity.
+TRADER_MAX_POSITION_PCT = float(os.environ.get("TRADER_MAX_POSITION_PCT", "50.0"))
+# Circuit breaker: 0 отключает соответствующее ограничение.
+TRADER_MAX_DAILY_LOSS_PCT = float(os.environ.get("TRADER_MAX_DAILY_LOSS_PCT", "2.0"))
+TRADER_MAX_DRAWDOWN_PCT = float(os.environ.get("TRADER_MAX_DRAWDOWN_PCT", "10.0"))
+# Optional read-only T-Bank trades/order-book stream for adaptive analytics.
+TRADER_MARKET_DATA_ENABLED = os.environ.get("TRADER_MARKET_DATA_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+TRADER_MARKET_DATA_RECONNECT_SEC = max(1, int(os.environ.get("TRADER_MARKET_DATA_RECONNECT_SEC", "5")))
+
+
+def live_config_issues(
+    dry_run: bool | None = None,
+    web_password_configured: bool = True,
+    token_configured: bool | None = None,
+) -> tuple[list[str], list[str]]:
+    """Вернуть ошибки и предупреждения безопасного запуска live-контура."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    live = not (DRY_RUN if dry_run is None else dry_run)
+
+    if POLL_INTERVAL <= 0:
+        errors.append("TRADER_POLL_INTERVAL должен быть больше нуля")
+    if not WATCH_TICKERS:
+        errors.append("TRADER_WATCH_TICKERS не содержит тикеров")
+    if not 0 < TRADER_MAX_POSITION_PCT <= 100:
+        errors.append("TRADER_MAX_POSITION_PCT должен быть в диапазоне (0, 100]")
+    if TRADER_MAX_DAILY_LOSS_PCT < 0 or TRADER_MAX_DRAWDOWN_PCT < 0:
+        errors.append("лимиты circuit breaker не могут быть отрицательными")
+    if TRADER_MAX_DAILY_LOSS_PCT == 0 and TRADER_MAX_DRAWDOWN_PCT == 0:
+        warnings.append("оба лимита circuit breaker отключены")
+    if live and not web_password_configured:
+        errors.append("TRADER_WEB_PASSWORD не задан для LIVE-режима")
+    if token_configured is None:
+        token_configured = bool(TINKOFF_API_TOKEN)
+    if live and not token_configured:
+        errors.append("TINKOFF_API_TOKEN не задан для LIVE-режима")
+    return errors, warnings
 
 # Веб-дашборд
 WEB_HOST = os.environ.get("TRADER_WEB_HOST", "0.0.0.0")

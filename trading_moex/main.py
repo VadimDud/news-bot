@@ -155,6 +155,15 @@ async def main() -> None:
     else:
         logger.info("Adaptive pattern collector disabled via TRADER_ADAPTIVE_ENABLED")
 
+    market_data_task: asyncio.Task | None = None
+    if config.TRADER_MARKET_DATA_ENABLED:
+        from app.market_data_loop import market_data_loop
+
+        logger.info("Starting read-only T-Bank market-data stream")
+        market_data_task = asyncio.create_task(market_data_loop())
+    else:
+        logger.info("Read-only T-Bank market-data stream disabled")
+
     # Запустить фоновый сканер Elliott micro-wave сигналов (ежедневно вечером)
     elliott_task: asyncio.Task | None = None
     if config.TRADER_ELLIOTT_ENABLED:
@@ -210,6 +219,7 @@ async def main() -> None:
     watched = {
         "ROE": signal_task,
         "Adaptive": adaptive_task,
+        "Market-data": market_data_task,
         "Elliott": elliott_task,
         "Fib": fib_task,
         "Fib-data": fib_data_task,
@@ -233,6 +243,10 @@ async def main() -> None:
             adaptive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await adaptive_task
+        if market_data_task is not None:
+            market_data_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await market_data_task
         if elliott_task is not None:
             elliott_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

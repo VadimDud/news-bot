@@ -139,3 +139,12 @@ async def test_market_data_status_never_enables_orders(monkeypatch):
 
     assert response.status == 200
     assert body["orders_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_market_data_status_reports_adapter_mode():
+    response = await web_app.adaptive_market_data_status(_Request(path="/api/adaptive/market-data/status"))
+    body = json.loads(response.text)
+
+    assert body["adapter"] in {"UNAVAILABLE", "read_only_available"}
+    assert body["orders_enabled"] is False

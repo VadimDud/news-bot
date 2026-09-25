@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.tbank_market_data import TBankMarketDataAdapter, map_order_book, map_trade, quote_from_book
+from app.market_data_loop import market_data_loop
 
 
 def _quotation(value: float) -> SimpleNamespace:
@@ -43,3 +44,9 @@ def test_adapter_reports_unavailable_without_token() -> None:
     assert asyncio.run(read_first()) is None
     assert adapter.status["state"] == "UNAVAILABLE"
     assert adapter.status["orders_enabled"] is False
+
+
+def test_market_data_loop_is_disabled_by_default(monkeypatch) -> None:
+    monkeypatch.setattr("app.market_data_loop.config.TRADER_MARKET_DATA_ENABLED", False)
+
+    asyncio.run(market_data_loop())

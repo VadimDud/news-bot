@@ -97,6 +97,9 @@ class TBankMarketDataAdapter:
             "state": "CREATED", "orders_enabled": False, "last_error": None,
         }
 
+    def snapshot(self) -> dict[str, object]:
+        return dict(self.status)
+
     async def events(self) -> AsyncIterator[TradeEvent | BookSnapshot]:
         """Yield validated events; retry transient stream failures with backoff."""
         if not self._token:

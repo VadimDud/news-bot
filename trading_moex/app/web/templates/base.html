@@ -6,6 +6,7 @@
 <title>{% block title %}MOEX Trader{% endblock %}</title>
 <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root {
   --bg: #0f1420;
@@ -45,6 +46,7 @@ nav a {
 nav a.active, nav a:hover { background: rgba(79,140,255,.15); color: var(--accent); }
 header form { margin-left: auto; }
 main { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+.adaptive-chart { width: 100%; height: 430px; min-height: 300px; }
 .card {
   background: var(--panel);
   border: 1px solid var(--border);

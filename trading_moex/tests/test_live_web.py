@@ -104,3 +104,28 @@ async def test_adaptive_maneuver_endpoint_is_dry_run(monkeypatch):
     body = json.loads(response.text)
     assert body["status"] == "DRY_RUN_VALIDATED"
     assert body["broker_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_adaptive_candles_endpoint_limits_and_serializes(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(web_app, "_adaptive_frame", lambda ticker: pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=25, freq="15min"),
+        "open": [100.0] * 25,
+        "high": [101.0] * 25,
+        "low": [99.0] * 25,
+        "close": [100.5] * 25,
+        "volume": [10.0] * 25,
+    }))
+    request = _Request(path="/api/adaptive/T/candles")
+    request.query = {"limit": "10000"}
+    request.match_info = {"ticker": "T"}
+
+    response = await web_app.adaptive_candles(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200
+    assert body["ticker"] == "T"
+    assert len(body["candles"]) == 25
+    assert set(body["candles"][-1]) == {"time", "open", "high", "low", "close"}

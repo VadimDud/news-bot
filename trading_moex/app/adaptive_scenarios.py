@@ -269,6 +269,7 @@ def generate_forecast(
     assert vector is not None
     atr = context.current_atr
     entry = context.current_price
+    base_time = int(pd.Timestamp(prepared.iloc[-1]["timestamp"]).timestamp())
     scenarios: list[DynamicScenario] = []
     probabilities: dict[str, float] = {}
     for scenario_id, title in (("BREAKOUT", "Импульсный пробой"), ("BOUNCE", "Отскок от уровня")):
@@ -294,7 +295,7 @@ def generate_forecast(
             recommended_entry=entry, recommended_sl=stop, recommended_tp=target,
             historical_win_rate=probabilities[scenario_id] if probabilities[scenario_id] else 0.5,
             historical_samples_count=_nearest_stats(db_path, ticker, scenario_id, vector)[1],
-            projected_path=[PricePoint(time=i, price=float(price)) for i, price in enumerate(path)],
+            projected_path=[PricePoint(time=base_time + i * 900, price=float(price)) for i, price in enumerate(path)],
         ))
     maneuver = None
     if current_position:

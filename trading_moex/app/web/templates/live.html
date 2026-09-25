@@ -64,6 +64,7 @@
   </div>
   <div id="adaptive-message" class="hint" style="margin-top:10px;"></div>
   <div id="adaptive-collector-status" class="hint" style="margin-top:6px;">Collector: проверка...</div>
+  <div id="adaptive-chart" class="adaptive-chart" style="margin-top:14px;"></div>
   <div id="adaptive-context" style="margin-top:12px;"></div>
   <div id="adaptive-scenarios" class="grid" style="margin-top:12px;"></div>
   <form id="adaptive-maneuver" style="display:none;margin-top:16px;">
@@ -141,6 +142,9 @@
   const contextEl = document.getElementById('adaptive-context');
   const scenariosEl = document.getElementById('adaptive-scenarios');
   const maneuverForm = document.getElementById('adaptive-maneuver');
+  let adaptiveChart = null;
+  let candleSeries = null;
+  let scenarioLines = [];
   const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
   const setMessage = value => { adaptiveMessage.textContent = value; };
   async function refreshAdaptiveStatus() {
@@ -161,6 +165,44 @@
     if (!response.ok) throw new Error(data.error || 'Ошибка API');
     return data;
   };
+  function ensureChart() {
+    if (adaptiveChart || !window.LightweightCharts) return;
+    const container = document.getElementById('adaptive-chart');
+    adaptiveChart = LightweightCharts.createChart(container, {
+      layout: {background: {color: '#171d2e'}, textColor: '#9aa3b8'},
+      grid: {vertLines: {color: '#262e45'}, horzLines: {color: '#262e45'}},
+      rightPriceScale: {borderColor: '#262e45'}, timeScale: {borderColor: '#262e45', timeVisible: true},
+      width: container.clientWidth, height: 430,
+    });
+    candleSeries = adaptiveChart.addCandlestickSeries({
+      upColor: '#3ecf8e', downColor: '#ff5d5d', borderVisible: false,
+      wickUpColor: '#3ecf8e', wickDownColor: '#ff5d5d',
+    });
+    new ResizeObserver(() => adaptiveChart.applyOptions({width: container.clientWidth})).observe(container);
+  }
+  async function loadAdaptiveChart() {
+    ensureChart();
+    if (!candleSeries) return;
+    const ticker = tickerInput.value.trim().toUpperCase();
+    const response = await fetch('/api/adaptive/' + encodeURIComponent(ticker) + '/candles?limit=240');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ошибка свечей');
+    candleSeries.setData(data.candles);
+    adaptiveChart.timeScale().fitContent();
+  }
+  function drawScenarioPaths(scenarios) {
+    scenarioLines.forEach(line => candleSeries.removePriceLine(line));
+    scenarioLines = [];
+    if (!candleSeries || !scenarios) return;
+    scenarios.forEach(scenario => {
+      scenarioLines.push(candleSeries.createPriceLine({
+        price: scenario.recommended_tp,
+        color: scenario.id === 'BREAKOUT' ? '#4f8cff' : '#d6a85e',
+        lineWidth: 2, lineStyle: 2, axisLabelVisible: true,
+        title: scenario.id + ' ' + (scenario.probability * 100).toFixed(0) + '%',
+      }));
+    });
+  }
 
   document.getElementById('adaptive-collect').addEventListener('click', async () => {
     const ticker = tickerInput.value.trim().toUpperCase();
@@ -193,8 +235,10 @@
         + '<p>История: ' + escapeHtml((scenario.historical_win_rate * 100).toFixed(1)) + '% / n=' + escapeHtml(scenario.historical_samples_count) + '</p>'
         + '<p>Entry <b>' + escapeHtml(scenario.recommended_entry.toFixed(2)) + '</b> · SL <b>' + escapeHtml(scenario.recommended_sl.toFixed(2)) + '</b> · TP <b>' + escapeHtml(scenario.recommended_tp.toFixed(2)) + '</b></p></div>'
       ).join('');
+      drawScenarioPaths(data.scenarios);
       maneuverForm.style.display = 'block';
       setMessage(data.suggested_maneuver ? 'Предложение: ' + data.suggested_maneuver : 'Сценарии обновлены.');
+      await loadAdaptiveChart();
     } catch (error) { setMessage(error.message); }
   });
 
@@ -211,5 +255,6 @@
       setMessage('Dry-run подтвержден; R:R = ' + result.risk_reward + '. Брокер не вызывался.');
     } catch (error) { setMessage(error.message); }
   });
+  loadAdaptiveChart().catch(() => {});
 })();
 {% endblock %}

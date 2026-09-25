@@ -18,6 +18,7 @@ from pathlib import Path
 import aiohttp_jinja2
 import jinja2
 from aiohttp import web
+import pandas as pd
 
 from .. import config, data, fundamentals, settings, storage
 from .. import elliott_candles
@@ -1111,6 +1112,28 @@ async def adaptive_status(request: web.Request) -> web.Response:
     return web.json_response(status())
 
 
+async def adaptive_candles(request: web.Request) -> web.Response:
+    """Return the latest closed T/15m candles for the adaptive chart."""
+    ticker = request.match_info.get("ticker", "").strip().upper()
+    try:
+        limit = min(max(int(request.query.get("limit", "240")), 20), 1000)
+    except ValueError:
+        return web.json_response({"error": "limit must be an integer"}, status=400)
+    frame = _adaptive_frame(ticker)
+    if frame is None:
+        return web.json_response({"error": "no 15min candles"}, status=404)
+    rows = frame.tail(limit)
+    candles = []
+    for _, row in rows.iterrows():
+        timestamp = pd.Timestamp(row["timestamp"])
+        candles.append({
+            "time": int(timestamp.timestamp()),
+            "open": float(row["open"]), "high": float(row["high"]),
+            "low": float(row["low"]), "close": float(row["close"]),
+        })
+    return web.json_response({"ticker": ticker, "timeframe": "15min", "candles": candles})
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
@@ -1158,5 +1181,6 @@ def create_app() -> web.Application:
     app.router.add_get("/api/adaptive/{ticker}/forecast", adaptive_forecast)
     app.router.add_post("/api/adaptive/maneuver", adaptive_maneuver)
     app.router.add_get("/api/adaptive/status", adaptive_status)
+    app.router.add_get("/api/adaptive/{ticker}/candles", adaptive_candles)
     app.router.add_static("/static", Path(__file__).resolve().parent / "static")
     return app

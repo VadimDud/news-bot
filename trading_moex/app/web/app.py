@@ -1137,7 +1137,9 @@ async def adaptive_candles(request: web.Request) -> web.Response:
 async def adaptive_market_data_status(request: web.Request) -> web.Response:
     from ..market_data import stream_status
 
-    return web.json_response(stream_status())
+    result = stream_status()
+    result["adapter"] = "read_only_available" if result["status"] == "ADAPTER_REQUIRED" else result["status"]
+    return web.json_response(result)
 
 
 def create_app() -> web.Application:

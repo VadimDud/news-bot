@@ -48,6 +48,7 @@ EVENT_COLUMNS = [
     "mae_pct",
     "future_bars",
 ]
+FIB_LEVELS = (0.382, 0.500, 0.618, 0.786)
 
 
 def load_candles(db_path: str | Path, ticker: str = "T", period: str = "15min") -> pd.DataFrame:
@@ -167,6 +168,73 @@ def prepare_candles(frame: pd.DataFrame, config: AnalysisConfig | None = None) -
     out["is_volume_spike"] = (
         out["volume_ratio"].ge(config.volume_multiplier)
         | out["volume_zscore"].gt(config.zscore_threshold)
+    )
+    return out
+
+
+def _confirmed_pivot_series(values: np.ndarray, bars: int, mode: str) -> np.ndarray:
+    """Return the latest confirmed causal low/high pivot for every bar."""
+    n = len(values)
+    candidates = np.full(n, np.nan)
+    known = np.full(n, np.nan)
+    if bars <= 0:
+        return values.astype(float, copy=True)
+    for pivot in range(bars, n - bars):
+        window = values[pivot - bars : pivot + bars + 1]
+        if (mode == "low" and values[pivot] <= window.min()) or (
+            mode == "high" and values[pivot] >= window.max()
+        ):
+            candidates[pivot] = values[pivot]
+    known[bars:] = candidates[: n - bars]
+    return pd.Series(known).ffill().to_numpy()
+
+
+def add_fibonacci_features(
+    frame: pd.DataFrame,
+    *,
+    swing_bars: int = 10,
+    proximity: float = 0.05,
+) -> pd.DataFrame:
+    """Add causal Fibonacci context based on confirmed swing pivots.
+
+    ``retracement`` is measured from the latest confirmed swing high toward the
+    latest confirmed swing low, matching ``fib_pullback`` in the trading bot.
+    A level match means the price is within ``proximity`` of a Fib fraction of
+    the swing range. No future pivot is used before its confirmation bar.
+    """
+    out = frame.copy().reset_index(drop=True)
+    low = _confirmed_pivot_series(out["low"].to_numpy(float), swing_bars, "low")
+    high = _confirmed_pivot_series(out["high"].to_numpy(float), swing_bars, "high")
+    segment = high - low
+    valid = np.isfinite(low) & np.isfinite(high) & (segment > 0)
+    retracement = np.full(len(out), np.nan)
+    retracement[valid] = (high[valid] - out.loc[valid, "close"].to_numpy(float)) / segment[valid]
+    out["swing_low"] = low
+    out["swing_high"] = high
+    out["fib_segment"] = segment
+    out["fib_retracement"] = retracement
+    out["fib_valid"] = valid
+
+    nearest_level = np.full(len(out), np.nan)
+    nearest_distance = np.full(len(out), np.nan)
+    for index, ratio in enumerate(retracement):
+        if np.isfinite(ratio) and 0 <= ratio <= 1:
+            distances = np.abs(np.asarray(FIB_LEVELS) - ratio)
+            nearest = int(distances.argmin())
+            nearest_level[index] = FIB_LEVELS[nearest]
+            nearest_distance[index] = distances[nearest]
+    out["fib_nearest_level"] = nearest_level
+    out["fib_distance"] = nearest_distance
+    out["fib_near_level"] = np.isfinite(nearest_distance) & (nearest_distance <= proximity)
+    out["fib_golden_zone"] = np.isfinite(retracement) & pd.Series(retracement).between(0.500, 0.618).to_numpy()
+    out["fib_context"] = np.select(
+        [
+            out["fib_golden_zone"],
+            out["fib_near_level"],
+            out["fib_valid"],
+        ],
+        ["Golden zone 50-61.8%", "Near Fib level", "Valid swing, away from level"],
+        default="No confirmed swing",
     )
     return out
 

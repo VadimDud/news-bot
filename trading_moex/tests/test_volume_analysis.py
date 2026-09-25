@@ -9,7 +9,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.volume_analysis import AnalysisConfig, analyze_events, load_candles, prepare_candles
+from app.volume_analysis import (
+    AnalysisConfig,
+    add_fibonacci_features,
+    analyze_events,
+    load_candles,
+    prepare_candles,
+)
 
 
 def make_frame(rows: list[tuple[float, float, float, float, float]]) -> pd.DataFrame:
@@ -121,3 +127,22 @@ def test_load_candles_reads_selected_series_read_only(tmp_path) -> None:
     frame = load_candles(db_path, "T", "15min")
     assert len(frame) == 1
     assert frame.iloc[0]["close"] == 100.5
+
+
+def test_fibonacci_features_use_only_confirmed_pivots() -> None:
+    rows = []
+    for index in range(40):
+        close = 100 + (index % 12) if index < 24 else 112 - (index - 24)
+        rows.append((close, close + 1, close - 1, close, 10))
+    frame = prepare_candles(make_frame(rows), AnalysisConfig(atr_period=3))
+    fib = add_fibonacci_features(frame, swing_bars=2)
+
+    assert fib["fib_valid"].any()
+    assert set(fib["fib_context"].dropna().unique()) <= {
+        "Golden zone 50-61.8%",
+        "Near Fib level",
+        "Valid swing, away from level",
+        "No confirmed swing",
+    }
+    # A pivot at bar j cannot affect a Fib context before j + swing_bars.
+    assert fib.loc[0, "fib_context"] == "No confirmed swing"

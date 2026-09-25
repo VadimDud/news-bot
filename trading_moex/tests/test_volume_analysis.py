@@ -16,6 +16,7 @@ from app.volume_analysis import (
     load_candles,
     prepare_candles,
 )
+from app.vsa_fibonacci import VSAConfig, analyze_fibonacci_cycles, analyze_vsa_events, prepare_vsa
 
 
 def make_frame(rows: list[tuple[float, float, float, float, float]]) -> pd.DataFrame:
@@ -146,3 +147,50 @@ def test_fibonacci_features_use_only_confirmed_pivots() -> None:
     }
     # A pivot at bar j cannot affect a Fib context before j + swing_bars.
     assert fib.loc[0, "fib_context"] == "No confirmed swing"
+
+
+def test_vsa_categories_and_forward_metrics() -> None:
+    rows = [(100, 101, 99, 100, 10)] * 20
+    rows.extend(
+        [
+            (100, 100.3, 99.7, 100.1, 100),  # absorption
+            (100.1, 100.2, 98.0, 100.2, 100),  # lower rejection
+            (100.2, 105.0, 99.8, 104.8, 100),  # momentum after anomaly
+            (104.8, 106, 104, 105.5, 10),
+            (105.5, 107, 105, 106.5, 10),
+            (106.5, 108, 106, 107.5, 10),
+            (107.5, 109, 107, 108.5, 10),
+            (108.5, 110, 108, 109.5, 10),
+            (109.5, 111, 109, 110.5, 10),
+            (110.5, 112, 110, 111.5, 10),
+            (111.5, 113, 111, 112.5, 10),
+        ]
+    )
+    frame = make_frame(rows)
+    config = VSAConfig(volume_window=20, atr_period=3)
+    prepared = prepare_vsa(frame, config)
+    events = analyze_vsa_events(frame, config)
+
+    assert prepared.iloc[20]["anomaly_type"] == "Absorption / stopping volume"
+    assert prepared.iloc[21]["anomaly_type"] == "Rejection / liquidity sweep"
+    assert prepared.iloc[22]["anomaly_type"] == "Trend climax / pure momentum"
+    assert len(events) == 3
+    assert events.iloc[0]["flat_4"] == 0
+    assert events.iloc[0]["mfe_pct_1"] >= 0
+
+
+def test_fibonacci_cycles_capture_exact_counts() -> None:
+    closes = [100, 101, 102, 103, 104, 105, 104, 103, 104, 105, 106, 107]
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=len(closes), freq="15min"),
+            "open": closes,
+            "high": [value + 0.2 for value in closes],
+            "low": [value - 0.2 for value in closes],
+            "close": closes,
+            "volume": [10] * len(closes),
+        }
+    )
+    cycles = analyze_fibonacci_cycles(frame, VSAConfig())
+    assert not cycles.empty
+    assert ((cycles["impulse_length"] == 5) & (cycles["correction_length"] == 2)).any()

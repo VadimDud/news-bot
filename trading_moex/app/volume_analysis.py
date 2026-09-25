@@ -49,6 +49,7 @@ EVENT_COLUMNS = [
     "future_bars",
 ]
 FIB_LEVELS = (0.382, 0.500, 0.618, 0.786)
+FIB_COUNTS = (1, 2, 3, 5, 8, 13)
 
 
 def load_candles(db_path: str | Path, ticker: str = "T", period: str = "15min") -> pd.DataFrame:

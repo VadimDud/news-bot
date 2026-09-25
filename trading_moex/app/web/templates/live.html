@@ -64,7 +64,11 @@
   </div>
   <div id="adaptive-message" class="hint" style="margin-top:10px;"></div>
   <div id="adaptive-collector-status" class="hint" style="margin-top:6px;">Collector: проверка...</div>
-  <div id="adaptive-chart" class="adaptive-chart" style="margin-top:14px;"></div>
+  <div class="adaptive-chart-wrap" style="margin-top:14px;">
+    <div id="adaptive-chart" class="adaptive-chart"></div>
+    <div id="adaptive-drag-layer"></div>
+  </div>
+  <div id="adaptive-rr" class="hint" style="margin-top:8px;">R:R: — · риск: —</div>
   <div id="adaptive-context" style="margin-top:12px;"></div>
   <div id="adaptive-scenarios" class="grid" style="margin-top:12px;"></div>
   <form id="adaptive-maneuver" style="display:none;margin-top:16px;">
@@ -146,6 +150,8 @@
   let candleSeries = null;
   let scenarioLines = [];
   let projectedLines = [];
+  let activeBracket = null;
+  let chartBounds = null;
   const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
   const setMessage = value => { adaptiveMessage.textContent = value; };
   async function refreshAdaptiveStatus() {
@@ -181,6 +187,53 @@
     });
     new ResizeObserver(() => adaptiveChart.applyOptions({width: container.clientWidth})).observe(container);
   }
+  function bracketRiskReward(bracket) {
+    const risk = bracket.entry - bracket.stop;
+    const reward = bracket.target - bracket.entry;
+    return risk > 0 ? reward / risk : 0;
+  }
+  function updateBracketDisplay() {
+    if (!activeBracket || !chartBounds) return;
+    const height = chartBounds.height;
+    const toTop = price => Math.max(0, Math.min(height, chartBounds.priceToY(price)));
+    const layer = document.getElementById('adaptive-drag-layer');
+    layer.innerHTML = '';
+    [['entry', activeBracket.entry, 'Entry'], ['stop', activeBracket.stop, 'SL'], ['target', activeBracket.target, 'TP']].forEach(([kind, price, label]) => {
+      const handle = document.createElement('div');
+      handle.className = 'adaptive-drag-handle ' + kind;
+      handle.style.top = toTop(price) + 'px';
+      handle.innerHTML = '<span>' + label + ' ' + Number(price).toFixed(2) + '</span>';
+      handle.addEventListener('pointerdown', event => beginDrag(event, kind));
+      layer.appendChild(handle);
+    });
+    const rr = bracketRiskReward(activeBracket);
+    const cashRisk = (activeBracket.entry - activeBracket.stop) * activeBracket.quantity;
+    document.getElementById('adaptive-rr').textContent = 'R:R: ' + rr.toFixed(2) + ' · риск: ' + cashRisk.toFixed(2) + ' RUB';
+    ['entry_price', 'current_price', 'new_stop_loss', 'new_take_profit', 'quantity'].forEach(name => {
+      const input = maneuverForm.elements[name];
+      if (!input) return;
+      const value = name === 'entry_price' ? activeBracket.entry : name === 'new_stop_loss' ? activeBracket.stop : name === 'new_take_profit' ? activeBracket.target : name === 'quantity' ? activeBracket.quantity : activeBracket.current;
+      input.value = Number(value).toFixed(name === 'quantity' ? 0 : 2);
+    });
+  }
+  function beginDrag(event, kind) {
+    if (!activeBracket || !chartBounds) return;
+    event.preventDefault();
+    const move = moveEvent => {
+      const price = chartBounds.yToPrice(move.clientY - chartBounds.top);
+      if (!Number.isFinite(price)) return;
+      if (kind === 'entry') activeBracket.entry = price;
+      if (kind === 'stop') activeBracket.stop = Math.min(price, activeBracket.current - 0.01);
+      if (kind === 'target') activeBracket.target = Math.max(price, activeBracket.current + 0.01);
+      updateBracketDisplay();
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop, {once: true});
+  }
   async function loadAdaptiveChart() {
     ensureChart();
     if (!candleSeries) return;
@@ -189,7 +242,15 @@
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Ошибка свечей');
     candleSeries.setData(data.candles);
+    const chartRect = document.getElementById('adaptive-chart').getBoundingClientRect();
+    chartBounds = {
+      height: document.getElementById('adaptive-chart').clientHeight,
+      top: chartRect.top,
+      priceToY: price => candleSeries.priceToCoordinate(price),
+      yToPrice: y => candleSeries.coordinateToPrice(y),
+    };
     adaptiveChart.timeScale().fitContent();
+    updateBracketDisplay();
   }
   function drawScenarioPaths(scenarios) {
     scenarioLines.forEach(line => candleSeries.removePriceLine(line));
@@ -198,6 +259,12 @@
     projectedLines = [];
     if (!candleSeries || !scenarios) return;
     scenarios.forEach(scenario => {
+      if (scenario.id === 'BREAKOUT' && !activeBracket) {
+        activeBracket = {
+          entry: scenario.recommended_entry, current: scenario.recommended_entry,
+          stop: scenario.recommended_sl, target: scenario.recommended_tp, quantity: 1,
+        };
+      }
       const color = scenario.id === 'BREAKOUT' ? '#4f8cff' : '#d6a85e';
       scenarioLines.push(candleSeries.createPriceLine({price: scenario.recommended_tp, color, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: scenario.id + ' TP ' + (scenario.probability * 100).toFixed(0) + '%'}));
       scenarioLines.push(candleSeries.createPriceLine({price: scenario.recommended_sl, color: '#ff5d5d', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: scenario.id + ' SL'}));
@@ -205,13 +272,14 @@
       if (scenario.projected_path.length > 1 && adaptiveChart) {
         const path = adaptiveChart.addLineSeries({color, lineWidth: 2, lineStyle: 1, crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false});
         path.setData(scenario.projected_path);
-        projectedLines.push(path);
+      projectedLines.push(path);
       }
     });
+    updateBracketDisplay();
   }
 
   document.getElementById('adaptive-collect').addEventListener('click', async () => {
-    const ticker = tickerInput.value.trim().toUpperCase();
+      const ticker = tickerInput.value.trim().toUpperCase();
     try {
       setMessage('Собираю исходы закрытых паттернов...');
       const response = await fetch('/api/adaptive/' + encodeURIComponent(ticker) + '/collect', {method: 'POST'});
@@ -232,6 +300,7 @@
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Ошибка прогноза');
       const context = data.context;
+      activeBracket = null;
       contextEl.innerHTML = '<span class="chip">Цена: ' + escapeHtml(context.current_price.toFixed(2)) + '</span> '
         + '<span class="chip">ATR: ' + escapeHtml(context.current_atr.toFixed(2)) + '</span> '
         + '<span class="chip">Объем: ' + escapeHtml(context.volume_surge_ratio.toFixed(2)) + 'x</span> '

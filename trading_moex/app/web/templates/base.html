@@ -47,6 +47,18 @@ nav a.active, nav a:hover { background: rgba(79,140,255,.15); color: var(--accen
 header form { margin-left: auto; }
 main { max-width: 900px; margin: 24px auto; padding: 0 16px; }
 .adaptive-chart { width: 100%; height: 430px; min-height: 300px; }
+.adaptive-chart-wrap { position: relative; }
+.adaptive-chart-wrap #adaptive-drag-layer { position: absolute; inset: 0; pointer-events: none; }
+.adaptive-drag-handle {
+  position: absolute; left: 8px; right: 8px; height: 24px; margin-top: -12px;
+  display: flex; align-items: center; gap: 8px; z-index: 4; cursor: ns-resize;
+  pointer-events: auto; user-select: none;
+}
+.adaptive-drag-handle::after { content: ''; height: 2px; flex: 1; background: currentColor; opacity: .8; }
+.adaptive-drag-handle span { padding: 2px 6px; border-radius: 5px; background: var(--panel); border: 1px solid currentColor; font-size: 11px; }
+.adaptive-drag-handle.entry { color: var(--muted); }
+.adaptive-drag-handle.stop { color: var(--danger); }
+.adaptive-drag-handle.target { color: var(--accent); }
 .card {
   background: var(--panel);
   border: 1px solid var(--border);

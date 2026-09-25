@@ -8,6 +8,7 @@ events are rejected before persistence; this layer never submits orders.
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,25 @@ class BookSnapshot:
     timestamp: datetime
     bids: tuple[tuple[float, float], ...]
     asks: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
+class MarketDataAggregate:
+    ticker: str
+    bar_start: datetime
+    bar_end: datetime
+    buy_volume: float
+    sell_volume: float
+    known_volume: float
+    delta: float
+    coverage: float
+    book_imbalance: float | None
+    spread_rate: float | None
+    latest_event: datetime | None
+
+    @property
+    def stale(self) -> bool:
+        return self.latest_event is None or self.latest_event < self.bar_end
 
 
 def _timestamp(value: datetime) -> datetime:
@@ -135,3 +155,67 @@ def stream_status() -> dict[str, object]:
     except ImportError:
         return {"status": "UNAVAILABLE", "reason": "tinkoff SDK is not installed", "orders_enabled": False}
     return {"status": "ADAPTER_REQUIRED", "reason": "SDK adapter has not been configured", "orders_enabled": False}
+
+
+def aggregate_bar_market_data(
+    db_path: str | Path,
+    ticker: str,
+    bar_start: datetime,
+    *,
+    bar_seconds: int = 900,
+    candle_volume: float | None = None,
+) -> MarketDataAggregate:
+    """Aggregate validated events in one closed bar; missing feeds remain None/zero."""
+    start = _timestamp(bar_start)
+    end = start + pd_timedelta_seconds(bar_seconds)
+    ensure_schema(db_path)
+    with sqlite3.connect(Path(db_path).expanduser()) as connection:
+        trades = connection.execute(
+            "SELECT event_ts, quantity, aggressor FROM adaptive_trades WHERE ticker = ? AND event_ts >= ? AND event_ts < ?",
+            (ticker.upper(), start.isoformat(), end.isoformat()),
+        ).fetchall()
+        books = connection.execute(
+            "SELECT event_ts, payload FROM adaptive_books WHERE ticker = ? AND event_ts >= ? AND event_ts < ? ORDER BY event_ts DESC LIMIT 1",
+            (ticker.upper(), start.isoformat(), end.isoformat()),
+        ).fetchall()
+    buy = sum(float(row[1]) for row in trades if row[2] == "BUY")
+    sell = sum(float(row[1]) for row in trades if row[2] == "SELL")
+    known = buy + sell
+    imbalance = None
+    spread = None
+    if books:
+        payload = json.loads(books[0][1])
+        bids = payload["bids"]
+        asks = payload["asks"]
+        bid_size = sum(float(level[1]) for level in bids)
+        ask_size = sum(float(level[1]) for level in asks)
+        if bid_size + ask_size > 0:
+            imbalance = (bid_size - ask_size) / (bid_size + ask_size)
+        bid = float(bids[0][0])
+        ask = float(asks[0][0])
+        mid = (bid + ask) / 2
+        spread = (ask - bid) / mid if mid > 0 else None
+    timestamps = [pd_timestamp(row[0]) for row in trades] + [pd_timestamp(row[0]) for row in books]
+    latest = max(timestamps) if timestamps else None
+    return MarketDataAggregate(
+        ticker=ticker.upper(), bar_start=start, bar_end=end, buy_volume=buy,
+        sell_volume=sell, known_volume=known, delta=buy - sell,
+        coverage=known / candle_volume if candle_volume and candle_volume > 0 else 0.0,
+        book_imbalance=imbalance,
+        spread_rate=spread, latest_event=latest,
+    )
+
+
+def pd_timedelta_seconds(seconds: int):
+    from datetime import timedelta
+
+    if seconds <= 0:
+        raise ValueError("bar_seconds must be positive")
+    return timedelta(seconds=seconds)
+
+
+def pd_timestamp(value: str) -> datetime:
+    from datetime import datetime
+
+    parsed = datetime.fromisoformat(value)
+    return _timestamp(parsed)

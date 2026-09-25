@@ -13,6 +13,7 @@ from app.market_data import (
     validate_book,
     validate_quote,
     validate_trade,
+    aggregate_bar_market_data,
 )
 
 
@@ -52,3 +53,16 @@ def test_stream_status_is_explicit_when_sdk_missing() -> None:
 
     assert status["status"] in {"UNAVAILABLE", "ADAPTER_REQUIRED"}
     assert status["orders_enabled"] is False
+
+
+def test_bar_aggregate_keeps_missing_feed_explicit(tmp_path) -> None:
+    from datetime import timedelta
+
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    trade = TradeEvent("T", timestamp + timedelta(minutes=1), 100, 2, "BUY")
+    persist_events(tmp_path / "data.db", trades=(trade,))
+    aggregate = aggregate_bar_market_data(tmp_path / "data.db", "T", timestamp, candle_volume=10)
+
+    assert aggregate.delta == 2
+    assert aggregate.coverage == pytest.approx(0.2)
+    assert aggregate.book_imbalance is None

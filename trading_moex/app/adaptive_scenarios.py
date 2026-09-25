@@ -19,6 +19,7 @@ import pandas as pd
 from pydantic import BaseModel, Field, model_validator
 
 from .vsa_strategy import StrategyConfig, prepare_strategy_frame
+from .market_data import aggregate_bar_market_data
 
 
 FEATURE_COLUMNS = (
@@ -46,6 +47,11 @@ class LiveChartContext(BaseModel):
     current_atr: float = Field(gt=0)
     volume_surge_ratio: float = Field(ge=0)
     volatility_compression_score: float = Field(ge=0, le=1)
+    market_data_status: Literal["OHLCV_ONLY", "TRADE_FLOW", "L2", "TRADE_FLOW_L2"] = "OHLCV_ONLY"
+    trade_flow_coverage: float = Field(ge=0, le=1)
+    delta: float | None = None
+    book_imbalance: float | None = None
+    book_spread_rate: float | None = None
 
 
 class DynamicScenario(BaseModel):
@@ -292,7 +298,11 @@ def _nearest_stats(
     return NearestStats(rate, len(nearest), low, high, warning)
 
 
-def build_live_context(frame: pd.DataFrame, ticker: str = "T") -> LiveChartContext | None:
+def build_live_context(
+    frame: pd.DataFrame,
+    ticker: str = "T",
+    db_path: str | Path | None = None,
+) -> LiveChartContext | None:
     """Build a deterministic context from the last closed 15m bar."""
     prepared = prepare_strategy_frame(frame, StrategyConfig())
     if prepared.empty:
@@ -301,11 +311,25 @@ def build_live_context(frame: pd.DataFrame, ticker: str = "T") -> LiveChartConte
     vector = _feature_vector(prepared, len(prepared) - 1)
     if vector is None:
         return None
+    aggregate = None
+    if db_path is not None:
+        aggregate = aggregate_bar_market_data(
+            db_path, ticker, pd.Timestamp(row["timestamp"]).to_pydatetime(),
+            candle_volume=float(row["volume"]),
+        )
+    flow_ready = bool(aggregate and aggregate.coverage >= 0.80 and not aggregate.stale)
+    book_ready = bool(aggregate and aggregate.book_imbalance is not None and not aggregate.stale)
+    market_status = "TRADE_FLOW_L2" if flow_ready and book_ready else "TRADE_FLOW" if flow_ready else "L2" if book_ready else "OHLCV_ONLY"
     return LiveChartContext(
         ticker=ticker.upper(), current_price=float(row["close"]),
         nearest_level_price=float(prepared.iloc[-20:]["low"].min()), level_type="HORIZONTAL",
         touches_count=0, current_atr=float(row["atr"]), volume_surge_ratio=float(row["volume_ratio"]),
         volatility_compression_score=float(np.clip(vector[2], 0, 1)),
+        market_data_status=market_status,
+        trade_flow_coverage=float(aggregate.coverage if aggregate else 0.0),
+        delta=float(aggregate.delta) if flow_ready else None,
+        book_imbalance=float(aggregate.book_imbalance) if book_ready else None,
+        book_spread_rate=float(aggregate.spread_rate) if book_ready and aggregate.spread_rate is not None else None,
     )
 
 
@@ -317,7 +341,7 @@ def generate_forecast(
     current_position: dict[str, float] | None = None,
 ) -> ContextAwareForecastResponse:
     prepared = prepare_strategy_frame(frame, StrategyConfig())
-    context = build_live_context(prepared, ticker)
+    context = build_live_context(prepared, ticker, db_path)
     if context is None:
         raise ValueError("insufficient valid closed bars for adaptive context")
     vector = _feature_vector(prepared, len(prepared) - 1)

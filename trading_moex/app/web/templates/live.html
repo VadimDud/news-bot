@@ -304,7 +304,11 @@
       contextEl.innerHTML = '<span class="chip">Цена: ' + escapeHtml(context.current_price.toFixed(2)) + '</span> '
         + '<span class="chip">ATR: ' + escapeHtml(context.current_atr.toFixed(2)) + '</span> '
         + '<span class="chip">Объем: ' + escapeHtml(context.volume_surge_ratio.toFixed(2)) + 'x</span> '
-        + '<span class="chip">Сжатие: ' + escapeHtml(context.volatility_compression_score.toFixed(2)) + '</span>';
+        + '<span class="chip">Сжатие: ' + escapeHtml(context.volatility_compression_score.toFixed(2)) + '</span>'
+        + '<span class="chip">Feed: ' + escapeHtml(context.market_data_status) + '</span>'
+        + '<span class="chip">Coverage: ' + escapeHtml((context.trade_flow_coverage * 100).toFixed(1)) + '%</span>'
+        + (context.delta === null ? '' : '<span class="chip">Delta: ' + escapeHtml(context.delta.toFixed(0)) + '</span>')
+        + (context.book_imbalance === null ? '' : '<span class="chip">Book: ' + escapeHtml(context.book_imbalance.toFixed(2)) + '</span>');
       scenariosEl.innerHTML = data.scenarios.map(scenario =>
         '<div class="card"><h3>' + escapeHtml(scenario.title) + ' · ' + escapeHtml((scenario.probability * 100).toFixed(1)) + '%</h3>'
         + '<p>История: ' + escapeHtml((scenario.historical_win_rate * 100).toFixed(1)) + '% / n=' + escapeHtml(scenario.historical_samples_count) + ' · CI ' + escapeHtml((scenario.confidence_low * 100).toFixed(1)) + '–' + escapeHtml((scenario.confidence_high * 100).toFixed(1)) + '%</p>'

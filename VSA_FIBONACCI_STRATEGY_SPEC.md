@@ -8,7 +8,8 @@ if the resolved security is not exactly `T`)
 
 **Signal timeframe:** 15 minutes
 
-**Context timeframe:** completed 1-week bars, aligned to the MOEX exchange calendar
+**Context timeframe:** completed 4-hour bars with a causal 90-calendar-day lookback,
+aligned to the MOEX exchange calendar
 
 **Signal data:** all available validated feeds: OHLCV, trades/ticks with aggressor
 classification, and L2 order-book snapshots. The strategy has explicit feature modes so
@@ -100,37 +101,35 @@ or zero replacement is permitted.
 The strategy deliberately does not use a price z-score. A volume anomaly is defined only
 by the ratio to causal `VMA_t`.
 
-### 1.3 Weekly trend context
+### 1.3 4-hour trend context
 
-Let `w(t)` be the most recently completed weekly bar whose close timestamp is strictly
-before the close timestamp of 15-minute bar `t`. The current, still-forming weekly bar is
-never used. For weekly bars define:
+Let `h(t)` be the most recently completed 4-hour bar whose close timestamp is strictly
+before the close timestamp of 15-minute bar `t`. The current, still-forming 4-hour bar is
+never used. For 4-hour bars define:
 
 ```text
-EMA^W_n(w) = C^W_w                                  if w = first valid bar
-EMA^W_n(w) = alpha_n * C^W_w + (1-alpha_n) * EMA^W_n(w-1)
+EMA^H_n(h) = C^H_h                                  if h = first valid bar
+EMA^H_n(h) = alpha_n * C^H_h + (1-alpha_n) * EMA^H_n(h-1)
 alpha_n = 2 / (n + 1)
 
-TR^W_w = max(H^W_w - L^W_w,
-             abs(H^W_w - C^W_(w-1)),
-             abs(L^W_w - C^W_(w-1)))
-ATR^W_14(w) = mean(TR^W_(w-13), ..., TR^W_w)
+O^H_h = first open, H^H_h = maximum high, L^H_h = minimum low,
+C^H_h = last close of 15-minute bars in the 4-hour interval.
 ```
 
-The weekly context is valid only after 200 completed weekly bars and when all source bars
-are contiguous valid bars. Define the long-only weekly regime:
+The 4-hour context is valid only after 200 completed 4-hour bars exist in the preceding
+90 calendar days and all source bars are valid. Define the long-only regime:
 
 ```text
-weekly_bull = (C^W_w > EMA^W_50(w))
-              AND (EMA^W_20(w) > EMA^W_50(w))
-              AND (EMA^W_50(w) > EMA^W_200(w))
-              AND (EMA^W_20(w) > EMA^W_20(w-1))
+context_bull = (C^H_h > EMA^H_50(h))
+               AND (EMA^H_20(h) > EMA^H_50(h))
+               AND (EMA^H_50(h) > EMA^H_200(h))
+               AND (EMA^H_20(h) > EMA^H_20(h-1))
 ```
 
-`weekly_bull` is a mandatory entry condition in every candidate model. If the weekly
-context is unavailable or false, no long entry is allowed. Weekly bars are resampled from
-exchange-session data using first open, maximum high, minimum low, last close, and sum of
-volume; a week with missing session data is invalid rather than forward-filled.
+`context_bull` is a mandatory entry condition in every candidate model. If the 4-hour
+context is unavailable or false, no long entry is allowed. 4-hour bars are resampled from
+15-minute data using first open, maximum high, minimum low, last close, and sum of volume;
+an incomplete interval is invalid rather than forward-filled.
 
 ### 1.4 VSA feature flags
 
@@ -311,7 +310,7 @@ same run are forbidden.
 ### 1.8 Entry setup definitions
 
 There are two setup families. Both use the same completed cycle, depth filter, and
-`weekly_bull_u` condition. Since the strategy is long-only, bearish cycles are context
+`context_bull_u` condition. Since the strategy is long-only, bearish cycles are context
 only and cannot create an entry.
 
 #### Pullback setup
@@ -320,7 +319,7 @@ At close `c+1`, use the VSA event on correction endpoint `c`:
 
 ```text
 pullback_long = (d = +1)
-                 AND weekly_bull_u
+                 AND context_bull_u
                  AND (vsa_category_c in {ABSORPTION, REJECTION})
                  AND (dir_c = -1)
                  AND ((vsa_category_c = ABSORPTION)
@@ -334,7 +333,7 @@ At close `c+1`, use a momentum event on the confirmation bar:
 
 ```text
 momentum_long = (d = +1)
-                AND weekly_bull_u
+                 AND context_bull_u
                 AND (vsa_category_(c+1) = MOMENTUM)
                 AND (dir_(c+1) = +1)
 ```
@@ -352,7 +351,8 @@ Fibonacci set or category priority.
 | Parameter | Default | Allowed grid |
 |---|---:|---:|
 | signal interval | 15 min | fixed |
-| context interval | 1 week | fixed |
+| context interval | 4h | fixed |
+| context lookback | 90 calendar days | fixed |
 | direction | LONG only | fixed |
 | initial equity | 1,000,000 RUB | fixed |
 | max leverage | 1.0 | fixed |
@@ -457,7 +457,7 @@ can_enter = valid_u
             AND cooldown_expired
             AND circuit_breaker_off
             AND daily_trade_count < 3
-            AND weekly_bull_u
+            AND context_bull_u
             AND actual_or_assumed_spread_bps <= 20
             AND (pullback_long OR momentum_long)
 ```
@@ -765,7 +765,7 @@ class BarData:
     close: Decimal
     volume: Decimal
     session_id: str
-    week_id: str
+    context_bar_id: str
 
 
 @dataclass(frozen=True)
@@ -862,8 +862,9 @@ Normative pseudocode for `evaluate_entry_rules`:
 1. assert bars are ordered by increasing close timestamp and all ticks/books are ordered.
 2. reject and return None if symbol != "T" or timeframe != 900 seconds.
 3. reject and return None if any bar fails valid_t or the required session/gap checks.
-4. reject and return None if fewer than 21 causal intraday bars or 200 weekly bars exist.
-5. calculate TR, ATR, VMA, volume ratio, candle geometry, weekly EMAs, and VSA flags.
+4. reject and return None if fewer than 21 causal intraday bars or 200 completed 4h bars
+   in the preceding 90 calendar days exist.
+5. calculate TR, ATR, VMA, volume ratio, candle geometry, completed 4h EMAs, and VSA flags.
 6. assign exactly one VSA category using MOMENTUM > REJECTION > ABSORPTION priority.
 7. if feature_mode is M1 or M3, aggregate authoritative ticks and require 80% classified
    volume coverage; calculate delta_ratio and causal delta_z or return None.
@@ -979,7 +980,7 @@ The test suite MUST include:
  - a long stop gap with actual fill worse than the nominal stop;
  - market, limit, and stop-limit fill/no-fill cases, including ambiguous OHLC ordering;
  - each feed mode M0, M1, M2, M3 with missing and stale optional data;
- - weekly EMA context using only completed weekly bars;
+ - 4h EMA context using only completed 4h bars from the preceding 90 calendar days;
 - an idempotent submit/reconnect/reconcile sequence;
 - session-boundary and intra-session-gap fixtures.
 

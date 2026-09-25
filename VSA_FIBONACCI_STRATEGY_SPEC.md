@@ -980,7 +980,8 @@ The test suite MUST include:
  - a long stop gap with actual fill worse than the nominal stop;
  - market, limit, and stop-limit fill/no-fill cases, including ambiguous OHLC ordering;
  - each feed mode M0, M1, M2, M3 with missing and stale optional data;
- - 4h EMA context using only completed 4h bars from the preceding 90 calendar days;
+- 4h EMA context using only completed 4h bars from the preceding 90 calendar days;
+ - adaptive scenario layer stores only completed-bar outcomes in local SQLite, uses deterministic k-NN analogues, and exposes forecast/maneuver API in dry-run mode;
 - an idempotent submit/reconnect/reconcile sequence;
 - session-boundary and intra-session-gap fixtures.
 

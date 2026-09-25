@@ -5,6 +5,7 @@
 
 import asyncio
 import hashlib
+import html
 import hmac
 import json
 import logging
@@ -874,7 +875,7 @@ async def live_start(request: web.Request) -> web.Response:
         msg = "Live-цикл запущен"
     except RuntimeError as exc:
         msg = str(exc)
-    return web.Response(text=f"<span class='chip'>{msg}</span>", content_type="text/html")
+    return web.Response(text=f"<span class='chip'>{html.escape(msg)}</span>", content_type="text/html")
 
 
 async def live_stop(request: web.Request) -> web.Response:
@@ -888,17 +889,39 @@ async def live_strategy(request: web.Request) -> web.Response:
     try:
         live_trader.set_strategy(key)
         msg = f"Стратегия: {STRATEGIES[key]['name']}"
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, RuntimeError) as exc:
         msg = f"Неизвестная стратегия ({exc})"
-    return web.Response(text=f"<span class='chip'>{msg}</span>", content_type="text/html")
+    return web.Response(text=f"<span class='chip'>{html.escape(msg)}</span>", content_type="text/html")
 
 
 async def live_dryrun(request: web.Request) -> web.Response:
     form = await request.post()
     dry_run = form.get("dry_run", "true").lower() == "true"
-    live_trader.set_dry_run(dry_run)
+    try:
+        live_trader.set_dry_run(dry_run)
+    except RuntimeError as exc:
+        return web.Response(
+            text=f"<span class='chip danger'>{html.escape(str(exc))}</span>",
+            content_type="text/html",
+            status=409,
+        )
     mode = "dry-run" if dry_run else "LIVE"
-    return web.Response(text=f"<span class='chip'>Режим: {mode}</span>", content_type="text/html")
+    return web.Response(text=f"<span class='chip'>Режим: {html.escape(mode)}</span>", content_type="text/html")
+
+
+async def live_reset_circuit(request: web.Request) -> web.Response:
+    try:
+        live_trader.reset_circuit_breaker()
+    except RuntimeError as exc:
+        return web.Response(
+            text=f"<span class='chip danger'>{html.escape(str(exc))}</span>",
+            content_type="text/html",
+            status=409,
+        )
+    return web.Response(
+        text="<span class='chip ok'>Circuit breaker сброшен</span>",
+        content_type="text/html",
+    )
 
 
 TICKER_INTERVAL_LABELS = {
@@ -1022,6 +1045,65 @@ async def pretrade_check(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+def _adaptive_frame(ticker: str):
+    """Load stored 15m candles in the schema expected by adaptive_scenarios."""
+    frame = storage.get_candles(ticker.upper(), "15min")
+    if frame is None or frame.empty:
+        return None
+    return frame.rename(columns={"begin": "timestamp"})
+
+
+async def adaptive_collect(request: web.Request) -> web.Response:
+    """Persist closed pattern outcomes; this endpoint never places orders."""
+    from ..adaptive_scenarios import extract_pattern_records, store_pattern_records
+
+    ticker = request.match_info.get("ticker", "").strip().upper()
+    if not ticker:
+        return web.json_response({"error": "ticker required"}, status=400)
+    frame = _adaptive_frame(ticker)
+    if frame is None:
+        return web.json_response({"error": "no 15min candles"}, status=404)
+    records = extract_pattern_records(frame, ticker=ticker)
+    stored = store_pattern_records(config.DB_PATH, records)
+    return web.json_response({"ticker": ticker, "extracted": len(records), "stored": stored, "mode": "statistics_only"})
+
+
+async def adaptive_forecast(request: web.Request) -> web.Response:
+    """Return adaptive scenarios from closed candles and stored analogues."""
+    from ..adaptive_scenarios import generate_forecast
+
+    ticker = request.match_info.get("ticker", "").strip().upper()
+    if not ticker:
+        return web.json_response({"error": "ticker required"}, status=400)
+    frame = _adaptive_frame(ticker)
+    if frame is None:
+        return web.json_response({"error": "no 15min candles"}, status=404)
+    position = None
+    try:
+        body = await request.json()
+        if body.get("position"):
+            position = body["position"]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        result = generate_forecast(frame, config.DB_PATH, ticker=ticker, current_position=position)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=422)
+    return web.json_response(result.model_dump(mode="json"))
+
+
+async def adaptive_maneuver(request: web.Request) -> web.Response:
+    """Validate a UI bracket update; broker execution is intentionally not connected."""
+    from ..adaptive_scenarios import ManeuverRequest, validate_maneuver
+
+    try:
+        payload = ManeuverRequest.model_validate(await request.json())
+        result = validate_maneuver(payload)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(result)
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
@@ -1060,9 +1142,13 @@ def create_app() -> web.Application:
     app.router.add_post("/live/stop", live_stop)
     app.router.add_post("/live/strategy", live_strategy)
     app.router.add_post("/live/dryrun", live_dryrun)
+    app.router.add_post("/live/reset-circuit", live_reset_circuit)
     app.router.add_get("/news", news_page)
     app.router.add_post("/news/override", news_override)
     app.router.add_post("/news/refresh", news_refresh)
     app.router.add_post("/api/pretrade/{ticker}", pretrade_check)
+    app.router.add_post("/api/adaptive/{ticker}/collect", adaptive_collect)
+    app.router.add_get("/api/adaptive/{ticker}/forecast", adaptive_forecast)
+    app.router.add_post("/api/adaptive/maneuver", adaptive_maneuver)
     app.router.add_static("/static", Path(__file__).resolve().parent / "static")
     return app

@@ -37,12 +37,45 @@
     {% else %}
     <button hx-post="/live/start" hx-target="#live-msg" hx-swap="innerHTML">▶ Запустить</button>
     {% endif %}
+    {% if not status.running and status.circuit_breaker and status.circuit_breaker.tripped %}
+    <button hx-post="/live/reset-circuit" hx-target="#live-msg" hx-swap="innerHTML" class="secondary"
+            onclick="return confirm('Сбросить circuit breaker после проверки причины остановки?');">Сбросить защиту</button>
+    {% endif %}
   </div>
 </div>
 
 <div id="live-status"
      hx-get="/live/data" hx-trigger="every 5s" hx-swap="innerHTML">
   {% include "_live_status.html" %}
+</div>
+
+<div class="card" id="adaptive-card" style="margin-top:16px;">
+  <h2>Адаптивные сценарии T / 15m</h2>
+  <p class="hint">Статистика строится по закрытым свечам. Маневрирование работает только в dry-run и не отправляет заявки брокеру.</p>
+  <div class="grid">
+    <div>
+      <label for="adaptive-ticker">Тикер</label>
+      <input id="adaptive-ticker" value="T" maxlength="16" pattern="[A-Za-z0-9._-]+">
+    </div>
+    <div style="display:flex;align-items:end;gap:8px;">
+      <button type="button" id="adaptive-collect" class="secondary">Обновить статистику</button>
+      <button type="button" id="adaptive-forecast">Рассчитать сценарии</button>
+    </div>
+  </div>
+  <div id="adaptive-message" class="hint" style="margin-top:10px;"></div>
+  <div id="adaptive-context" style="margin-top:12px;"></div>
+  <div id="adaptive-scenarios" class="grid" style="margin-top:12px;"></div>
+  <form id="adaptive-maneuver" style="display:none;margin-top:16px;">
+    <h3>Dry-run маневр позиции</h3>
+    <div class="grid">
+      <div><label>Entry</label><input name="entry_price" type="number" step="0.01" required></div>
+      <div><label>Current</label><input name="current_price" type="number" step="0.01" required></div>
+      <div><label>New SL</label><input name="new_stop_loss" type="number" step="0.01" required></div>
+      <div><label>New TP</label><input name="new_take_profit" type="number" step="0.01" required></div>
+      <div><label>Quantity</label><input name="quantity" type="number" min="1" step="1" required></div>
+    </div>
+    <button type="submit" class="secondary" style="margin-top:10px;">Проверить маневр</button>
+  </form>
 </div>
 
 <script>
@@ -100,6 +133,67 @@
       checkStaleness();
       setupLogFilters(e.detail.target);
     }
+  });
+
+  const tickerInput = document.getElementById('adaptive-ticker');
+  const adaptiveMessage = document.getElementById('adaptive-message');
+  const contextEl = document.getElementById('adaptive-context');
+  const scenariosEl = document.getElementById('adaptive-scenarios');
+  const maneuverForm = document.getElementById('adaptive-maneuver');
+  const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+  const setMessage = value => { adaptiveMessage.textContent = value; };
+  const postJson = async (url, body) => {
+    const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ошибка API');
+    return data;
+  };
+
+  document.getElementById('adaptive-collect').addEventListener('click', async () => {
+    const ticker = tickerInput.value.trim().toUpperCase();
+    try {
+      setMessage('Собираю исходы закрытых паттернов...');
+      const response = await fetch('/api/adaptive/' + encodeURIComponent(ticker) + '/collect', {method: 'POST'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Ошибка сбора');
+      setMessage('Сохранено паттернов: ' + data.stored);
+    } catch (error) { setMessage(error.message); }
+  });
+
+  document.getElementById('adaptive-forecast').addEventListener('click', async () => {
+    const ticker = tickerInput.value.trim().toUpperCase();
+    try {
+      setMessage('Пересчитываю сценарии...');
+      const response = await fetch('/api/adaptive/' + encodeURIComponent(ticker) + '/forecast');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Ошибка прогноза');
+      const context = data.context;
+      contextEl.innerHTML = '<span class="chip">Цена: ' + escapeHtml(context.current_price.toFixed(2)) + '</span> '
+        + '<span class="chip">ATR: ' + escapeHtml(context.current_atr.toFixed(2)) + '</span> '
+        + '<span class="chip">Объем: ' + escapeHtml(context.volume_surge_ratio.toFixed(2)) + 'x</span> '
+        + '<span class="chip">Сжатие: ' + escapeHtml(context.volatility_compression_score.toFixed(2)) + '</span>';
+      scenariosEl.innerHTML = data.scenarios.map(scenario =>
+        '<div class="card"><h3>' + escapeHtml(scenario.title) + ' · ' + escapeHtml((scenario.probability * 100).toFixed(1)) + '%</h3>'
+        + '<p>История: ' + escapeHtml((scenario.historical_win_rate * 100).toFixed(1)) + '% / n=' + escapeHtml(scenario.historical_samples_count) + '</p>'
+        + '<p>Entry <b>' + escapeHtml(scenario.recommended_entry.toFixed(2)) + '</b> · SL <b>' + escapeHtml(scenario.recommended_sl.toFixed(2)) + '</b> · TP <b>' + escapeHtml(scenario.recommended_tp.toFixed(2)) + '</b></p></div>'
+      ).join('');
+      maneuverForm.style.display = 'block';
+      setMessage(data.suggested_maneuver ? 'Предложение: ' + data.suggested_maneuver : 'Сценарии обновлены.');
+    } catch (error) { setMessage(error.message); }
+  });
+
+  maneuverForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(maneuverForm));
+    try {
+      const result = await postJson('/api/adaptive/maneuver', {
+        ticker: tickerInput.value.trim().toUpperCase(), direction: 'LONG', dry_run: true,
+        entry_price: Number(values.entry_price), current_price: Number(values.current_price),
+        new_stop_loss: Number(values.new_stop_loss), new_take_profit: Number(values.new_take_profit),
+        quantity: Number(values.quantity),
+      });
+      setMessage('Dry-run подтвержден; R:R = ' + result.risk_reward + '. Брокер не вызывался.');
+    } catch (error) { setMessage(error.message); }
   });
 })();
 {% endblock %}

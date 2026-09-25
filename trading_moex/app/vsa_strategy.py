@@ -156,10 +156,11 @@ def _higher_timeframe_context(frame: pd.DataFrame, config: StrategyConfig) -> pd
     )
     for period in (config.context_fast, config.context_mid, config.context_slow):
         higher[f"ema_{period}"] = higher["close"].ewm(span=period, adjust=False, min_periods=period).mean()
-    prior_context_count = []
-    for timestamp in higher["timestamp"]:
-        prior_context_count.append(int(((higher["timestamp"] < timestamp) & (higher["timestamp"] >= timestamp - pd.Timedelta(days=config.context_lookback_days))).sum()))
-    higher["context_count"] = prior_context_count
+    timestamps = higher["timestamp"]
+    lower_bounds = timestamps - pd.Timedelta(days=config.context_lookback_days)
+    higher["context_count"] = np.searchsorted(timestamps.to_numpy(), timestamps.to_numpy(), side="left") - np.searchsorted(
+        timestamps.to_numpy(), lower_bounds.to_numpy(), side="left"
+    )
     higher["context_bull"] = (
         higher["close"].gt(higher[f"ema_{config.context_mid}"])
         & higher[f"ema_{config.context_fast}"].gt(higher[f"ema_{config.context_mid}"])

@@ -16,3 +16,4 @@ protobuf
 python-dateutil
 pytest-asyncio
 jsonschema
+pydantic>=2.0,<3.0

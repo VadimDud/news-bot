@@ -40,7 +40,22 @@ def report_startup_state(live_trader) -> None:
                 config.DRY_RUN,
                 "задан" if config.TINKOFF_API_TOKEN else "не задан",
                 live_trader.strategy,
-                config.TRADER_SKILLS_ENABLED, config.TRADER_SKILLS_MODE)
+                 config.TRADER_SKILLS_ENABLED, config.TRADER_SKILLS_MODE)
+    from app import settings as app_settings
+
+    try:
+        errors, warnings = config.live_config_issues(
+            dry_run=getattr(live_trader, "dry_run", config.DRY_RUN),
+            web_password_configured=bool(app_settings.get("TRADER_WEB_PASSWORD")),
+            token_configured=bool(app_settings.tinkoff_token()),
+        )
+    except (TypeError, ValueError):
+        # Совместимость с минимальными конфигурационными mock-объектами в тестах.
+        errors, warnings = [], []
+    for warning in warnings:
+        logger.warning("Live config: %s", warning)
+    for error in errors:
+        logger.error("Live config: %s", error)
     logger.info("Watchlist: %s", config.WATCH_TICKERS)
     logger.info("──────────────────────────────────────────────────────────────")
 
@@ -131,6 +146,15 @@ async def main() -> None:
     else:
         logger.info("Signal notifier disabled via TRADER_SIGNALS_ENABLED")
 
+    adaptive_task: asyncio.Task | None = None
+    from app.adaptive_collector import collector_loop, configured_enabled
+
+    if configured_enabled():
+        logger.info("Starting adaptive pattern collector (statistics-only, tickers=%s)", config.WATCH_TICKERS)
+        adaptive_task = asyncio.create_task(collector_loop(config.DB_PATH))
+    else:
+        logger.info("Adaptive pattern collector disabled via TRADER_ADAPTIVE_ENABLED")
+
     # Запустить фоновый сканер Elliott micro-wave сигналов (ежедневно вечером)
     elliott_task: asyncio.Task | None = None
     if config.TRADER_ELLIOTT_ENABLED:
@@ -185,6 +209,7 @@ async def main() -> None:
     # поднимаем Telegram-алерт, чтобы падение не осталось незамеченным.
     watched = {
         "ROE": signal_task,
+        "Adaptive": adaptive_task,
         "Elliott": elliott_task,
         "Fib": fib_task,
         "Fib-data": fib_data_task,
@@ -204,6 +229,10 @@ async def main() -> None:
             signal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await signal_task
+        if adaptive_task is not None:
+            adaptive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await adaptive_task
         if elliott_task is not None:
             elliott_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

@@ -1104,6 +1104,13 @@ async def adaptive_maneuver(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def adaptive_status(request: web.Request) -> web.Response:
+    """Return collector health; this endpoint exposes no secrets or broker state."""
+    from ..adaptive_collector import status
+
+    return web.json_response(status())
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[_auth_middleware, _no_cache_middleware])
     aiohttp_jinja2.setup(
@@ -1150,5 +1157,6 @@ def create_app() -> web.Application:
     app.router.add_post("/api/adaptive/{ticker}/collect", adaptive_collect)
     app.router.add_get("/api/adaptive/{ticker}/forecast", adaptive_forecast)
     app.router.add_post("/api/adaptive/maneuver", adaptive_maneuver)
+    app.router.add_get("/api/adaptive/status", adaptive_status)
     app.router.add_static("/static", Path(__file__).resolve().parent / "static")
     return app

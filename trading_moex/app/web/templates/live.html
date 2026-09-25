@@ -63,6 +63,7 @@
     </div>
   </div>
   <div id="adaptive-message" class="hint" style="margin-top:10px;"></div>
+  <div id="adaptive-collector-status" class="hint" style="margin-top:6px;">Collector: проверка...</div>
   <div id="adaptive-context" style="margin-top:12px;"></div>
   <div id="adaptive-scenarios" class="grid" style="margin-top:12px;"></div>
   <form id="adaptive-maneuver" style="display:none;margin-top:16px;">
@@ -142,6 +143,18 @@
   const maneuverForm = document.getElementById('adaptive-maneuver');
   const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
   const setMessage = value => { adaptiveMessage.textContent = value; };
+  async function refreshAdaptiveStatus() {
+    try {
+      const response = await fetch('/api/adaptive/status');
+      const data = await response.json();
+      const status = data.running ? 'работает' : (data.enabled ? 'остановлен' : 'отключен');
+      document.getElementById('adaptive-collector-status').textContent =
+        'Collector: ' + status + ' · записей: ' + data.processed_records
+        + ' · последний запуск: ' + (data.last_run_at || '—');
+    } catch (error) {
+      document.getElementById('adaptive-collector-status').textContent = 'Collector: статус недоступен';
+    }
+  }
   const postJson = async (url, body) => {
     const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const data = await response.json();
@@ -157,8 +170,11 @@
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Ошибка сбора');
       setMessage('Сохранено паттернов: ' + data.stored);
+      refreshAdaptiveStatus();
     } catch (error) { setMessage(error.message); }
   });
+  refreshAdaptiveStatus();
+  setInterval(refreshAdaptiveStatus, 10000);
 
   document.getElementById('adaptive-forecast').addEventListener('click', async () => {
     const ticker = tickerInput.value.trim().toUpperCase();

@@ -536,6 +536,8 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         ("stop_mode", 0),
         ("atr_stop_mult", 2.0),
         ("tp_rr", 0.0),
+        ("tp_trail", 0),
+        ("tp_atr_mult", 2.0),
     )
 
     def __init__(self):
@@ -720,6 +722,48 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         )
         self._tp_ref = None if self._tp_order is None else self._tp_order.ref
 
+    def _tp_target(self) -> float | None:
+        """Return the take-profit price for the current bar (or None if off).
+
+        ``tp_trail`` controls how the target evolves:
+        0 - fixed: entry + tp_rr * initial risk (never moves);
+        1 - follows the trail stop: current_stop + tp_rr * initial risk;
+        2 - ATR trail: close + tp_atr_mult * ATR;
+        3 - upper Bollinger band.
+        For the trailing modes the target only ratchets *up*: it never drops
+        below the previously placed target, so an already-reached profit level
+        is not given back when volatility shrinks.
+        """
+        if float(self.p.tp_rr) <= 0 and int(self.p.tp_trail) in (0, 1):
+            return None
+        if self._entry_price is None:
+            return None
+        mode = int(self.p.tp_trail)
+        target = None
+        if mode == 0:
+            if self._initial_risk is None:
+                return None
+            target = self._entry_price + float(self.p.tp_rr) * float(self._initial_risk)
+        elif mode == 1:
+            if self._initial_risk is None or self._stop_loss is None:
+                return None
+            target = float(self._stop_loss) + float(self.p.tp_rr) * float(self._initial_risk)
+        elif mode == 2:
+            atr = self._atr_dist()
+            if atr <= 0:
+                return None
+            target = float(self.data.close[0]) + float(self.p.tp_atr_mult) * atr
+        elif mode == 3:
+            upper = float(self.bb_upper[0])
+            if upper != upper:
+                return None
+            target = upper
+        if target is None or target <= 0:
+            return None
+        if mode != 0 and self._tp_price is not None:
+            target = max(target, float(self._tp_price))
+        return target
+
     def _place_bracket(self) -> None:
         """(Re)place the protective stop and, if configured, the take-profit.
 
@@ -732,12 +776,8 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         if not self.position or self._stop_loss is None:
             return
         stop_price = float(self._stop_loss)
-        tp_on = float(self.p.tp_rr) > 0 and self._entry_price is not None and self._initial_risk is not None
-        tp_price = None
-        if tp_on:
-            tp_price = self._entry_price + float(self.p.tp_rr) * float(self._initial_risk)
-            if tp_price <= 0:
-                tp_on = False
+        tp_price = self._tp_target()
+        tp_on = tp_price is not None and tp_price > float(stop_price)
 
         stop_ok = self._stop_order is not None and self._stop_order.status in (
             bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial,
@@ -791,16 +831,20 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
             profit = float(self.data.close[0]) - self._entry_price
             if profit >= self._initial_risk * float(self.p.breakeven_r):
                 lower = max(lower, self._entry_price)
-        if self._stop_loss is None or lower > self._stop_loss:
+        stop_moved = self._stop_loss is None or lower > self._stop_loss
+        if stop_moved:
             self._stop_loss = lower
-            if self._stop_order is not None and self._stop_order.status == bt.Order.Submitted:
-                # A stop placed this same bar (e.g. right after the entry fill)
-                # has not been processed by the broker yet: cancelling it now
-                # would leave it alive and it could fire later on a flat
-                # position.  Defer the replacement to the next bar.
-                self._stop_pending_update = True
-                return
-            self._place_stop()
+        trailing_tp = int(self.p.tp_trail) != 0
+        if not stop_moved and not trailing_tp:
+            return
+        if self._stop_order is not None and self._stop_order.status == bt.Order.Submitted:
+            # A stop placed this same bar (e.g. right after the entry fill)
+            # has not been processed by the broker yet: cancelling it now
+            # would leave it alive and it could fire later on a flat
+            # position.  Defer the replacement to the next bar.
+            self._stop_pending_update = True
+            return
+        self._place_bracket()
 
     def _time_exit(self) -> None:
         """Close a position that has gone nowhere for ``max_hold_bars`` bars."""
@@ -3113,6 +3157,8 @@ STRATEGIES = {
             {"key": "stop_mode", "label": "Стоп: 0=нижняя полоса BB, 1=ATR", "type": "int", "default": 0},
             {"key": "atr_stop_mult", "label": "Стоп, ATR (при stop_mode=1)", "type": "float", "default": 2.0},
             {"key": "tp_rr", "label": "Тейк / риск (R:R, 0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "tp_trail", "label": "Трейлинг тейка: 0=фикс, 1=за стопом, 2=ATR, 3=верхняя BB", "type": "int", "default": 0},
+            {"key": "tp_atr_mult", "label": "Тейк, ATR (при tp_trail=2)", "type": "float", "default": 2.0},
             {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
         ],
     },

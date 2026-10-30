@@ -995,6 +995,425 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         self._retest_active = False
 
 
+class MirrorBollingerShortStrategy(TradeRecordingStrategy):
+    """Short-only mirror of :class:`BollingerBreakoutStrategy`.
+
+    Every long-only rule is reflected through the price axis so the strategy
+    fades the exact setups the long version buys: a downside Bollinger-band
+    breakout (``close < lower``) with price below a falling EMA and a bearish
+    candle, entered at the close (or on a failed retest), protected by a stop
+    above (ATR, or the upper band) that ratchets *down*, and a take-profit
+    below.  Same parameters, same session handling, same OCO bracket.
+    """
+
+    params = (
+        ("bb_period", 20),
+        ("bb_stddev", 2.0),
+        ("width_expansion", 0),
+        ("breakout_confirm_bars", 2),
+        ("ema_period", 200),
+        ("ema_slope_bars", 20),
+        ("candle_body_ratio", 0.5),
+        ("close_position_min", 0.7),
+        ("atr_period", 14),
+        ("max_breakout_atr", 1.5),
+        ("entry_mode", 0),
+        ("retest_fraction", 0.5),
+        ("retest_max_bars", 8),
+        ("retest_reclaim", 1),
+        ("session_start", 10),
+        ("session_end", 19),
+        ("session_offset_hours", 3),
+        ("close_at_eod", 1),
+        ("use_sma_trail", 0),
+        ("profit_trigger_pct", 0.0),
+        ("breakeven_r", 0.0),
+        ("max_hold_bars", 0),
+        ("risk_pct", 1.0),
+        ("stop_mode", 0),
+        ("atr_stop_mult", 2.0),
+        ("tp_rr", 0.0),
+        ("tp_trail", 0),
+        ("tp_atr_mult", 2.0),
+    )
+
+    def __init__(self):
+        super().__init__()
+        period = max(int(self.p.bb_period), 2)
+        self.bb_mid = bt.indicators.SMA(self.data.close, period=period)
+        self.bb_std = bt.indicators.StdDev(self.data.close, period=period)
+        self.bb_upper = self.bb_mid + float(self.p.bb_stddev) * self.bb_std
+        self.bb_lower = self.bb_mid - float(self.p.bb_stddev) * self.bb_std
+        ema_period = int(self.p.ema_period)
+        self.trend_ema = bt.indicators.EMA(self.data.close, period=ema_period) if ema_period > 0 else None
+        atr_period = int(self.p.atr_period)
+        self.breakout_atr = bt.indicators.ATR(self.data, period=atr_period) if atr_period > 0 else None
+        self._stop_order = None
+        self._stop_ref = None
+        self._stop_loss = None
+        self._entry_price = None
+        self._pending_stop = None
+        self._stop_pending_update = False
+        self._breakout_count = 0
+        self._retest_active = False
+        self._retest_bars = 0
+        self._retest_level = None
+        self._retest_stop = None
+        self._initial_risk = None
+        self._hold_bars = 0
+        self._tp_order = None
+        self._tp_ref = None
+        self._tp_price = None
+        self._close_requested = False
+        self._close_submitted = False
+
+    def start(self):
+        self.broker.set_coc(True)
+
+    def _can_trade(self) -> bool:
+        dt = self.data.datetime.datetime(0) + timedelta(hours=int(self.p.session_offset_hours))
+        return (
+            dt.weekday() < 5
+            and int(self.p.session_start) <= dt.hour < int(self.p.session_end)
+        )
+
+    def _breakout(self) -> bool:
+        if not self._can_trade():
+            return False
+        lower = float(self.bb_lower[0])
+        previous_lower = float(self.bb_lower[-1])
+        close = float(self.data.close[0])
+        previous_close = float(self.data.close[-1])
+        if any(value != value for value in (lower, previous_lower)):
+            return False
+        breakout = close < lower and (
+            previous_close >= previous_lower or self._breakout_count > 0
+        )
+        if not breakout or not int(self.p.width_expansion):
+            width_ok = breakout
+        else:
+            width = float(self.bb_upper[0]) - lower
+            previous_width = float(self.bb_upper[-1]) - previous_lower
+            width_ok = breakout and width > previous_width
+        if not width_ok:
+            return False
+        if self.trend_ema is not None:
+            ema = float(self.trend_ema[0])
+            if ema != ema or close >= ema:
+                return False
+            slope_bars = int(self.p.ema_slope_bars)
+            if slope_bars > 0:
+                slope = float(self.trend_ema[-slope_bars])
+                if slope != slope or ema >= slope:
+                    return False
+        candle_range = float(self.data.high[0] - self.data.low[0])
+        if float(self.p.candle_body_ratio) > 0:
+            body_ratio = (float(self.data.open[0]) - close) / candle_range if candle_range > 0 else 0.0
+            if body_ratio < float(self.p.candle_body_ratio):
+                return False
+        if float(self.p.close_position_min) > 0:
+            close_position = (float(self.data.high[0]) - close) / candle_range if candle_range > 0 else 0.0
+            if close_position < float(self.p.close_position_min):
+                return False
+        if self.breakout_atr is not None and float(self.p.max_breakout_atr) > 0:
+            atr = float(self.breakout_atr[0])
+            if atr != atr or lower - close > atr * float(self.p.max_breakout_atr):
+                return False
+        return True
+
+    def _position_size(self, price: float, stop: float) -> int:
+        distance = max(stop - price, price * 0.005)
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0,
+            distance, price,
+        )
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        return max(min(size, max_by_cash), 1) if max_by_cash > 0 else size
+
+    def _stop_active(self) -> bool:
+        return self._stop_order is not None and self._stop_order.status in (
+            bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial,
+        )
+
+    def _tp_active(self) -> bool:
+        return self._tp_order is not None and self._tp_order.status in (
+            bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial,
+        )
+
+    def _cancel_stop(self) -> None:
+        if self._stop_active():
+            self.cancel(self._stop_order)
+        self._stop_order = None
+        self._stop_ref = None
+
+    def _cancel_tp(self) -> None:
+        if self._tp_active():
+            self.cancel(self._tp_order)
+        self._tp_order = None
+        self._tp_ref = None
+        self._tp_price = None
+
+    def _close_position(self) -> None:
+        if self._stop_active() or self._tp_active():
+            if not self._close_requested:
+                if self._stop_active():
+                    self.cancel(self._stop_order)
+                if self._tp_active():
+                    self.cancel(self._tp_order)
+                self._close_requested = True
+            return
+        if self._close_submitted:
+            return
+        self._close_requested = True
+        self._close_submitted = True
+        self._stop_order = None
+        self._stop_ref = None
+        self._stop_loss = None
+        self._entry_price = None
+        self._initial_risk = None
+        self._tp_order = None
+        self._tp_ref = None
+        self._tp_price = None
+        self.close()
+
+    def _atr_dist(self) -> float:
+        if self.breakout_atr is None:
+            return 0.0
+        atr = float(self.breakout_atr[0])
+        return 0.0 if atr != atr else atr
+
+    def _initial_stop_price(self, price: float) -> float:
+        if int(self.p.stop_mode) and self._atr_dist() > 0:
+            return price + float(self.p.atr_stop_mult) * self._atr_dist()
+        return float(self.bb_upper[0])
+
+    def _tp_target(self) -> float | None:
+        if float(self.p.tp_rr) <= 0 and int(self.p.tp_trail) in (0, 1):
+            return None
+        if self._entry_price is None:
+            return None
+        mode = int(self.p.tp_trail)
+        target = None
+        if mode == 0:
+            if self._initial_risk is None:
+                return None
+            target = self._entry_price - float(self.p.tp_rr) * float(self._initial_risk)
+        elif mode == 1:
+            if self._initial_risk is None or self._stop_loss is None:
+                return None
+            target = float(self._stop_loss) - float(self.p.tp_rr) * float(self._initial_risk)
+        elif mode == 2:
+            atr = self._atr_dist()
+            if atr <= 0:
+                return None
+            target = float(self.data.close[0]) - float(self.p.tp_atr_mult) * atr
+        elif mode == 3:
+            lower = float(self.bb_lower[0])
+            if lower != lower:
+                return None
+            target = lower
+        if target is None or target <= 0:
+            return None
+        if mode != 0 and self._tp_price is not None:
+            target = min(target, float(self._tp_price))
+        return target
+
+    def _place_bracket(self) -> None:
+        if not self.position or self._stop_loss is None:
+            return
+        stop_price = float(self._stop_loss)
+        tp_price = self._tp_target()
+        tp_on = tp_price is not None and tp_price < float(stop_price)
+        stop_ok = self._stop_active()
+        tp_ok = self._tp_active()
+        tp_matches = tp_on and tp_ok and abs(float(self._tp_order.created.price) - tp_price) < 1e-9
+        stop_matches = stop_ok and abs(float(self._stop_order.created.price) - stop_price) < 1e-9
+        if stop_matches and tp_matches and tp_on == tp_ok:
+            return
+        if stop_matches and not tp_on and not tp_ok:
+            return
+        self._cancel_stop()
+        self._cancel_tp()
+        self._stop_order = self.buy(
+            exectype=bt.Order.Stop, price=stop_price, size=abs(self.position.size),
+        )
+        self._stop_ref = None if self._stop_order is None else self._stop_order.ref
+        if tp_on:
+            self._tp_price = tp_price
+            self._tp_order = self.buy(
+                exectype=bt.Order.Limit, price=float(tp_price), size=abs(self.position.size),
+                oco=self._stop_order,
+            )
+            self._tp_ref = None if self._tp_order is None else self._tp_order.ref
+
+    def _update_stop(self) -> None:
+        if self._stop_pending_update and self._stop_order is not None and self._stop_order.status in (
+            bt.Order.Accepted, bt.Order.Partial,
+        ):
+            self._stop_pending_update = False
+            self._place_bracket()
+        upper = float(self.bb_upper[0])
+        if upper != upper:
+            return
+        if int(self.p.use_sma_trail) and self._entry_price:
+            profit_pct = (1.0 - float(self.data.close[0]) / self._entry_price) * 100.0
+            if profit_pct >= float(self.p.profit_trigger_pct):
+                upper = float(self.bb_mid[0])
+        if self._entry_price and self._initial_risk and float(self.p.breakeven_r) > 0:
+            profit = self._entry_price - float(self.data.close[0])
+            if profit >= self._initial_risk * float(self.p.breakeven_r):
+                upper = min(upper, self._entry_price)
+        stop_moved = self._stop_loss is None or upper < self._stop_loss
+        if stop_moved:
+            self._stop_loss = upper
+        trailing_tp = int(self.p.tp_trail) != 0
+        if not stop_moved and not trailing_tp:
+            return
+        if self._stop_order is not None and self._stop_order.status == bt.Order.Submitted:
+            self._stop_pending_update = True
+            return
+        self._place_bracket()
+
+    def _time_exit(self) -> None:
+        max_hold = int(self.p.max_hold_bars)
+        if max_hold <= 0:
+            return
+        self._hold_bars += 1
+        if self._hold_bars <= max_hold:
+            return
+        self._close_position()
+
+    def notify_order(self, order):
+        if order.status == bt.Order.Completed:
+            if self._stop_ref is not None and order.ref == self._stop_ref:
+                self._stop_order = None
+                self._stop_ref = None
+                self._stop_loss = None
+                self._entry_price = None
+                self._initial_risk = None
+                self._cancel_tp()
+            elif self._tp_ref is not None and order.ref == self._tp_ref:
+                self._tp_order = None
+                self._tp_ref = None
+                self._tp_price = None
+                self._stop_order = None
+                self._stop_ref = None
+                self._stop_loss = None
+                self._entry_price = None
+                self._initial_risk = None
+            elif order.issell() and self.position:
+                self._entry_price = float(order.executed.price)
+                self._stop_loss = self._pending_stop
+                self._pending_stop = None
+                self._stop_pending_update = False
+                self._close_requested = False
+                self._close_submitted = False
+                self._hold_bars = 0
+                if self._stop_loss is not None:
+                    self._initial_risk = max(self._stop_loss - self._entry_price, 0.0)
+                else:
+                    self._initial_risk = None
+                self._place_bracket()
+            elif order.isbuy() and not self.position:
+                self._stop_order = None
+                self._stop_ref = None
+                self._stop_loss = None
+                self._entry_price = None
+                self._initial_risk = None
+                self._close_requested = False
+                self._close_submitted = False
+                self._tp_order = None
+                self._tp_ref = None
+                self._tp_price = None
+        elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin):
+            if self._stop_ref is not None and order.ref == self._stop_ref:
+                self._stop_order = None
+                self._stop_ref = None
+            if self._tp_ref is not None and order.ref == self._tp_ref:
+                self._tp_order = None
+                self._tp_ref = None
+
+    def next(self):
+        dt = self.data.datetime.datetime(0) + timedelta(hours=int(self.p.session_offset_hours))
+        if self.position:
+            if self._close_requested:
+                self._close_position()
+                return
+            if int(self.p.close_at_eod) and (dt.hour >= int(self.p.session_end) or dt.weekday() >= 5):
+                self._close_position()
+                return
+            self._update_stop()
+            self._time_exit()
+            return
+        if not self._can_trade():
+            self._breakout_count = 0
+            return
+        if self._breakout():
+            self._breakout_count += 1
+        else:
+            self._breakout_count = 0
+        confirm_bars = max(int(self.p.breakout_confirm_bars), 1)
+        if self._breakout_count >= confirm_bars:
+            if int(self.p.entry_mode) <= 0:
+                self._enter_at_close()
+            else:
+                self._retest_active = True
+                self._retest_bars = 0
+                self._retest_level = self._retest_price()
+                self._retest_stop = self._initial_stop_price(float(self.data.close[0]))
+            self._breakout_count = 0
+            return
+        if self._retest_active:
+            self._process_retest()
+
+    def _retest_price(self) -> float:
+        fraction = min(max(float(self.p.retest_fraction), 0.0), 1.0)
+        lower = float(self.bb_lower[0])
+        middle = float(self.bb_mid[0])
+        return lower + (middle - lower) * fraction
+
+    def _enter_at_close(self) -> None:
+        price = float(self.data.close[0])
+        stop = self._initial_stop_price(price)
+        if stop != stop or stop <= price:
+            return
+        size = self._position_size(price, stop)
+        if size > 0:
+            self._pending_stop = stop
+            self.sell(size=size)
+
+    def _process_retest(self) -> None:
+        if self.position:
+            self._retest_active = False
+            return
+        if not self._can_trade():
+            self._retest_active = False
+            return
+        if self._retest_bars >= max(int(self.p.retest_max_bars), 1):
+            self._retest_active = False
+            return
+        self._retest_bars += 1
+        level = self._retest_level
+        if level is None or level != level:
+            self._retest_active = False
+            return
+        touched = float(self.data.high[0]) >= level
+        if not touched:
+            return
+        if int(self.p.retest_reclaim) and float(self.data.close[0]) > level:
+            return
+        price = float(self.data.close[0])
+        stop = self._retest_stop if self._retest_stop is not None else self._initial_stop_price(price)
+        if stop != stop or stop <= price:
+            self._retest_active = False
+            return
+        size = self._position_size(price, stop)
+        if size > 0:
+            self._pending_stop = stop
+            self.sell(size=size)
+        self._retest_active = False
+
+
 def _ema(values: list[float], period: int) -> float | None:
     """Exponential moving average of the last value (None if not enough data)."""
     if period <= 0 or len(values) < period:
@@ -3672,6 +4091,40 @@ STRATEGIES = {
             {"key": "atr_stop_mult", "label": "Стоп, ATR (при stop_mode=1)", "type": "float", "default": 2.0},
             {"key": "tp_rr", "label": "Тейк / риск (R:R, 0 = выкл)", "type": "float", "default": 0.0},
             {"key": "tp_trail", "label": "Трейлинг тейка: 0=фикс, 1=за стопом, 2=ATR, 3=верхняя BB", "type": "int", "default": 0},
+            {"key": "tp_atr_mult", "label": "Тейк, ATR (при tp_trail=2)", "type": "float", "default": 2.0},
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+        ],
+    },
+    "mirror_bollinger_short": {
+        "name": "Зеркало Bollinger (short-пробой вниз)",
+        "cls": MirrorBollingerShortStrategy,
+        "params": [
+            {"key": "bb_period", "label": "Период Bollinger Bands", "type": "int", "default": 20},
+            {"key": "bb_stddev", "label": "Стандартных отклонений", "type": "float", "default": 2.0},
+            {"key": "width_expansion", "label": "Требовать расширение полос (1 = да)", "type": "int", "default": 0},
+            {"key": "breakout_confirm_bars", "label": "Подтверждение пробоя, свечей", "type": "int", "default": 2},
+            {"key": "ema_period", "label": "Фильтр тренда EMA (0 = выкл)", "type": "int", "default": 200},
+            {"key": "ema_slope_bars", "label": "Падение EMA за N свечей (0 = выкл)", "type": "int", "default": 20},
+            {"key": "candle_body_ratio", "label": "Мин. тело пробойной свечи, доля диапазона", "type": "float", "default": 0.5},
+            {"key": "close_position_min", "label": "Close в нижней части диапазона, мин. доля", "type": "float", "default": 0.7},
+            {"key": "atr_period", "label": "ATR для фильтра импульса (0 = выкл)", "type": "int", "default": 14},
+            {"key": "max_breakout_atr", "label": "Макс. превышение Lower, ATR (0 = выкл)", "type": "float", "default": 1.5},
+            {"key": "entry_mode", "label": "Вход: 0=пробой, 1=ретест зоны, 2=ретест SMA", "type": "int", "default": 0},
+            {"key": "retest_fraction", "label": "Ретест: доля пути Lower-SMA", "type": "float", "default": 0.5},
+            {"key": "retest_max_bars", "label": "Ретест: максимум свечей ожидания", "type": "int", "default": 8},
+            {"key": "retest_reclaim", "label": "Ретест: закрытие обратно ниже уровня (1 = да)", "type": "int", "default": 1},
+            {"key": "session_start", "label": "Начало входов, час", "type": "int", "default": 10},
+            {"key": "session_end", "label": "Конец входов, час", "type": "int", "default": 19},
+            {"key": "session_offset_hours", "label": "Смещение времени свечей, часов", "type": "int", "default": 3},
+            {"key": "close_at_eod", "label": "Закрывать вне рабочего времени (1 = да)", "type": "int", "default": 1},
+            {"key": "use_sma_trail", "label": "Переключать трейл на SMA (1 = да)", "type": "int", "default": 0},
+            {"key": "profit_trigger_pct", "label": "Профит для переключения на SMA, %", "type": "float", "default": 0.0},
+            {"key": "breakeven_r", "label": "Безубыток после прибыли, R (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "max_hold_bars", "label": "Макс. удержание, баров (0 = нет лимита)", "type": "int", "default": 0},
+            {"key": "stop_mode", "label": "Стоп: 0=верхняя полоса BB, 1=ATR", "type": "int", "default": 0},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR (при stop_mode=1)", "type": "float", "default": 2.0},
+            {"key": "tp_rr", "label": "Тейк / риск (R:R, 0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "tp_trail", "label": "Трейлинг тейка: 0=фикс, 1=за стопом, 2=ATR, 3=нижняя BB", "type": "int", "default": 0},
             {"key": "tp_atr_mult", "label": "Тейк, ATR (при tp_trail=2)", "type": "float", "default": 2.0},
             {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
         ],

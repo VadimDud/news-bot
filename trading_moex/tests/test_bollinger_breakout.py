@@ -338,3 +338,66 @@ def test_mtf_bollinger_ema_stack_mode_runs():
     data = _candles(closes)
     result = run_backtest(data, _M, params, cash=100_000, commission=0)
     assert result["final_value"] < 1_000_000
+
+
+def test_mirror_short_registered_and_shorts_on_downside_breakout():
+    from app.strategies import MirrorBollingerShortStrategy as _S
+
+    item = STRATEGIES["mirror_bollinger_short"]
+    assert item["cls"] is _S
+    params = {p["key"]: p["default"] for p in item["params"]}
+    assert params["bb_period"] == 20
+    assert params["session_start"] == 10
+    assert params["close_at_eod"] == 1
+
+    lo = dict(params)
+    lo["ema_period"] = 0
+    lo["ema_slope_bars"] = 0
+    lo["candle_body_ratio"] = 0.0
+    lo["close_position_min"] = 0.0
+    lo["max_breakout_atr"] = 0.0
+    lo["breakout_confirm_bars"] = 1
+    lo["session_start"] = 0
+    lo["session_end"] = 24
+    lo["close_at_eod"] = 0
+    lo["stop_mode"] = 1
+    lo["atr_stop_mult"] = 2.0
+
+    rng = np.random.default_rng(7)
+    base = 100 + np.cumsum(rng.normal(0.05, 0.6, 120))
+    down = np.cumsum(rng.normal(-1.2, 0.6, 60))
+    bounce = np.cumsum(rng.normal(1.4, 0.6, 80))
+    closes = list(np.r_[base, base[-1] + down, base[-1] + down[-1] + bounce])
+    data = _candles(closes)
+    result = run_backtest(data, _S, lo, cash=100_000, commission=0)
+    assert result["final_value"] < 1_000_000
+    assert result["trades_total"] >= 1
+    for trade in result["trades"]:
+        assert trade["status"] == "closed"
+        assert trade["entry_price"] > 0
+
+
+def test_mirror_short_does_not_buy_upside_breakout():
+    from app.strategies import MirrorBollingerShortStrategy as _S
+
+    item = STRATEGIES["mirror_bollinger_short"]
+    params = {p["key"]: p["default"] for p in item["params"]}
+    params["ema_period"] = 0
+    params["ema_slope_bars"] = 0
+    params["candle_body_ratio"] = 0.0
+    params["close_position_min"] = 0.0
+    params["max_breakout_atr"] = 0.0
+    params["breakout_confirm_bars"] = 1
+    params["session_start"] = 0
+    params["session_end"] = 24
+    params["close_at_eod"] = 0
+    rng = np.random.default_rng(8)
+    n = 260
+    base = 100 + np.cumsum(rng.normal(0.05, 0.6, 120))
+    up = np.cumsum(rng.normal(1.4, 0.6, n - 120))
+    closes = list(np.r_[base, base[-1] + up])
+    data = _candles(closes)
+    result = run_backtest(data, _S, params, cash=100_000, commission=0)
+    assert result["final_value"] < 1_000_000
+    for trade in result["trades"]:
+        assert trade["status"] == "closed"

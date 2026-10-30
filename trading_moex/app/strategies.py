@@ -501,6 +501,138 @@ class DonchianBreakout(RiskAwareStrategy):
         return self.data.close[0] < self.lowest[-1]
 
 
+class BollingerBreakoutStrategy(TradeRecordingStrategy):
+    """Long-only Bollinger breakout with a ratcheting lower-band stop.
+
+    The broker is put into cheat-on-close mode so a signal confirmed by the
+    current close is filled at that same close rather than at the next open.
+    """
+
+    params = (
+        ("bb_period", 20),
+        ("bb_stddev", 2.0),
+        ("width_expansion", 0),
+        ("session_start", 10),
+        ("session_end", 19),
+        ("close_at_eod", 1),
+        ("use_sma_trail", 0),
+        ("profit_trigger_pct", 0.0),
+        ("risk_pct", 1.0),
+    )
+
+    def __init__(self):
+        super().__init__()
+        period = max(int(self.p.bb_period), 2)
+        self.bb_mid = bt.indicators.SMA(self.data.close, period=period)
+        self.bb_std = bt.indicators.StdDev(self.data.close, period=period)
+        self.bb_upper = self.bb_mid + float(self.p.bb_stddev) * self.bb_std
+        self.bb_lower = self.bb_mid - float(self.p.bb_stddev) * self.bb_std
+        self._stop_order = None
+        self._stop_loss = None
+        self._entry_price = None
+        self._pending_stop = None
+
+    def start(self):
+        # This affects only runs using this strategy and makes entry fill on
+        # the close that generated the breakout signal.
+        self.broker.set_coc(True)
+
+    def _can_trade(self) -> bool:
+        dt = self.data.datetime.datetime(0)
+        return (
+            dt.weekday() < 5
+            and int(self.p.session_start) <= dt.hour < int(self.p.session_end)
+        )
+
+    def _breakout(self) -> bool:
+        if not self._can_trade():
+            return False
+        upper = float(self.bb_upper[0])
+        previous_upper = float(self.bb_upper[-1])
+        close = float(self.data.close[0])
+        previous_close = float(self.data.close[-1])
+        if any(value != value for value in (upper, previous_upper)):
+            return False
+        breakout = close > upper and previous_close <= previous_upper
+        if not breakout or not int(self.p.width_expansion):
+            return breakout
+        width = upper - float(self.bb_lower[0])
+        previous_width = previous_upper - float(self.bb_lower[-1])
+        return width > previous_width
+
+    def _position_size(self, price: float, stop: float) -> int:
+        distance = max(price - stop, price * 0.005)
+        size = risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0,
+            distance, price,
+        )
+        max_by_cash = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        return max(min(size, max_by_cash), 1) if max_by_cash > 0 else size
+
+    def _cancel_stop(self) -> None:
+        if self._stop_order is not None and self._stop_order.status in (
+            bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial,
+        ):
+            self.cancel(self._stop_order)
+        self._stop_order = None
+
+    def _place_stop(self) -> None:
+        if not self.position or self._stop_loss is None:
+            return
+        self._cancel_stop()
+        self._stop_order = self.sell(
+            exectype=bt.Order.Stop, price=float(self._stop_loss), size=self.position.size,
+        )
+
+    def _update_stop(self) -> None:
+        lower = float(self.bb_lower[0])
+        if lower != lower:
+            return
+        if int(self.p.use_sma_trail) and self._entry_price:
+            profit_pct = (float(self.data.close[0]) / self._entry_price - 1.0) * 100.0
+            if profit_pct >= float(self.p.profit_trigger_pct):
+                lower = float(self.bb_mid[0])
+        if self._stop_loss is None or lower > self._stop_loss:
+            self._stop_loss = lower
+            self._place_stop()
+
+    def notify_order(self, order):
+        if order.status == bt.Order.Completed:
+            if order is self._stop_order:
+                self._stop_order = None
+                self._stop_loss = None
+                self._entry_price = None
+            elif order.isbuy() and self.position:
+                self._entry_price = float(order.executed.price)
+                self._stop_loss = self._pending_stop
+                self._pending_stop = None
+                self._place_stop()
+            elif order.issell() and not self.position:
+                self._stop_order = None
+                self._stop_loss = None
+                self._entry_price = None
+        elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin):
+            if order is self._stop_order:
+                self._stop_order = None
+
+    def next(self):
+        dt = self.data.datetime.datetime(0)
+        if self.position:
+            if int(self.p.close_at_eod) and (dt.hour >= int(self.p.session_end) or dt.weekday() >= 5):
+                self._cancel_stop()
+                self.close()
+                return
+            self._update_stop()
+            return
+        if self._breakout():
+            price = float(self.data.close[0])
+            stop = float(self.bb_lower[0])
+            size = self._position_size(price, stop)
+            if size > 0:
+                self._pending_stop = stop
+                self.buy(size=size)
+
+
 # bt-параметры Pinbar — подобраны перебором на YDEX (2025-08..2026-08, 30min):
 # объёмные фильтры (vol 40/1.5, bull 0.7) как у Поглощения + тень/тело 2.5,
 # широкий стоп 4.5 ATR, тейк 1:3, вход выше EMA(250). Без фильтров стратегия
@@ -2632,6 +2764,21 @@ STRATEGIES = {
             {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
             {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
             {"key": "trend_period", "label": "Трендовый EMA (0 = выкл)", "type": "int", "default": 50},
+        ],
+    },
+    "bollinger_breakout": {
+        "name": "Bollinger Bands Breakout",
+        "cls": BollingerBreakoutStrategy,
+        "params": [
+            {"key": "bb_period", "label": "Период Bollinger Bands", "type": "int", "default": 20},
+            {"key": "bb_stddev", "label": "Стандартных отклонений", "type": "float", "default": 2.0},
+            {"key": "width_expansion", "label": "Требовать расширение полос (1 = да)", "type": "int", "default": 0},
+            {"key": "session_start", "label": "Начало входов, час", "type": "int", "default": 10},
+            {"key": "session_end", "label": "Конец входов, час", "type": "int", "default": 19},
+            {"key": "close_at_eod", "label": "Закрывать вне рабочего времени (1 = да)", "type": "int", "default": 1},
+            {"key": "use_sma_trail", "label": "Переключать трейл на SMA (1 = да)", "type": "int", "default": 0},
+            {"key": "profit_trigger_pct", "label": "Профит для переключения на SMA, %", "type": "float", "default": 0.0},
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
         ],
     },
     "pinbar": {

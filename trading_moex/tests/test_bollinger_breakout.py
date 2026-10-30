@@ -192,3 +192,58 @@ def test_time_exit_never_flips_position_short():
     for trade in result["trades"]:
         assert trade["status"] == "closed"
         assert trade["entry_price"] > 0
+
+
+def test_take_profit_fills_and_stop_is_oco_cancelled():
+    closes = [100.0] * 20 + [130.0, 135.0, 150.0, 160.0, 180.0, 190.0] + [190.0] * 6
+    data = _candles(closes)
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "close_at_eod": 0,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "tp_rr": 1.0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 1
+    assert result["final_value"] < 1_000_000
+    for trade in result["trades"]:
+        assert trade["status"] == "closed"
+
+
+def test_atr_stop_and_tp_never_open_short():
+    closes = [100.0] * 20 + [130.0, 135.0, 120.0, 110.0, 105.0, 100.0] * 3
+    data = _candles(closes)
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "close_at_eod": 0,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "stop_mode": 1,
+            "atr_stop_mult": 1.0,
+            "tp_rr": 1.5,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["final_value"] < 1_000_000
+    for trade in result["trades"]:
+        assert trade["entry_price"] > 0

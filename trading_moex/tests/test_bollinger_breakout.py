@@ -278,3 +278,23 @@ def test_trailing_take_profit_ratchets_up():
     for trade in result["trades"]:
         assert trade["status"] == "closed"
         assert trade["exit_price"] >= trade["entry_price"]
+
+
+def test_mtf_bollinger_registered_and_never_blows_up():
+    assert "mtf_bollinger" in STRATEGIES
+    item = STRATEGIES["mtf_bollinger"]
+    defaults = {p["key"]: p["default"] for p in item["params"]}
+    assert defaults["slow_tf_minutes"] == 240
+    only_defaults = dict(defaults)
+    assert "risk_pct" in only_defaults
+
+    n = 600
+    rng = np.random.default_rng(3)
+    step = rng.normal(0.05, 0.4, n)
+    closes = list(100 + np.cumsum(step))
+    data = _candles(closes)
+    result = run_backtest(data, item["cls"], defaults, cash=100_000, commission=0)
+    assert result["final_value"] < 1_000_000
+    for trade in result["trades"]:
+        assert trade["status"] == "closed"
+        assert trade["entry_price"] > 0

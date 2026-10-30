@@ -298,3 +298,24 @@ def test_mtf_bollinger_registered_and_never_blows_up():
     for trade in result["trades"]:
         assert trade["status"] == "closed"
         assert trade["entry_price"] > 0
+
+
+def test_mtf_bollinger_adx_filter_blocks_choppy_and_allows_trend():
+    from app.strategies import MtfBollingerStrategy as _M
+
+    item = STRATEGIES["mtf_bollinger"]
+    defaults = {p["key"]: p["default"] for p in item["params"]}
+    assert defaults["slow_adx_period"] == 18
+    assert defaults["slow_adx_min"] == 25.0
+
+    n = 800
+    rng = np.random.default_rng(11)
+    closes = list(100 + np.cumsum(rng.normal(0.0, 0.25, 400)))
+    closes += list(closes[-1] + np.cumsum(rng.normal(0.6, 0.3, 400)))
+    data = _candles(closes)
+    base = run_backtest(data, _M, defaults, cash=100_000, commission=0)
+    no_adx = dict(defaults)
+    no_adx["slow_adx_period"] = 0
+    raw = run_backtest(data, _M, no_adx, cash=100_000, commission=0)
+    assert raw["trades_total"] >= base["trades_total"]
+    assert base["final_value"] < 1_000_000

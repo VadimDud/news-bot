@@ -1008,6 +1008,8 @@ _MTF_PARAMS_TUPLE = (
     ("slow_bb_stddev", 2.0),
     ("slow_breakout_bars", 3),
     ("slow_ema_period", 50),
+    ("slow_adx_period", 0),
+    ("slow_adx_min", 20.0),
     ("fast_bb_period", 20),
     ("fast_bb_stddev", 2.0),
     ("fast_pullback_frac", 1.0),
@@ -1160,7 +1162,58 @@ class MtfBollingerStrategy(TradeRecordingStrategy):
                 ema = x * k + ema * (1 - k)
             if closes[-1] <= ema:
                 return False
+        adx_min = float(self.p.slow_adx_min)
+        if int(self.p.slow_adx_period) > 0 and adx_min > 0:
+            if self._slow_adx() < adx_min:
+                return False
         return True
+
+    def _slow_adx(self) -> float:
+        """Wilder ADX on the aggregated slow bars (0.0 if unavailable)."""
+        n = len(self._slow_closes)
+        period = int(self.p.slow_adx_period)
+        if period <= 0 or n < 2 * period + 1:
+            return 0.0
+        highs = self._slow_highs
+        lows = self._slow_lows
+        closes = self._slow_closes
+        trs = []
+        plus_dm = []
+        minus_dm = []
+        for i in range(1, n):
+            up = highs[i] - highs[i - 1]
+            down = lows[i - 1] - lows[i]
+            plus_dm.append(up if (up > down and up > 0) else 0.0)
+            minus_dm.append(down if (down > up and down > 0) else 0.0)
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+            trs.append(tr)
+        # Wilder smoothing for TR, +DM, -DM
+        atr_s = sum(trs[:period])
+        plus_s = sum(plus_dm[:period])
+        minus_s = sum(minus_dm[:period])
+        dxs = []
+        for i in range(period, len(trs)):
+            atr_s = atr_s - atr_s / period + trs[i]
+            plus_s = plus_s - plus_s / period + plus_dm[i]
+            minus_s = minus_s - minus_s / period + minus_dm[i]
+            if atr_s <= 0:
+                continue
+            plus_di = 100.0 * plus_s / atr_s
+            minus_di = 100.0 * minus_s / atr_s
+            denom = plus_di + minus_di
+            if denom <= 0:
+                continue
+            dxs.append(100.0 * abs(plus_di - minus_di) / denom)
+        if len(dxs) < period:
+            return 0.0
+        adx = sum(dxs[:period]) / period
+        for i in range(period, len(dxs)):
+            adx = (adx * (period - 1) + dxs[i]) / period
+        return adx
 
     def _position_size(self, price: float, stop: float) -> int:
         distance = max(price - stop, price * 0.005)
@@ -3597,6 +3650,8 @@ STRATEGIES = {
             {"key": "slow_bb_stddev", "label": "Старший ТФ: стандартных отклонений", "type": "float", "default": 2.0},
             {"key": "slow_breakout_bars", "label": "Старший ТФ: пробой за N свечей", "type": "int", "default": 3},
             {"key": "slow_ema_period", "label": "Старший ТФ: EMA тренда (0 = выкл)", "type": "int", "default": 50},
+            {"key": "slow_adx_period", "label": "Старший ТФ: период ADX (0 = выкл)", "type": "int", "default": 18},
+            {"key": "slow_adx_min", "label": "Старший ТФ: мин. ADX для входа", "type": "float", "default": 25.0},
             {"key": "fast_bb_period", "label": "Младший ТФ: период BB", "type": "int", "default": 20},
             {"key": "fast_bb_stddev", "label": "Младший ТФ: стандартных отклонений", "type": "float", "default": 2.0},
             {"key": "fast_pullback_frac", "label": "Откат: доля пути Upper-SMA", "type": "float", "default": 1.0},

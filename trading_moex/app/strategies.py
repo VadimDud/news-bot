@@ -995,6 +995,17 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         self._retest_active = False
 
 
+def _ema(values: list[float], period: int) -> float | None:
+    """Exponential moving average of the last value (None if not enough data)."""
+    if period <= 0 or len(values) < period:
+        return None
+    k = 2.0 / (period + 1)
+    ema = values[0]
+    for x in values[1:]:
+        ema = x * k + ema * (1 - k)
+    return ema
+
+
 _MTF_PARAMS_TUPLE = (
     ("risk_pct", 1.0),
     ("slow_tf_minutes", 240),
@@ -1008,6 +1019,8 @@ _MTF_PARAMS_TUPLE = (
     ("slow_bb_stddev", 2.0),
     ("slow_breakout_bars", 3),
     ("slow_ema_period", 50),
+    ("slow_ema_fast", 0),
+    ("slow_bias_mode", 0),
     ("slow_adx_period", 0),
     ("slow_adx_min", 20.0),
     ("fast_bb_period", 20),
@@ -1028,11 +1041,17 @@ class MtfBollingerStrategy(TradeRecordingStrategy):
     The strategy runs on the fast feed (``self.data``).  It aggregates the fast
     bars into ``slow_tf_minutes`` buckets itself (open=first, high=max, low=min,
     close=last) and keeps the completed slow closes in ``self._slow_closes``.
-    A bullish bias is "the slow close broke above the slow upper Bollinger band
-    within the last ``slow_breakout_bars`` slow bars while price is above the
-    slow EMA".  While the bias is live, a pullback of the fast close to its
-    lower band arms an entry; the bar touching the level and closing back above
-    it buys.  Exit uses an OCO ATR stop / trailing take-profit bracket.
+    A bullish bias (``slow_bias_mode=0``, default) is "the slow close broke above
+    the slow upper Bollinger band within the last ``slow_breakout_bars`` slow
+    bars while price is above the slow EMA".  ``slow_bias_mode=1`` uses an EMA
+    stack (fast EMA > slow EMA and price above slow EMA) instead — note that it
+    backtests far worse than the BB breakout, so keep mode 0.  A positive ADX
+    (``slow_adx_period`` > 0, Wilder on slow bars) gates entries to trending
+    regimes — this roughly halves the drawdown and lifts profit factor.
+
+    While the bias is live, a pullback of the fast close to its lower band arms
+    an entry; the bar touching the level and closing back above it buys.  Exit
+    uses an OCO ATR stop / trailing take-profit bracket.
     """
 
     params = _MTF_PARAMS_TUPLE
@@ -1127,41 +1146,57 @@ class MtfBollingerStrategy(TradeRecordingStrategy):
             self._bucket_low = min(self._bucket_low, low)
 
     def _slow_bull_bias(self) -> bool:
-        period = max(int(self.p.slow_bb_period), 2)
         closes = self._slow_closes
-        if len(closes) < period:
-            return False
-        window = closes[-period:]
-        mid = sum(window) / period
-        var = sum((x - mid) ** 2 for x in window) / period
-        std = var ** 0.5
-        upper = mid + float(self.p.slow_bb_stddev) * std
-        if closes[-1] <= upper:
-            # require a breakout within the last N completed slow bars
-            bars = max(int(self.p.slow_breakout_bars), 1)
-            broke = False
-            for k in range(1, min(bars, len(closes) - period + 1) + 1):
-                w = closes[-period - k + 1:len(closes) - k + 1]
-                if len(w) < period:
-                    continue
-                m = sum(w) / period
-                v = sum((x - m) ** 2 for x in w) / period
-                u = m + float(self.p.slow_bb_stddev) * (v ** 0.5)
-                if closes[-k] > u:
-                    broke = True
-                    break
-            if not broke:
+        mode = int(self.p.slow_bias_mode)
+        if mode == 1:
+            # EMA stack: fast EMA > slow EMA and price above slow EMA
+            fast_period = int(self.p.slow_ema_fast)
+            slow_period = int(self.p.slow_ema_period)
+            if fast_period <= 0 or slow_period <= 0 or fast_period >= slow_period:
                 return False
-        sep = int(self.p.slow_ema_period)
-        if sep > 0:
-            if len(closes) < sep:
+            if len(closes) < slow_period:
                 return False
-            k = 2.0 / (sep + 1)
-            ema = closes[0]
-            for x in closes[1:]:
-                ema = x * k + ema * (1 - k)
-            if closes[-1] <= ema:
+            ema_fast = _ema(closes, fast_period)
+            ema_slow = _ema(closes, slow_period)
+            if ema_fast is None or ema_slow is None:
                 return False
+            if not (ema_fast > ema_slow and closes[-1] > ema_slow):
+                return False
+        else:
+            period = max(int(self.p.slow_bb_period), 2)
+            if len(closes) < period:
+                return False
+            window = closes[-period:]
+            mid = sum(window) / period
+            var = sum((x - mid) ** 2 for x in window) / period
+            std = var ** 0.5
+            upper = mid + float(self.p.slow_bb_stddev) * std
+            if closes[-1] <= upper:
+                # require a breakout within the last N completed slow bars
+                bars = max(int(self.p.slow_breakout_bars), 1)
+                broke = False
+                for k in range(1, min(bars, len(closes) - period + 1) + 1):
+                    w = closes[-period - k + 1:len(closes) - k + 1]
+                    if len(w) < period:
+                        continue
+                    m = sum(w) / period
+                    v = sum((x - m) ** 2 for x in w) / period
+                    u = m + float(self.p.slow_bb_stddev) * (v ** 0.5)
+                    if closes[-k] > u:
+                        broke = True
+                        break
+                if not broke:
+                    return False
+            sep = int(self.p.slow_ema_period)
+            if sep > 0:
+                if len(closes) < sep:
+                    return False
+                k = 2.0 / (sep + 1)
+                ema = closes[0]
+                for x in closes[1:]:
+                    ema = x * k + ema * (1 - k)
+                if closes[-1] <= ema:
+                    return False
         adx_min = float(self.p.slow_adx_min)
         if int(self.p.slow_adx_period) > 0 and adx_min > 0:
             if self._slow_adx() < adx_min:
@@ -3649,7 +3684,9 @@ STRATEGIES = {
             {"key": "slow_bb_period", "label": "Старший ТФ: период BB", "type": "int", "default": 20},
             {"key": "slow_bb_stddev", "label": "Старший ТФ: стандартных отклонений", "type": "float", "default": 2.0},
             {"key": "slow_breakout_bars", "label": "Старший ТФ: пробой за N свечей", "type": "int", "default": 3},
-            {"key": "slow_ema_period", "label": "Старший ТФ: EMA тренда (0 = выкл)", "type": "int", "default": 50},
+            {"key": "slow_bias_mode", "label": "Направление: 0=BB-пробой, 1=EMA-стек", "type": "int", "default": 0},
+            {"key": "slow_ema_period", "label": "Старший ТФ: медленная EMA тренда (0 = выкл)", "type": "int", "default": 50},
+            {"key": "slow_ema_fast", "label": "Старший ТФ: быстрая EMA (0 = выкл, для EMA-стека)", "type": "int", "default": 0},
             {"key": "slow_adx_period", "label": "Старший ТФ: период ADX (0 = выкл)", "type": "int", "default": 18},
             {"key": "slow_adx_min", "label": "Старший ТФ: мин. ADX для входа", "type": "float", "default": 25.0},
             {"key": "fast_bb_period", "label": "Младший ТФ: период BB", "type": "int", "default": 20},

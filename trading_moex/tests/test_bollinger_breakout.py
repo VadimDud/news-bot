@@ -319,3 +319,22 @@ def test_mtf_bollinger_adx_filter_blocks_choppy_and_allows_trend():
     raw = run_backtest(data, _M, no_adx, cash=100_000, commission=0)
     assert raw["trades_total"] >= base["trades_total"]
     assert base["final_value"] < 1_000_000
+
+
+def test_mtf_bollinger_ema_stack_mode_runs():
+    from app.strategies import MtfBollingerStrategy as _M
+
+    item = STRATEGIES["mtf_bollinger"]
+    defaults = {p["key"]: p["default"] for p in item["params"]}
+    params = dict(defaults)
+    params["slow_bias_mode"] = 1
+    params["slow_ema_fast"] = 20
+    params["slow_ema_period"] = 50
+    params["slow_adx_period"] = 0
+
+    n = 800
+    rng = np.random.default_rng(5)
+    closes = list(100 + np.cumsum(rng.normal(0.2, 0.4, n)))
+    data = _candles(closes)
+    result = run_backtest(data, _M, params, cash=100_000, commission=0)
+    assert result["final_value"] < 1_000_000

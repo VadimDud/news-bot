@@ -35,6 +35,8 @@ def test_strategy_is_registered_with_requested_parameters():
     assert params["session_start"] == 10
     assert params["session_end"] == 19
     assert params["close_at_eod"] == 1
+    assert params["breakout_confirm_bars"] == 2
+    assert params["ema_period"] == 200
 
 
 def test_breakout_is_filled_at_signal_close_and_exits_on_lower_band_stop():
@@ -43,7 +45,7 @@ def test_breakout_is_filled_at_signal_close_and_exits_on_lower_band_stop():
     result = run_backtest(
         data,
         BollingerBreakoutStrategy,
-        {"bb_period": 20, "bb_stddev": 2.0, "close_at_eod": 0, "risk_pct": 1.0},
+        {"bb_period": 20, "bb_stddev": 2.0, "close_at_eod": 0, "risk_pct": 1.0, "ema_period": 0, "breakout_confirm_bars": 1, "candle_body_ratio": 0, "close_position_min": 0, "atr_period": 0, "max_breakout_atr": 0},
         cash=100_000,
         commission=0,
     )
@@ -79,3 +81,33 @@ def test_width_expansion_filter_can_block_breakout():
         commission=0,
     )
     assert result["trades_total"] == 0
+
+
+def test_candle_quality_filter_blocks_weak_breakout_candle():
+    closes = [100.0] * 20 + [110.0, 110.0]
+    opens = [100.0] * 20 + [109.9, 110.0]
+    data = _candles(closes, start="2024-01-08 05:00")
+    data["open"] = opens
+    data["high"] = 110.5
+    data["low"] = 99.5
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {"bb_period": 20, "bb_stddev": 2.0, "candle_body_ratio": 0.5},
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 0
+
+
+def test_two_bar_confirmation_enters_after_second_breakout_close():
+    data = _candles([100.0] * 20 + [130.0, 140.0, 150.0, 150.0, 150.0, 150.0], lows=[0.0])
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {"bb_period": 20, "bb_stddev": 2.0, "breakout_confirm_bars": 2, "close_at_eod": 0, "ema_period": 0, "candle_body_ratio": 0, "close_position_min": 0, "atr_period": 0, "max_breakout_atr": 0},
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 1
+    assert result["trades"][0]["entry_price"] == 140.0

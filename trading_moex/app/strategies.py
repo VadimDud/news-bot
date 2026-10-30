@@ -5,6 +5,7 @@ Price Action: лот от % риска, стоп-лосс по ATR, тейк п�
 """
 
 import logging
+from datetime import timedelta
 
 import backtrader as bt
 import numpy as np
@@ -512,8 +513,16 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         ("bb_period", 20),
         ("bb_stddev", 2.0),
         ("width_expansion", 0),
+        ("breakout_confirm_bars", 2),
+        ("ema_period", 200),
+        ("ema_slope_bars", 20),
+        ("candle_body_ratio", 0.5),
+        ("close_position_min", 0.7),
+        ("atr_period", 14),
+        ("max_breakout_atr", 1.5),
         ("session_start", 10),
         ("session_end", 19),
+        ("session_offset_hours", 3),
         ("close_at_eod", 1),
         ("use_sma_trail", 0),
         ("profit_trigger_pct", 0.0),
@@ -527,10 +536,15 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         self.bb_std = bt.indicators.StdDev(self.data.close, period=period)
         self.bb_upper = self.bb_mid + float(self.p.bb_stddev) * self.bb_std
         self.bb_lower = self.bb_mid - float(self.p.bb_stddev) * self.bb_std
+        ema_period = int(self.p.ema_period)
+        self.trend_ema = bt.indicators.EMA(self.data.close, period=ema_period) if ema_period > 0 else None
+        atr_period = int(self.p.atr_period)
+        self.breakout_atr = bt.indicators.ATR(self.data, period=atr_period) if atr_period > 0 else None
         self._stop_order = None
         self._stop_loss = None
         self._entry_price = None
         self._pending_stop = None
+        self._breakout_count = 0
 
     def start(self):
         # This affects only runs using this strategy and makes entry fill on
@@ -538,7 +552,7 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         self.broker.set_coc(True)
 
     def _can_trade(self) -> bool:
-        dt = self.data.datetime.datetime(0)
+        dt = self.data.datetime.datetime(0) + timedelta(hours=int(self.p.session_offset_hours))
         return (
             dt.weekday() < 5
             and int(self.p.session_start) <= dt.hour < int(self.p.session_end)
@@ -553,12 +567,40 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         previous_close = float(self.data.close[-1])
         if any(value != value for value in (upper, previous_upper)):
             return False
-        breakout = close > upper and previous_close <= previous_upper
+        breakout = close > upper and (
+            previous_close <= previous_upper or self._breakout_count > 0
+        )
         if not breakout or not int(self.p.width_expansion):
-            return breakout
-        width = upper - float(self.bb_lower[0])
-        previous_width = previous_upper - float(self.bb_lower[-1])
-        return width > previous_width
+            width_ok = breakout
+        else:
+            width = upper - float(self.bb_lower[0])
+            previous_width = previous_upper - float(self.bb_lower[-1])
+            width_ok = breakout and width > previous_width
+        if not width_ok:
+            return False
+        if self.trend_ema is not None:
+            ema = float(self.trend_ema[0])
+            if ema != ema or close <= ema:
+                return False
+            slope_bars = int(self.p.ema_slope_bars)
+            if slope_bars > 0:
+                slope = float(self.trend_ema[-slope_bars])
+                if slope != slope or ema <= slope:
+                    return False
+        candle_range = float(self.data.high[0] - self.data.low[0])
+        if float(self.p.candle_body_ratio) > 0:
+            body_ratio = (close - float(self.data.open[0])) / candle_range if candle_range > 0 else 0.0
+            if body_ratio < float(self.p.candle_body_ratio):
+                return False
+        if float(self.p.close_position_min) > 0:
+            close_position = (close - float(self.data.low[0])) / candle_range if candle_range > 0 else 0.0
+            if close_position < float(self.p.close_position_min):
+                return False
+        if self.breakout_atr is not None and float(self.p.max_breakout_atr) > 0:
+            atr = float(self.breakout_atr[0])
+            if atr != atr or close - upper > atr * float(self.p.max_breakout_atr):
+                return False
+        return True
 
     def _position_size(self, price: float, stop: float) -> int:
         distance = max(price - stop, price * 0.005)
@@ -616,7 +658,7 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
                 self._stop_order = None
 
     def next(self):
-        dt = self.data.datetime.datetime(0)
+        dt = self.data.datetime.datetime(0) + timedelta(hours=int(self.p.session_offset_hours))
         if self.position:
             if int(self.p.close_at_eod) and (dt.hour >= int(self.p.session_end) or dt.weekday() >= 5):
                 self._cancel_stop()
@@ -624,13 +666,22 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
                 return
             self._update_stop()
             return
+        if not self._can_trade():
+            self._breakout_count = 0
+            return
         if self._breakout():
+            self._breakout_count += 1
+        else:
+            self._breakout_count = 0
+        confirm_bars = max(int(self.p.breakout_confirm_bars), 1)
+        if self._breakout_count >= confirm_bars:
             price = float(self.data.close[0])
             stop = float(self.bb_lower[0])
             size = self._position_size(price, stop)
             if size > 0:
                 self._pending_stop = stop
                 self.buy(size=size)
+            self._breakout_count = 0
 
 
 # bt-параметры Pinbar — подобраны перебором на YDEX (2025-08..2026-08, 30min):
@@ -2773,8 +2824,16 @@ STRATEGIES = {
             {"key": "bb_period", "label": "Период Bollinger Bands", "type": "int", "default": 20},
             {"key": "bb_stddev", "label": "Стандартных отклонений", "type": "float", "default": 2.0},
             {"key": "width_expansion", "label": "Требовать расширение полос (1 = да)", "type": "int", "default": 0},
+            {"key": "breakout_confirm_bars", "label": "Подтверждение пробоя, свечей", "type": "int", "default": 2},
+            {"key": "ema_period", "label": "Фильтр тренда EMA (0 = выкл)", "type": "int", "default": 200},
+            {"key": "ema_slope_bars", "label": "Рост EMA за N свечей (0 = выкл)", "type": "int", "default": 20},
+            {"key": "candle_body_ratio", "label": "Мин. тело пробойной свечи, доля диапазона", "type": "float", "default": 0.5},
+            {"key": "close_position_min", "label": "Close в верхней части диапазона, мин. доля", "type": "float", "default": 0.7},
+            {"key": "atr_period", "label": "ATR для фильтра импульса (0 = выкл)", "type": "int", "default": 14},
+            {"key": "max_breakout_atr", "label": "Макс. превышение Upper, ATR (0 = выкл)", "type": "float", "default": 1.5},
             {"key": "session_start", "label": "Начало входов, час", "type": "int", "default": 10},
             {"key": "session_end", "label": "Конец входов, час", "type": "int", "default": 19},
+            {"key": "session_offset_hours", "label": "Смещение времени свечей, часов", "type": "int", "default": 3},
             {"key": "close_at_eod", "label": "Закрывать вне рабочего времени (1 = да)", "type": "int", "default": 1},
             {"key": "use_sma_trail", "label": "Переключать трейл на SMA (1 = да)", "type": "int", "default": 0},
             {"key": "profit_trigger_pct", "label": "Профит для переключения на SMA, %", "type": "float", "default": 0.0},

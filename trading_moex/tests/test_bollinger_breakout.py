@@ -284,7 +284,7 @@ def test_mtf_bollinger_registered_and_never_blows_up():
     assert "mtf_bollinger" in STRATEGIES
     item = STRATEGIES["mtf_bollinger"]
     defaults = {p["key"]: p["default"] for p in item["params"]}
-    assert defaults["slow_tf_minutes"] == 240
+    assert defaults["slow_tf_minutes"] == 120
     only_defaults = dict(defaults)
     assert "risk_pct" in only_defaults
 

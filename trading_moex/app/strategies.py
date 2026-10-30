@@ -520,12 +520,18 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         ("close_position_min", 0.7),
         ("atr_period", 14),
         ("max_breakout_atr", 1.5),
+        ("entry_mode", 0),
+        ("retest_fraction", 0.5),
+        ("retest_max_bars", 8),
+        ("retest_reclaim", 1),
         ("session_start", 10),
         ("session_end", 19),
         ("session_offset_hours", 3),
         ("close_at_eod", 1),
         ("use_sma_trail", 0),
         ("profit_trigger_pct", 0.0),
+        ("breakeven_r", 0.0),
+        ("max_hold_bars", 0),
         ("risk_pct", 1.0),
     )
 
@@ -541,10 +547,18 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         atr_period = int(self.p.atr_period)
         self.breakout_atr = bt.indicators.ATR(self.data, period=atr_period) if atr_period > 0 else None
         self._stop_order = None
+        self._stop_ref = None
         self._stop_loss = None
         self._entry_price = None
         self._pending_stop = None
+        self._stop_pending_update = False
         self._breakout_count = 0
+        self._retest_active = False
+        self._retest_bars = 0
+        self._retest_level = None
+        self._retest_stop = None
+        self._initial_risk = None
+        self._hold_bars = 0
 
     def start(self):
         # This affects only runs using this strategy and makes entry fill on
@@ -617,16 +631,64 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
         ):
             self.cancel(self._stop_order)
         self._stop_order = None
+        self._stop_ref = None
+
+    def _stop_active(self) -> bool:
+        return self._stop_order is not None and self._stop_order.status in (
+            bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial,
+        )
+
+    def _close_position(self) -> None:
+        """Close the position without ever leaving a live stop behind.
+
+        A cancelled stop is only removed by the broker on the following bar.
+        Firing ``close()`` in the same bar would let the still-alive stop fill
+        on a flat position and flip it short, so the actual close is deferred
+        until the stop is confirmed gone.
+        """
+        if self._stop_active():
+            if not self._close_requested:
+                self.cancel(self._stop_order)
+                self._close_requested = True
+            return
+        if self._close_requested and self._close_submitted:
+            return
+        self._close_requested = True
+        self._close_submitted = True
+        self._stop_order = None
+        self._stop_ref = None
+        self._stop_loss = None
+        self._entry_price = None
+        self._initial_risk = None
+        self.close()
 
     def _place_stop(self) -> None:
         if not self.position or self._stop_loss is None:
             return
+        # The broker reports a clone of the order in notify_order, so a plain
+        # ``is`` comparison never matches.  Track the live order by ref and
+        # only replace it once the broker has confirmed it is gone; otherwise a
+        # cancelled-but-not-yet-processed stop would later fire on a flat
+        # position and open an unintended short.
+        if self._stop_order is not None and self._stop_order.status in (
+            bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial,
+        ):
+            if self._stop_order.created.size == -self.position.size and abs(
+                float(self._stop_order.created.price) - float(self._stop_loss)
+            ) < 1e-9:
+                return
         self._cancel_stop()
         self._stop_order = self.sell(
             exectype=bt.Order.Stop, price=float(self._stop_loss), size=self.position.size,
         )
+        self._stop_ref = None if self._stop_order is None else self._stop_order.ref
 
     def _update_stop(self) -> None:
+        if self._stop_pending_update and self._stop_order is not None and self._stop_order.status in (
+            bt.Order.Accepted, bt.Order.Partial,
+        ):
+            self._stop_pending_update = False
+            self._place_stop()
         lower = float(self.bb_lower[0])
         if lower != lower:
             return
@@ -634,37 +696,76 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
             profit_pct = (float(self.data.close[0]) / self._entry_price - 1.0) * 100.0
             if profit_pct >= float(self.p.profit_trigger_pct):
                 lower = float(self.bb_mid[0])
+        if self._entry_price and self._initial_risk and float(self.p.breakeven_r) > 0:
+            profit = float(self.data.close[0]) - self._entry_price
+            if profit >= self._initial_risk * float(self.p.breakeven_r):
+                lower = max(lower, self._entry_price)
         if self._stop_loss is None or lower > self._stop_loss:
             self._stop_loss = lower
+            if self._stop_order is not None and self._stop_order.status == bt.Order.Submitted:
+                # A stop placed this same bar (e.g. right after the entry fill)
+                # has not been processed by the broker yet: cancelling it now
+                # would leave it alive and it could fire later on a flat
+                # position.  Defer the replacement to the next bar.
+                self._stop_pending_update = True
+                return
             self._place_stop()
+
+    def _time_exit(self) -> None:
+        """Close a position that has gone nowhere for ``max_hold_bars`` bars."""
+        max_hold = int(self.p.max_hold_bars)
+        if max_hold <= 0:
+            return
+        self._hold_bars += 1
+        if self._hold_bars <= max_hold:
+            return
+        self._close_position()
 
     def notify_order(self, order):
         if order.status == bt.Order.Completed:
-            if order is self._stop_order:
+            if self._stop_ref is not None and order.ref == self._stop_ref:
                 self._stop_order = None
+                self._stop_ref = None
                 self._stop_loss = None
                 self._entry_price = None
+                self._initial_risk = None
             elif order.isbuy() and self.position:
                 self._entry_price = float(order.executed.price)
                 self._stop_loss = self._pending_stop
                 self._pending_stop = None
+                self._stop_pending_update = False
+                self._close_requested = False
+                self._close_submitted = False
+                self._hold_bars = 0
+                if self._stop_loss is not None:
+                    self._initial_risk = max(self._entry_price - self._stop_loss, 0.0)
+                else:
+                    self._initial_risk = None
                 self._place_stop()
             elif order.issell() and not self.position:
                 self._stop_order = None
+                self._stop_ref = None
                 self._stop_loss = None
                 self._entry_price = None
+                self._initial_risk = None
+                self._close_requested = False
+                self._close_submitted = False
         elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin):
-            if order is self._stop_order:
+            if self._stop_ref is not None and order.ref == self._stop_ref:
                 self._stop_order = None
+                self._stop_ref = None
 
     def next(self):
         dt = self.data.datetime.datetime(0) + timedelta(hours=int(self.p.session_offset_hours))
         if self.position:
+            if self._close_requested:
+                self._close_position()
+                return
             if int(self.p.close_at_eod) and (dt.hour >= int(self.p.session_end) or dt.weekday() >= 5):
-                self._cancel_stop()
-                self.close()
+                self._close_position()
                 return
             self._update_stop()
+            self._time_exit()
             return
         if not self._can_trade():
             self._breakout_count = 0
@@ -675,13 +776,71 @@ class BollingerBreakoutStrategy(TradeRecordingStrategy):
             self._breakout_count = 0
         confirm_bars = max(int(self.p.breakout_confirm_bars), 1)
         if self._breakout_count >= confirm_bars:
-            price = float(self.data.close[0])
-            stop = float(self.bb_lower[0])
-            size = self._position_size(price, stop)
-            if size > 0:
-                self._pending_stop = stop
-                self.buy(size=size)
+            if int(self.p.entry_mode) <= 0:
+                self._enter_at_close()
+            else:
+                self._retest_active = True
+                self._retest_bars = 0
+                self._retest_level = self._retest_price()
+                self._retest_stop = float(self.bb_lower[0])
             self._breakout_count = 0
+            return
+        if self._retest_active:
+            self._process_retest()
+
+    def _retest_price(self) -> float:
+        """Return the pullback level that arms the deferred entry."""
+        fraction = min(max(float(self.p.retest_fraction), 0.0), 1.0)
+        upper = float(self.bb_upper[0])
+        middle = float(self.bb_mid[0])
+        return upper + (middle - upper) * fraction
+
+    def _enter_at_close(self) -> None:
+        price = float(self.data.close[0])
+        stop = float(self.bb_lower[0])
+        if stop != stop or stop >= price:
+            return
+        size = self._position_size(price, stop)
+        if size > 0:
+            self._pending_stop = stop
+            self.buy(size=size)
+
+    def _process_retest(self) -> None:
+        """Wait for a pullback to the configured zone level after a breakout.
+
+        The breakout bar (the one that armed the retest) is skipped: only
+        later bars may trigger the entry.  Entry happens on the close of the
+        bar whose low touched the level and which closed back at or above it.
+        """
+        if self.position:
+            self._retest_active = False
+            return
+        if not self._can_trade():
+            self._retest_active = False
+            return
+        if self._retest_bars >= max(int(self.p.retest_max_bars), 1):
+            self._retest_active = False
+            return
+        self._retest_bars += 1
+        level = self._retest_level
+        if level is None or level != level:
+            self._retest_active = False
+            return
+        touched = float(self.data.low[0]) <= level
+        if not touched:
+            return
+        if int(self.p.retest_reclaim) and float(self.data.close[0]) < level:
+            return
+        price = float(self.data.close[0])
+        stop = self._retest_stop if self._retest_stop is not None else float(self.bb_lower[0])
+        if stop != stop or stop >= price:
+            self._retest_active = False
+            return
+        size = self._position_size(price, stop)
+        if size > 0:
+            self._pending_stop = stop
+            self.buy(size=size)
+        self._retest_active = False
 
 
 # bt-параметры Pinbar — подобраны перебором на YDEX (2025-08..2026-08, 30min):
@@ -2831,12 +2990,18 @@ STRATEGIES = {
             {"key": "close_position_min", "label": "Close в верхней части диапазона, мин. доля", "type": "float", "default": 0.7},
             {"key": "atr_period", "label": "ATR для фильтра импульса (0 = выкл)", "type": "int", "default": 14},
             {"key": "max_breakout_atr", "label": "Макс. превышение Upper, ATR (0 = выкл)", "type": "float", "default": 1.5},
+            {"key": "entry_mode", "label": "Вход: 0=пробой, 1=ретест зоны, 2=ретест SMA", "type": "int", "default": 0},
+            {"key": "retest_fraction", "label": "Ретест: доля пути Upper-SMA", "type": "float", "default": 0.5},
+            {"key": "retest_max_bars", "label": "Ретест: максимум свечей ожидания", "type": "int", "default": 8},
+            {"key": "retest_reclaim", "label": "Ретест: закрытие обратно выше уровня (1 = да)", "type": "int", "default": 1},
             {"key": "session_start", "label": "Начало входов, час", "type": "int", "default": 10},
             {"key": "session_end", "label": "Конец входов, час", "type": "int", "default": 19},
             {"key": "session_offset_hours", "label": "Смещение времени свечей, часов", "type": "int", "default": 3},
             {"key": "close_at_eod", "label": "Закрывать вне рабочего времени (1 = да)", "type": "int", "default": 1},
             {"key": "use_sma_trail", "label": "Переключать трейл на SMA (1 = да)", "type": "int", "default": 0},
             {"key": "profit_trigger_pct", "label": "Профит для переключения на SMA, %", "type": "float", "default": 0.0},
+            {"key": "breakeven_r", "label": "Безубыток после прибыли, R (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "max_hold_bars", "label": "Макс. удержание, баров (0 = нет лимита)", "type": "int", "default": 0},
             {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
         ],
     },

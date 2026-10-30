@@ -111,3 +111,84 @@ def test_two_bar_confirmation_enters_after_second_breakout_close():
     )
     assert result["trades_total"] == 1
     assert result["trades"][0]["entry_price"] == 140.0
+
+
+def test_mid_zone_retest_enters_after_price_returns_to_level():
+    closes = [100.0] * 20 + [130.0, 140.0, 130.0, 131.0, 131.0, 131.0]
+    data = _candles(closes, lows=[100.0, 100.0, 120.0, 129.0, 129.0, 80.0])
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "entry_mode": 1,
+            "retest_fraction": 0.5,
+            "retest_max_bars": 4,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "close_at_eod": 0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 1
+    assert result["trades"][0]["entry_price"] == 140.0
+
+
+def test_max_hold_bars_closes_stale_position():
+    closes = [100.0] * 20 + [130.0, 140.0] + [140.0] * 10
+    data = _candles(closes)
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "close_at_eod": 0,
+            "max_hold_bars": 2,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 1
+    trade = result["trades"][0]
+    assert trade["entry_price"] == 130.0
+    assert trade["exit_price"] >= trade["entry_price"]
+
+
+def test_time_exit_never_flips_position_short():
+    closes = [100.0] * 20 + [130.0, 140.0] + [140.0] * 6 + [90.0] * 6
+    data = _candles(closes)
+    result = run_backtest(
+        data,
+        BollingerBreakoutStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "close_at_eod": 0,
+            "max_hold_bars": 3,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["final_value"] < 1_000_000
+    for trade in result["trades"]:
+        assert trade["status"] == "closed"
+        assert trade["entry_price"] > 0

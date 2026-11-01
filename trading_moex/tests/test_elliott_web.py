@@ -103,6 +103,20 @@ class TestEngineQualityFilter:
 # ---------------------------------------------------------------------------
 
 class TestElliottMapper:
+    def test_mapper_normalizes_legacy_short_direction(self, monkeypatch):
+        from app.web import app as web_app
+
+        captured = {}
+
+        def fake_run_backtest(df, **kwargs):
+            captured.update(kwargs)
+            return {"metrics": {}, "cycles": [], "trades": [], "equity_curve": []}
+
+        monkeypatch.setattr(web_app.elliott_candles, "run_backtest", fake_run_backtest)
+        web_app._run_elliott_backtest(pd.DataFrame(), {"direction": -1}, 100_000.0, 0.0005)
+
+        assert captured["direction"] == 2
+
     def test_flat_keys_present_and_numeric(self):
         from app.web.app import _run_elliott_backtest
         df = _bear_wave_then_rise()
@@ -200,3 +214,17 @@ class TestRegistry:
         entry = view["elliott_candles"]
         assert entry["name"]
         assert {p["key"] for p in entry["params"]} >= {"wave_min", "quality_min"}
+
+    def test_elliott_direction_uses_short_code_two(self):
+        from app.web.app import _parse_params
+
+        params = _parse_params("elliott_candles", {"direction": "2"})
+        assert params["direction"] == 2
+
+    def test_legacy_short_direction_is_normalized_only_for_elliott(self):
+        from app.web.app import _parse_params
+
+        elliott_params = _parse_params("elliott_candles", {"direction": "-1"})
+        other_params = _parse_params("kinetic", {"direction": "-1"})
+        assert elliott_params["direction"] == 2
+        assert other_params["direction"] == -1

@@ -29,6 +29,7 @@ from ..fundamentals_screener import screen_catalog, scan_moex_candidates
 from ..live import LIVE_STRATEGIES, live_trader
 from ..news_guard import NewsGuard
 from ..strategies import STRATEGIES, strategy_defaults
+from ..timezones import as_utc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -129,6 +130,9 @@ def _parse_params(strategy_key: str, form: dict) -> dict:
             params[spec["key"]] = int(raw) if spec["type"] == "int" else float(raw)
         except (TypeError, ValueError):
             params[spec["key"]] = spec["default"]
+    if strategy_key == "elliott_candles" and params.get("direction") == -1:
+        # Older/common strategy controls encode short-only as -1; Elliott uses 2.
+        params["direction"] = 2
     return params
 
 
@@ -744,6 +748,9 @@ async def _run_roe_portfolio(loop, tickers, period, params, cash, commission, st
 
 def _run_elliott_backtest(df, params: dict, cash: float, commission: float) -> dict:
     """Мост Elliott-движка в плоский формат страницы результата бэктеста."""
+    params = dict(params)
+    if params.get("direction") == -1:
+        params["direction"] = 2
     raw = elliott_candles.run_backtest(df, initial_equity=cash, commission=commission, **params)
     m = raw["metrics"]
     cycles = raw["cycles"]
@@ -1127,7 +1134,7 @@ async def adaptive_candles(request: web.Request) -> web.Response:
     for _, row in rows.iterrows():
         timestamp = pd.Timestamp(row["timestamp"])
         candles.append({
-            "time": int(timestamp.timestamp()),
+            "time": int(as_utc(timestamp.to_pydatetime()).timestamp()),
             "open": float(row["open"]), "high": float(row["high"]),
             "low": float(row["low"]), "close": float(row["close"]),
         })

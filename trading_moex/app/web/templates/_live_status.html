@@ -8,6 +8,38 @@
   <span class="chip {{ 'warn' if status.dry_run else 'danger' }}">{{ 'dry-run' if status.dry_run else 'LIVE' }}</span>
   <span class="chip">обновление: {{ status.last_update[:19].replace('T', ' ') if status.last_update else '—' }}</span>
   {% if status.last_error %}<div class="notice error" style="margin-top:10px;">{{ status.last_error }}</div>{% endif %}
+  {% if status.circuit_breaker and status.circuit_breaker.tripped %}
+  <div class="notice error" style="margin-top:10px;">Circuit breaker: {{ status.circuit_breaker.reason }}</div>
+  {% elif status.circuit_breaker %}
+  <div class="notice" style="margin-top:10px;">Circuit breaker: активен, лимиты не превышены.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Сверка с брокером</h3>
+  {% set reconciliation = status.reconciliation or {} %}
+  {% if reconciliation.ok|default(true) %}
+  <span class="chip ok">локальное состояние совпадает</span>
+  {% else %}
+  <span class="chip danger">новые ордера заблокированы</span>
+  <ul style="margin:10px 0 0 18px;">
+    {% for issue in reconciliation.issues|default([]) %}
+    <li>{{ issue }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Риск и капитал</h3>
+  {% set risk = status.risk or {} %}
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <span class="chip">equity: {{ risk.equity|default(0) }} ₽</span>
+    <span class="chip">свободно: {{ risk.available_cash|default(0) }} ₽</span>
+    <span class="chip {{ 'danger' if risk.daily_loss_pct|default(0) > 0 else '' }}">день: -{{ risk.daily_loss_pct|default(0) }}%</span>
+    <span class="chip {{ 'danger' if risk.drawdown_pct|default(0) > 0 else '' }}">просадка: -{{ risk.drawdown_pct|default(0) }}%</span>
+    <span class="chip">лимиты: {{ risk.max_daily_loss_pct|default(0) }}% / {{ risk.max_drawdown_pct|default(0) }}%</span>
+  </div>
 </div>
 
 <div class="card">

@@ -52,11 +52,12 @@
     </div>
     <div id="params">
       {% for key, info in strategies.items() %}
+      {% set strategy_active = loop.first %}
       <div class="grid" data-strategy-params="{{ key }}" {% if not loop.first %}style="display:none"{% endif %}>
         {% for p in info.params %}
         <div>
           <label for="p_{{ key }}_{{ p.key }}">{{ p.label }}</label>
-          <input type="number" id="p_{{ key }}_{{ p.key }}" name="{{ p.key }}" value="{{ p.default }}" step="any">
+          <input type="number" id="p_{{ key }}_{{ p.key }}" name="{{ p.key }}" value="{{ p.default }}" step="any" {% if not strategy_active %}disabled{% endif %}>
         </div>
         {% endfor %}
       </div>
@@ -80,7 +81,11 @@ function currentParamsBlock() {
 
 function showParams() {
   document.querySelectorAll("[data-strategy-params]").forEach(el => {
-    el.style.display = (el.dataset.strategyParams === sel.value) ? "grid" : "none";
+    const active = el.dataset.strategyParams === sel.value;
+    el.style.display = active ? "grid" : "none";
+    el.querySelectorAll("input, select, textarea").forEach(control => {
+      control.disabled = !active;
+    });
   });
 }
 
@@ -194,7 +199,7 @@ btForm.addEventListener("submit", async (e) => {
         <td>{{ r.strategy }}</td>
         <td>
           {% if r.status == 'done' %}<span class="chip ok">готово</span>
-          {% elif r.status == 'error' %}<span class="chip danger">ошибка</span>
+          {% elif r.status == 'error' %}<span class="chip danger">ошибка</span><br><span class="hint">{{ r.error }}</span>
           {% else %}<span class="chip warn">выполняется</span>{% endif %}
         </td>
         <td>
@@ -205,6 +210,7 @@ btForm.addEventListener("submit", async (e) => {
         </td>
         <td>{{ r.created_at[:16].replace('T', ' ') }}</td>
       </tr>
+      <tr><td colspan="7" class="hint">Период: {{ r.start_date }} → {{ r.end_date }} · параметры: {{ r.params }}</td></tr>
       {% endfor %}
     </tbody>
   </table>

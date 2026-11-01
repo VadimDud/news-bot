@@ -1,0 +1,32 @@
+study_id: SCREEN-001
+name: default_parameter_registry_scan
+status: diagnostic_only
+not_validation_reason: >-
+  Selecting the best of many strategies evaluated on one dataset is selection
+  bias. This scan only nominates candidates for a real study.
+data:
+  source: data/trader_4h.db
+  period: 15min
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+  window: 2025-08-28 .. 2026-09-21
+costs: {commission_per_side: 0.0005, slippage_per_side: 0.0005}
+reproducible: false
+reproducible_note: >-
+  Run with throwaway scripts outside the repo; rerun through a committed
+  harness before citing these figures.
+candidates:
+  zone_break:
+    full: {return_pct: 1.163, profit_factor: 1.325, trades: 59}
+    train: [{c: 0.0, ret: 0.17, pf: 1.429}, {c: 0.0005, ret: 0.09, pf: 1.222}, {c: 0.001, ret: -0.03, pf: 0.937}]
+    test:  [{c: 0.0, ret: 1.54, pf: 1.525}, {c: 0.0005, ret: 1.08, pf: 1.343}, {c: 0.001, ret: 0.39, pf: 1.111}]
+    verdict: worth a dedicated study; too few trades for any claim
+  bollinger_breakout_short:
+    full: {return_pct: 0.731, profit_factor: 0.587, trades: 135}
+    train: [{c: 0.0, ret: 0.09, pf: 0.881}, {c: 0.0005, ret: -0.34, pf: 0.684}, {c: 0.001, ret: -1.06, pf: 0.460}]
+    test:  [{c: 0.0, ret: 0.70, pf: 0.625}, {c: 0.0005, ret: 0.17, pf: 0.478}, {c: 0.001, ret: -0.70, pf: 0.309}]
+    verdict: rejected; PF below 1 and negative at realistic cost on train
+not_scanned:
+  roe_portfolio: requires multi-feed and fundamentals
+  elliott_candles: custom engine, registry cls is None
+  fib_pullback: too slow to finish in the time budget
+  ict_sweep_fvg: too slow (one ticker > 300s); likely superlinear cost, investigate separately

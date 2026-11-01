@@ -18,6 +18,7 @@ from . import kinetic as kinetic_module
 from . import risk as risk_module
 from . import signals as sig
 from .news_guard import NewsGuard
+from .timezones import MARKET_OFFSET_HOURS, as_utc
 
 logger = logging.getLogger("moex_trader.strategies")
 
@@ -1423,6 +1424,312 @@ def _ema(values: list[float], period: int) -> float | None:
     for x in values[1:]:
         ema = x * k + ema * (1 - k)
     return ema
+
+
+class SupportResistanceMtfStrategy(TradeRecordingStrategy):
+    """Research strategy: trade validated higher-timeframe S/R zones on M15."""
+
+    params = (
+        ("slow_tf_minutes", 240), ("swing_left", 2), ("swing_right", 2),
+        ("level_lookback", 80), ("atr_period", 14), ("zone_atr_mult", 0.2),
+        ("level_touches", 2), ("volume_period", 20), ("volume_mult", 1.5),
+        ("risk_pct", 1.0), ("stop_buffer_atr", 0.2), ("min_rr", 3.0),
+        ("min_room_r", 2.5), ("breakeven_r", 1.5),
+        ("retest_max_wait", 16),
+        ("scenario_mode", 0), ("session_start", 10), ("session_end", 19),
+        ("session_offset_hours", MARKET_OFFSET_HOURS), ("close_at_eod", 1),
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.atr = bt.indicators.ATR(self.data, period=max(int(self.p.atr_period), 2))
+        self.vol_sma = bt.indicators.SMA(self.data.volume, period=max(int(self.p.volume_period), 2))
+        self._slow_bucket = None
+        self._slow_bar = None
+        self._slow_bars = []
+        self._levels = []
+        self._pending_stop = None
+        self._pending_target = None
+        self._stop_order = None
+        self._stop_ref = None
+        self._tp_order = None
+        self._tp_ref = None
+        self._stop_loss = None
+        self._target = None
+        self._entry_price = None
+        self._initial_risk = None
+        self._retest = None
+        self._retest_bars = 0
+        self._entry_order_ref = None
+        self._entry_order = None
+        self._close_requested = False
+        self._last_bar_exit = False
+
+    def start(self):
+        self.broker.set_coc(True)
+
+    def _bucket(self, dt):
+        return int(as_utc(dt).timestamp()) // (max(int(self.p.slow_tf_minutes), 1) * 60)
+
+    def _update_levels(self):
+        dt = self.data.datetime.datetime(0)
+        bucket = self._bucket(dt)
+        bar = (float(self.data.high[0]), float(self.data.low[0]), float(self.data.close[0]), float(self.data.volume[0]))
+        if self._slow_bucket is None:
+            self._slow_bucket = bucket
+            self._slow_bar = bar
+            return
+        if self._slow_bucket != bucket:
+            self._slow_bars.append(self._slow_bar)
+            keep = max(int(self.p.level_lookback), int(self.p.swing_left) + int(self.p.swing_right) + 2)
+            self._slow_bars = self._slow_bars[-keep:]
+            self._find_levels()
+            self._slow_bucket = bucket
+            self._slow_bar = bar
+            return
+        high, low, _, volume = self._slow_bar
+        self._slow_bar = (max(high, bar[0]), min(low, bar[1]), bar[2], volume + bar[3])
+
+    def _find_levels(self):
+        bars = self._slow_bars
+        left = max(int(self.p.swing_left), 2)
+        right = max(int(self.p.swing_right), 2)
+        if len(bars) < left + right + 1:
+            return
+        highs = [bar[0] for bar in bars]
+        lows = [bar[1] for bar in bars]
+        candidates = []
+        for i in range(left, len(bars) - right):
+            if highs[i] >= max(highs[i-left:i+right+1]):
+                candidates.append((highs[i], "resistance", i))
+            if lows[i] <= min(lows[i-left:i+right+1]):
+                candidates.append((lows[i], "support", i))
+        tolerance = float(np.mean([high - low for high, low, _, _ in bars])) * float(self.p.zone_atr_mult)
+        clusters = []
+        for price, kind, pivot in sorted(candidates, key=lambda item: item[0]):
+            match = next((cluster for cluster in clusters if cluster[1] == kind and abs(cluster[0] - price) <= tolerance), None)
+            if match is None:
+                clusters.append([price, kind, pivot, 1])
+            else:
+                count = match[3] + 1
+                match[0] = (match[0] * match[3] + price) / count
+                match[2] = max(match[2], pivot)
+                match[3] = count
+        self._levels = [tuple(cluster) for cluster in clusters]
+
+    def _atr_value(self):
+        value = float(self.atr[0])
+        return value if value == value and value > 0 else 0.0
+
+    def _volume_ok(self):
+        average = float(self.vol_sma[0])
+        volume = float(self.data.volume[0])
+        return average > 0 and volume >= average * float(self.p.volume_mult)
+
+    @staticmethod
+    def _breakout_crossed(previous_close, close, level, zone, kind):
+        """Return true only on the first close crossing a zone boundary."""
+        if kind == "resistance":
+            return previous_close <= level + zone and close > level + zone
+        return previous_close >= level - zone and close < level - zone
+
+    def _nearest_level(self, direction, price, atr):
+        zone = max(atr * float(self.p.zone_atr_mult), 0.0)
+        candidates = []
+        for level, kind, pivot_idx, touches in self._levels:
+            if direction > 0 and kind == "support" and level <= price:
+                candidates.append((price - level, level, kind, pivot_idx, touches))
+            if direction < 0 and kind == "resistance" and level >= price:
+                candidates.append((level - price, level, kind, pivot_idx, touches))
+        if not candidates:
+            return None
+        _, level, kind, pivot_idx, touches = min(candidates)
+        if touches < int(self.p.level_touches):
+            return None
+        return level, kind, pivot_idx
+
+    def _signal(self):
+        atr = self._atr_value()
+        if atr <= 0 or len(self._levels) == 0:
+            return None
+        close = float(self.data.close[0])
+        high = float(self.data.high[0])
+        low = float(self.data.low[0])
+        open_ = float(self.data.open[0])
+        mode = int(self.p.scenario_mode)
+        zone = atr * float(self.p.zone_atr_mult)
+        if self._retest is not None and mode in (0, 2):
+            self._retest_bars += 1
+            if self._retest_bars > max(int(self.p.retest_max_wait), 1):
+                self._retest = None
+                self._retest_bars = 0
+        if self._retest is not None and mode in (0, 2):
+            retest_side, retest_level = self._retest
+            if retest_side == "long" and low <= retest_level + zone and close > retest_level:
+                self._retest = None
+                self._retest_bars = 0
+                return 1, retest_level
+            if retest_side == "short" and high >= retest_level - zone and close < retest_level:
+                self._retest = None
+                self._retest_bars = 0
+                return -1, retest_level
+        # Long off support.
+        support = self._nearest_level(1, close, atr)
+        if support:
+            level, _, _ = support
+            false_break = low < level - zone and close >= level
+            rejection = low <= level + zone and close > open_ and close > level
+            if mode in (0, 1) and (false_break or rejection):
+                return 1, level
+        # Short off resistance.
+        resistance = self._nearest_level(-1, close, atr)
+        if resistance:
+            level, _, _ = resistance
+            false_break = high > level + zone and close <= level
+            rejection = high >= level - zone and close < open_ and close < level
+            if mode in (0, 1) and (false_break or rejection):
+                return -1, level
+        # Arm a retest only after a volume-confirmed close beyond the zone.
+        if self._volume_ok() and self._retest is None:
+            previous_close = float(self.data.close[-1])
+            crossed = sorted(
+                (abs(close - level), level, kind)
+                for level, kind, _, touches in self._levels
+                if touches >= int(self.p.level_touches)
+                and self._breakout_crossed(previous_close, close, level, zone, kind)
+            )
+            if crossed:
+                _, level, kind = crossed[0]
+                self._retest = ("long" if kind == "resistance" else "short", level)
+                self._retest_bars = 0
+        return None
+
+    def _submit_entry(self, direction, level):
+        price = float(self.data.close[0])
+        atr = self._atr_value()
+        buffer = atr * float(self.p.stop_buffer_atr)
+        minimum_risk = price * 0.005
+        stop = level - buffer if direction > 0 else level + buffer
+        risk = max(abs(price - stop), minimum_risk)
+        stop = price - risk if direction > 0 else price + risk
+        if risk <= 0:
+            return
+        # Nearest opposing confirmed swing is the available target liquidity.
+        opposing = [p for p, kind, _, _touches in self._levels if (kind == "resistance" if direction > 0 else kind == "support") and (p > price if direction > 0 else p < price)]
+        target_level = (min(opposing) if direction > 0 else max(opposing)) if opposing else None
+        target = target_level if target_level is not None else price + direction * risk * float(self.p.min_rr)
+        reward = direction * (target - price)
+        if reward < risk * float(self.p.min_rr) or reward < risk * float(self.p.min_room_r):
+            return
+        size = risk_module.position_size(float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, risk, price)
+        max_notional_size = int(float(self.broker.getcash()) / price * 0.95) if price > 0 else 0
+        if max_notional_size <= 0:
+            return
+        size = min(size, max_notional_size)
+        if size <= 0:
+            return
+        self._pending_stop = stop
+        self._pending_target = target
+        if direction > 0:
+            order = self.buy(size=size)
+        else:
+            order = self.sell(size=size)
+        self._entry_order_ref = order.ref if order is not None else None
+        self._entry_order = order
+
+    def next(self):
+        self._update_levels()
+        dt = self.data.datetime.datetime(0) + timedelta(hours=int(self.p.session_offset_hours))
+        if self.position:
+            if len(self) >= max(self.data.buflen() - 1, 1) and not self._last_bar_exit:
+                self._last_bar_exit = True
+                self._close_requested = True
+                for order in (self._stop_order, self._tp_order):
+                    if order is not None and order.alive():
+                        self.cancel(order)
+                if not any(order is not None and order.alive() for order in (self._stop_order, self._tp_order)):
+                    self.close()
+                return
+            if self._close_requested:
+                exits_alive = any(order is not None and order.alive() for order in (self._stop_order, self._tp_order))
+                if exits_alive:
+                    for order in (self._stop_order, self._tp_order):
+                        if order is not None and order.alive():
+                            self.cancel(order)
+                    return
+                self.close()
+                return
+            if int(self.p.close_at_eod) and (dt.hour >= int(self.p.session_end) or dt.weekday() >= 5):
+                self._close_requested = True
+                return
+            if self._initial_risk and self._entry_price:
+                direction = 1 if self.position.size > 0 else -1
+                if (
+                    self._stop_loss != self._entry_price
+                    and direction * (float(self.data.close[0]) - self._entry_price)
+                    >= float(self.p.breakeven_r) * self._initial_risk
+                ):
+                    self._stop_loss = self._entry_price
+                    self._replace_bracket()
+            return
+        if dt.weekday() >= 5 or not int(self.p.session_start) <= dt.hour < int(self.p.session_end):
+            return
+        if self._entry_order is not None and self._entry_order.alive():
+            return
+        signal = self._signal()
+        if signal:
+            self._submit_entry(*signal)
+
+    def _replace_bracket(self):
+        if not self.position:
+            return
+        if self._stop_order is not None and self._stop_order.alive():
+            self.cancel(self._stop_order)
+        if self._tp_order is not None and self._tp_order.alive():
+            self.cancel(self._tp_order)
+        size = abs(self.position.size)
+        if self.position.size > 0:
+            self._stop_order = self.sell(exectype=bt.Order.Stop, price=self._stop_loss, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit, price=self._target, size=size, oco=self._stop_order)
+        else:
+            self._stop_order = self.buy(exectype=bt.Order.Stop, price=self._stop_loss, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit, price=self._target, size=size, oco=self._stop_order)
+        self._stop_ref = self._stop_order.ref if self._stop_order else None
+        self._tp_ref = self._tp_order.ref if self._tp_order else None
+
+    def notify_order(self, order):
+        if order.status == bt.Order.Completed and order.ref == self._entry_order_ref:
+            if self.position and self._pending_stop is not None and self._entry_price is None:
+                self._entry_price = float(order.executed.price)
+                self._stop_loss = self._pending_stop
+                self._target = self._pending_target
+                self._initial_risk = abs(self._entry_price - self._stop_loss)
+                self._pending_stop = self._pending_target = None
+                self._entry_order = None
+                self._entry_order_ref = None
+                self._replace_bracket()
+        elif order.status == bt.Order.Completed and not self.position:
+            self._entry_price = self._initial_risk = None
+            self._stop_loss = self._target = None
+            self._stop_order = self._tp_order = None
+            self._stop_ref = self._tp_ref = self._entry_order_ref = None
+            self._entry_order = None
+            self._close_requested = False
+        elif order.status in (bt.Order.Canceled, bt.Order.Rejected, bt.Order.Margin):
+            if order.ref == self._entry_order_ref:
+                self._entry_order = None
+                self._entry_order_ref = None
+                self._pending_stop = self._pending_target = None
+            if order.ref == self._stop_ref:
+                self._stop_order = None
+                self._stop_ref = None
+            if order.ref == self._tp_ref:
+                self._tp_order = None
+                self._tp_ref = None
+            if self._close_requested and self.position and not any(
+                pending is not None and pending.alive() for pending in (self._stop_order, self._tp_order)
+            ):
+                self.close()
 
 
 _MTF_PARAMS_TUPLE = (
@@ -4032,6 +4339,32 @@ class IctSweepFvgStrategy(RiskAwareStrategy):
 
 
 STRATEGIES = {
+    "support_resistance_mtf": {
+        "name": "Support/Resistance MTF (research)",
+        "cls": SupportResistanceMtfStrategy,
+        "params": [
+            {"key": "slow_tf_minutes", "label": "Старший ТФ, минут", "type": "int", "default": 240},
+            {"key": "swing_left", "label": "Свечей слева для swing", "type": "int", "default": 2},
+            {"key": "swing_right", "label": "Подтверждение swing, свечей", "type": "int", "default": 2},
+            {"key": "level_lookback", "label": "Окно уровней, старших свечей", "type": "int", "default": 80},
+            {"key": "atr_period", "label": "Период ATR младшего ТФ", "type": "int", "default": 14},
+            {"key": "zone_atr_mult", "label": "Ширина зоны, ATR", "type": "float", "default": 0.2},
+            {"key": "level_touches", "label": "Минимум подтверждений зоны", "type": "int", "default": 2},
+            {"key": "volume_period", "label": "Период среднего объёма", "type": "int", "default": 20},
+            {"key": "volume_mult", "label": "Объём для пробоя, x среднего", "type": "float", "default": 1.5},
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "stop_buffer_atr", "label": "Буфер стопа, ATR", "type": "float", "default": 0.2},
+            {"key": "min_rr", "label": "Минимальный R:R", "type": "float", "default": 3.0},
+            {"key": "min_room_r", "label": "Минимум пространства, R", "type": "float", "default": 2.5},
+            {"key": "breakeven_r", "label": "Безубыток после, R", "type": "float", "default": 1.5},
+            {"key": "retest_max_wait", "label": "Макс. ожидание ретеста, M15 баров", "type": "int", "default": 16},
+            {"key": "scenario_mode", "label": "Сценарий: 0=оба, 1=отбой, 2=пробой-ретест", "type": "int", "default": 0},
+            {"key": "session_start", "label": "Начало входов, час", "type": "int", "default": 10},
+            {"key": "session_end", "label": "Конец входов, час", "type": "int", "default": 19},
+            {"key": "session_offset_hours", "label": "Смещение времени, часов", "type": "int", "default": MARKET_OFFSET_HOURS},
+            {"key": "close_at_eod", "label": "Закрывать вне сессии", "type": "int", "default": 1},
+        ],
+    },
     "sma_cross": {
         "name": "SMA Crossover",
         "cls": SmaCross,

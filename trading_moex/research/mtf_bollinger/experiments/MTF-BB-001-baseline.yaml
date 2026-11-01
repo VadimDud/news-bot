@@ -1,0 +1,45 @@
+study_id: MTF-BB-001
+name: mtf_bollinger_default_baseline
+status: rejected
+hypothesis: >-
+  The shipped default MtfBollingerStrategy (slow-TF Bollinger breakout bias,
+  fast-TF pullback entry, ATR OCO bracket) has positive net expectancy on the
+  H4/M15 ten-ticker pool after declared costs.
+baseline:
+  strategy: mtf_bollinger
+  params: shipped defaults from STRATEGIES registry
+  timeframe: 15min
+  slow_timeframe_minutes: 240
+data:
+  source: data/trader_4h.db
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+  test_boundary: '2026-04-01'
+  window: 2025-08-28 .. 2026-09-21
+costs:
+  commission_per_side: [0.0, 0.0005, 0.001]
+  slippage_per_side: [0.0005, 0.001]
+gates:
+  clean_commit_required: true
+  execution_audit_required: false
+  independent_holdout_required: true
+  portfolio_metrics_required: true
+result:
+  commit: 05f1840
+  worktree: clean
+  split_boundary: '2026-04-01'
+  full_period:
+    commission_0.0005_slippage_0.0005: {pooled_return_pct: -0.5869, profit_factor: 0.5910, trades: 34, wins: 6}
+    zero_cost: {pooled_return_pct: -0.2709, profit_factor: 0.7697}
+  train: {pooled_return_pct: -0.0827, profit_factor: 0.8235, trades: 14, wins: 2}
+  test: {pooled_return_pct: -0.4661, profit_factor: 0.4979, trades: 19, wins: 4}
+  per_ticker:
+    positive: [MTSS +2.09%, TATN +1.40%, T +0.26%, NLMK +0.24%, LKOH +0.02%]
+    negative: [GAZP -3.40%, SBER -2.25%, NVTK -1.94%, MOEX -1.18%, CHMF -1.11%]
+  sanity:
+    open_positions_at_end: 0
+    empty_series: 0
+    tickers: 10
+  verdict: >-
+    Negative in every cost cell including zero commission, and in both split
+    halves. Five of ten tickers positive but spread too thin to cover costs.
+    Shipped defaults do not pass the gates; do not promote.

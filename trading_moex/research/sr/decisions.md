@@ -38,7 +38,9 @@ effectively unreachable while stops fill. The legacy `+4.87%` train / `+0.99%`
 test figures are not reproduced and should be treated as withdrawn.
 
 Decision: `SR-001-baseline` is **rejected**. Do not promote to live/defaults and
-do not run the twelve ablations: the baseline has no edge to ablate. Reopening
-requires a materially different mechanism (e.g. real D1/H4 levels plus M15
-execution, or confirmed candle reactions instead of swing counts), not new
-parameter values on this one.
+do not run the ablations: the baseline has no edge to ablate. The study rules
+cap the first comparison at "no more than twelve" predeclared ablations but
+never enumerated them, so no named ablation is being skipped here; the blocking
+observation is the zero-commission result. Reopening requires a materially
+different mechanism (e.g. real D1/H4 levels plus M15 execution, or confirmed
+candle reactions instead of swing counts), not new parameter values on this one.

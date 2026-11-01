@@ -33,3 +33,12 @@ result:
   verdict: >-
     Negative in every cost cell (including zero commission) and in both split
     halves. No edge to ablate; ablations not run. See decisions.md.
+  ablation_status:
+    planned: 0
+    run: 0
+    skipped: null
+    note: >-
+      The study rules cap the first comparison at "no more than twelve"
+      predeclared one-factor ablations but never enumerated them, so no named
+      ablation was skipped. The gate that blocks ablations is the zero-cost
+      result: with no gross edge, removing one factor cannot produce one.

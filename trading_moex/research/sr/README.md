@@ -32,6 +32,11 @@ Reported scenario-mode-2 diagnostics were approximately `+4.87%` train and
 `+0.99%` test when summing independent ticker runs. This is not portfolio
 performance; results were unstable by period and sensitive to costs.
 
+**These figures are withdrawn.** The reproducible re-run on committed code
+(`a9d3747`, see `decisions.md`) gives `-0.04%` train and `-1.15%` test at
+`commission=0.0005`, `slippage=0.0005`, and stays negative in every cost cell
+including zero commission. Do not cite the legacy numbers as evidence.
+
 ## Blocking Audit
 
 Before new parameter searches, add deterministic tests and resolve or explicitly

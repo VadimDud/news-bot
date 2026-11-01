@@ -1,6 +1,6 @@
 study_id: SR-001
 name: h4_m15_breakout_retest_baseline
-status: proposed
+status: rejected
 hypothesis: >-
   A confirmed H4 support/resistance breakout with an M15 retest has positive
   net expectancy after declared costs and remains stable across tickers/windows.
@@ -21,3 +21,15 @@ gates:
   execution_audit_required: true
   independent_holdout_required: true
   portfolio_metrics_required: true
+
+result:
+  commit: a9d3747
+  split_boundary: '2026-04-01'
+  full_period:
+    commission_0.0005_slippage_0.0005: {pooled_return_pct: -1.5052, profit_factor: 0.7372, trades: 122, wins: 24}
+    zero_cost: {pooled_return_pct: -0.3705, profit_factor: 0.9235}
+  train: {pooled_return_pct: -0.0372, profit_factor: 0.9830, trades: 53, wins: 13}
+  test: {pooled_return_pct: -1.1543, profit_factor: 0.6561, trades: 67, wins: 12}
+  verdict: >-
+    Negative in every cost cell (including zero commission) and in both split
+    halves. No edge to ablate; ablations not run. See decisions.md.

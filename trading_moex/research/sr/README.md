@@ -11,12 +11,15 @@ signals, or the default strategy set before the validation gates pass.
 
 ## Current Status
 
-- Lifecycle: `active`.
-- Evidence: `inconclusive`.
+- Lifecycle: `rejected`.
+- Evidence: `negative`. The baseline re-run on committed code (`a9d3747`) is
+  negative in every cost cell and in both split halves; see `decisions.md`
+  "Baseline Re-Run Fails Gates".
 - Historical test results are validation/diagnostic evidence, not an independent
   holdout. The period after `2026-04-01` has already been inspected.
-- The current implementation still needs execution/OCO/EOD audit and a clean
-  independent forward or holdout period.
+- The execution/OCO/EOD audit is complete (15/15 gates, `audit.md`), but the
+  clean baseline run now fails every declared gate, so the hypothesis is not
+  supported by this implementation.
 
 ## Legacy Baseline
 

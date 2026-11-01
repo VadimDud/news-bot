@@ -105,6 +105,48 @@ def load_live_state() -> dict:
     return {"strategy": strategy, "dry_run": dry_run, "strategy_params": strategy_params}
 
 
+def save_live_entries(entries: dict[str, dict]) -> None:
+    """Сохранить открытые live-позиции для восстановления после рестарта."""
+    import json
+
+    storage.set_setting("live_entries", json.dumps(entries, ensure_ascii=False))
+
+
+def load_live_entries() -> dict[str, dict]:
+    """Загрузить локальный снимок открытых live-позиций."""
+    import json
+
+    raw = storage.get_setting("live_entries")
+    if not raw:
+        return {}
+    try:
+        entries = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return entries if isinstance(entries, dict) else {}
+
+
+def save_circuit_state(state: dict) -> None:
+    """Сохранить состояние circuit breaker."""
+    import json
+
+    storage.set_setting("live_circuit_state", json.dumps(state, ensure_ascii=False))
+
+
+def load_circuit_state() -> dict:
+    """Загрузить состояние circuit breaker или вернуть пустой снимок."""
+    import json
+
+    raw = storage.get_setting("live_circuit_state")
+    if not raw:
+        return {}
+    try:
+        state = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
 # ── Скринер: фильтры ────────────────────────────────────────────────────────
 
 _SCREENER_DEFAULTS = {

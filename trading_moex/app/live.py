@@ -7,10 +7,12 @@
 import asyncio
 import inspect
 import logging
+from math import isfinite
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+from .timezones import as_utc_naive_index
 
 from . import config
 from . import risk as risk_module
@@ -70,6 +72,24 @@ _INTERVAL_SECONDS = {
     "MONTH": 30 * 86400,
 }
 
+_ORDER_CONFIRM_ATTEMPTS = 5
+_ORDER_CONFIRM_DELAY = 0.2
+
+
+def _order_status_name(status) -> str:
+    """Нормализовать enum/строку статуса заявки без зависимости от SDK enum."""
+    name = getattr(status, "name", None)
+    if name:
+        return str(name).upper()
+    return str(status or "").upper().replace(".", "_")
+
+
+def _order_lots(state, field: str, default: int = 0) -> int:
+    try:
+        return int(getattr(state, field, default) or default)
+    except (TypeError, ValueError):
+        return default
+
 
 def _watchlist() -> list[str]:
     """Тикеры для live: приоритет у watchlist из БД, иначе из .env."""
@@ -125,8 +145,28 @@ def _candles_to_df(candles):
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).set_index("begin").sort_index()
-    df.index = pd.to_datetime(df.index)
+    df.index = as_utc_naive_index(df.index)
     return df[["open", "high", "low", "close", "volume"]]
+
+
+def _closed_candles(df: pd.DataFrame, candle_name: str, now: datetime | None = None) -> pd.DataFrame:
+    """Оставить только свечи, чей интервал уже завершился."""
+    if df.empty:
+        return df
+    now_ts = pd.Timestamp(now or datetime.now(timezone.utc))
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    else:
+        now_ts = now_ts.tz_convert("UTC")
+    last_ts = pd.Timestamp(df.index[-1])
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("UTC")
+    else:
+        last_ts = last_ts.tz_convert("UTC")
+    seconds = _INTERVAL_SECONDS.get(candle_name)
+    if seconds and last_ts + pd.Timedelta(seconds=seconds) > now_ts:
+        return df.iloc[:-1]
+    return df
 
 
 class LiveTrader:
@@ -143,7 +183,18 @@ class LiveTrader:
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._equity = 100_000.0
+        self._available_cash = self._equity
         self.entries: dict[str, dict] = {}
+        self._last_reconciliation_issue: tuple[str, ...] = ()
+        self._circuit = {
+            "day": None,
+            "day_start_equity": None,
+            "peak_equity": None,
+            "tripped": False,
+            "reason": None,
+            "alert_sent": False,
+            "alert_key": None,
+        }
         self._restore_state()
         self.status: dict = {
             "running": False,
@@ -155,10 +206,13 @@ class LiveTrader:
             "signals": {},
             "log": [],
             "last_error": None,
+            "reconciliation": {"ok": True, "issues": []},
+            "circuit_breaker": dict(self._circuit),
+            "risk": self._risk_snapshot(),
         }
 
     def _restore_state(self) -> None:
-        """Восстановить сохранённые настройки (стратегия, dry_run, params) из БД."""
+        """Восстановить настройки и открытые позиции из БД."""
         try:
             saved = app_settings.load_live_state()
         except Exception as exc:  # noqa: BLE001
@@ -180,10 +234,30 @@ class LiveTrader:
         dry_run = saved.get("dry_run")
         if isinstance(dry_run, bool):
             self.dry_run = dry_run
+        try:
+            entries = app_settings.load_live_entries()
+            self.entries = {
+                ticker: entry for ticker, entry in entries.items()
+                if isinstance(ticker, str) and isinstance(entry, dict)
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось загрузить открытые live-позиции: %s", exc)
+        try:
+            saved_circuit = app_settings.load_circuit_state()
+            if isinstance(saved_circuit, dict):
+                self._circuit.update({key: saved_circuit[key] for key in self._circuit if key in saved_circuit})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось загрузить circuit breaker: %s", exc)
+
+    def _save_entries(self) -> None:
+        """Сохранить локальный снимок позиций после подтверждённого действия."""
+        app_settings.save_live_entries(self.entries)
 
     # ── Управление ───────────────────────────────────────────────────────────
 
     def set_strategy(self, key: str) -> None:
+        if self.running:
+            raise RuntimeError("Сначала остановите live-цикл перед сменой стратегии")
         if key not in STRATEGIES:
             raise ValueError(f"Неизвестная стратегия {key!r}")
         if key not in LIVE_STRATEGIES:
@@ -193,11 +267,35 @@ class LiveTrader:
         self.strategy = key
         self.strategy_params = {p["key"]: p["default"] for p in STRATEGIES[key]["params"]}
         self.entries.clear()
+        self._save_entries()
         app_settings.save_live_state(self.strategy, self.dry_run, self.strategy_params)
+        self.status["strategy"] = self.strategy
+        self.status["entries"] = {}
 
     def set_dry_run(self, dry_run: bool) -> None:
+        if self.running and bool(dry_run) != self.dry_run:
+            raise RuntimeError("Сначала остановите live-цикл перед сменой режима")
         self.dry_run = bool(dry_run)
         app_settings.save_live_state(self.strategy, self.dry_run, self.strategy_params)
+        self.status["dry_run"] = self.dry_run
+
+    def reset_circuit_breaker(self) -> None:
+        """Сбросить circuit breaker только до следующего цикла измерений."""
+        if self.running:
+            raise RuntimeError("Сначала остановите live-цикл")
+        self._circuit.update({
+            "day": None,
+            "day_start_equity": None,
+            "peak_equity": None,
+            "tripped": False,
+            "reason": None,
+            "alert_sent": False,
+            "alert_key": None,
+        })
+        app_settings.save_circuit_state(self._circuit)
+        self.status["circuit_breaker"] = dict(self._circuit)
+        self.status["risk"] = self._risk_snapshot()
+        self._log("Circuit breaker сброшен вручную; baseline будет установлен при запуске")
 
     async def start(self) -> None:
         async with self._lock:
@@ -205,6 +303,15 @@ class LiveTrader:
                 return
             if not app_settings.tinkoff_token():
                 raise RuntimeError("TINKOFF_API_TOKEN не задан — live-торговля недоступна")
+            errors, warnings = config.live_config_issues(
+                dry_run=self.dry_run,
+                web_password_configured=bool(app_settings.get("TRADER_WEB_PASSWORD")),
+                token_configured=bool(app_settings.tinkoff_token()),
+            )
+            for warning in warnings:
+                logger.warning("Live config: %s", warning)
+            if errors:
+                raise RuntimeError("Некорректная конфигурация live: " + "; ".join(errors))
             self.running = True
             self.status["running"] = True
             self.status["last_error"] = None
@@ -262,12 +369,36 @@ class LiveTrader:
 
             portfolio = await client.operations.get_portfolio(account_id=account_id)
             self._equity = self._portfolio_value(portfolio)
+            self._available_cash = await self._available_cash_from_broker(
+                client, account_id, portfolio
+            )
+            self._update_circuit(self._equity)
+            self.status["circuit_breaker"] = dict(self._circuit)
+            self.status["risk"] = self._risk_snapshot()
 
             figis = await self._resolve_figis(client)
             prices = await self._last_prices(client, figis)
             positions = self._positions_from_portfolio(portfolio)
+            reconciliation = self._reconcile_positions(figis, positions)
+            self.status["reconciliation"] = reconciliation
+            if not self.dry_run and not reconciliation["ok"]:
+                issues = tuple(reconciliation["issues"])
+                if issues != self._last_reconciliation_issue:
+                    self._log("Reconciliation BLOCKED: " + "; ".join(issues))
+                    self._last_reconciliation_issue = issues
+                self.status["last_error"] = "Расхождение локальных и биржевых позиций"
+                self.status["prices"] = prices
+                self.status["portfolio"] = positions
+                self.status["signals"] = {}
+                self.status["entries"] = {t: e for t, e in self.entries.items()}
+                self.status["last_update"] = datetime.now(timezone.utc).isoformat()
+                return
+            self._last_reconciliation_issue = ()
             signals = await self._compute_signals(client, figis)
-            await self._act(client, account_id, figis, signals, positions, prices)
+            await self._act(
+                client, account_id, figis, signals, positions, prices,
+                allow_entries=not self._circuit["tripped"],
+            )
 
             self.status["prices"] = prices
             self.status["portfolio"] = positions
@@ -326,13 +457,16 @@ class LiveTrader:
     def _positions_from_portfolio(self, portfolio) -> list[dict]:
         out = []
         for pos in portfolio.positions:
-            qty = _money_to_float(pos.quantity)
-            if qty <= 0:
+            raw_qty = _money_to_float(pos.quantity)
+            if raw_qty == 0:
                 continue
             out.append(
                 {
                     "figi": pos.figi,
-                    "quantity": round(qty, 4),
+                    # T-Bank represents a short position with a negative quantity,
+                    # while order close quantity must be a positive integer.
+                    "quantity": round(abs(raw_qty), 4),
+                    "direction": "short" if raw_qty < 0 else "long",
                     "price": round(_money_to_float(pos.current_price), 4),
                     "pnl": round(_money_to_float(pos.expected_yield), 2),
                 }
@@ -351,6 +485,186 @@ class LiveTrader:
             total += _money_to_float(getattr(portfolio, name, None))
         return total if total > 0 else float(getattr(config, "TRADER_EQUITY", 100_000) or 100_000)
 
+    def _portfolio_cash(self, portfolio) -> float:
+        """Fallback для старых SDK: денежная часть стоимости портфеля."""
+        cash = _money_to_float(getattr(portfolio, "total_amount_currencies", None))
+        return max(cash, 0.0)
+
+    async def _available_cash_from_broker(self, client, account_id: str, portfolio) -> float:
+        """Получить свободные RUB из positions, не включая заблокированные деньги."""
+        try:
+            positions = await client.operations.get_positions(account_id=account_id)
+            total = 0.0
+            found_rub = False
+            for money in getattr(positions, "money", ()):
+                currency = str(getattr(money, "currency", "")).lower()
+                if currency not in ("rub", "rur", "₽"):
+                    continue
+                found_rub = True
+                available = getattr(money, "available", None)
+                if available is not None:
+                    total += max(_money_to_float(available), 0.0)
+                    continue
+                balance = _money_to_float(money)
+                blocked = _money_to_float(getattr(money, "blocked", None))
+                total += max(balance - blocked, 0.0)
+            if found_rub:
+                return total
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось получить свободные средства: %s", exc)
+        return self._portfolio_cash(portfolio)
+
+    def _cap_position_size(self, size: int, price: float, direction: str) -> int:
+        """Ограничить заявку equity-лимитом и доступными деньгами."""
+        if size <= 0 or price <= 0:
+            return 0
+        max_pct = min(max(float(getattr(config, "TRADER_MAX_POSITION_PCT", 50.0)), 0.0), 100.0)
+        max_value = self._equity * max_pct / 100.0
+        if direction == "long":
+            max_value = min(max_value, self._available_cash)
+        capped = min(size, int(max_value / price))
+        return max(capped, 0)
+
+    def _update_circuit(self, equity: float, now: datetime | None = None) -> None:
+        """Обновить дневной baseline/peak и защёлкнуть лимит убытка."""
+        now = now or datetime.now(timezone.utc)
+        day = now.date().isoformat()
+        if self._circuit.get("day") != day or not self._circuit.get("day_start_equity"):
+            previous_peak = float(self._circuit.get("peak_equity") or 0.0)
+            previous_alert_key = self._circuit.get("alert_key")
+            previous_alert_sent = bool(self._circuit.get("alert_sent"))
+            self._circuit.update({
+                "day": day,
+                "day_start_equity": equity,
+                "peak_equity": max(previous_peak, equity),
+                "tripped": False,
+                "reason": None,
+                # A drawdown is not reset at UTC midnight. Keep its alert
+                # state so a persistent drawdown does not produce duplicates.
+                "alert_sent": previous_alert_sent if previous_alert_key == "drawdown" else False,
+                "alert_key": previous_alert_key if previous_alert_key == "drawdown" else None,
+            })
+        else:
+            self._circuit["peak_equity"] = max(float(self._circuit.get("peak_equity") or equity), equity)
+
+        daily_loss_pct = (
+            (float(self._circuit["day_start_equity"]) - equity)
+            / float(self._circuit["day_start_equity"])
+            * 100
+        )
+        peak = float(self._circuit.get("peak_equity") or equity)
+        drawdown_pct = (peak - equity) / peak * 100 if peak > 0 else 0.0
+        max_daily = max(float(getattr(config, "TRADER_MAX_DAILY_LOSS_PCT", 0.0)), 0.0)
+        max_drawdown = max(float(getattr(config, "TRADER_MAX_DRAWDOWN_PCT", 0.0)), 0.0)
+        reason = None
+        reason_key = None
+        # Drawdown is portfolio-wide and survives a UTC-day rollover, so it
+        # takes precedence when both limits are exceeded.
+        if max_drawdown and drawdown_pct >= max_drawdown:
+            reason = f"просадка {drawdown_pct:.2f}% >= {max_drawdown:.2f}%"
+            reason_key = "drawdown"
+        elif max_daily and daily_loss_pct >= max_daily:
+            reason = f"дневной убыток {daily_loss_pct:.2f}% >= {max_daily:.2f}%"
+            reason_key = "daily_loss"
+        if reason and not self._circuit.get("tripped"):
+            self._log(f"[circuit-breaker] {reason}; новые входы заблокированы")
+            if self._circuit.get("alert_key") != reason_key:
+                self._circuit["alert_sent"] = False
+            self._schedule_circuit_alert(reason, reason_key)
+        if reason:
+            self._circuit.update({"tripped": True, "reason": reason, "alert_key": reason_key})
+        app_settings.save_circuit_state(self._circuit)
+
+    def _risk_snapshot(self) -> dict:
+        """Текущие risk-метрики для дашборда без секретов."""
+        start = float(self._circuit.get("day_start_equity") or self._equity)
+        peak = float(self._circuit.get("peak_equity") or self._equity)
+        daily_loss = (start - self._equity) / start * 100 if start > 0 else 0.0
+        drawdown = (peak - self._equity) / peak * 100 if peak > 0 else 0.0
+        return {
+            "equity": round(self._equity, 2),
+            "available_cash": round(self._available_cash, 2),
+            "day_start_equity": round(start, 2),
+            "peak_equity": round(peak, 2),
+            "daily_loss_pct": round(max(daily_loss, 0.0), 2),
+            "drawdown_pct": round(max(drawdown, 0.0), 2),
+            "max_daily_loss_pct": float(getattr(config, "TRADER_MAX_DAILY_LOSS_PCT", 0.0)),
+            "max_drawdown_pct": float(getattr(config, "TRADER_MAX_DRAWDOWN_PCT", 0.0)),
+        }
+
+    def _schedule_circuit_alert(self, reason: str, alert_key: str | None = None) -> None:
+        """Запланировать одно уведомление о переходе circuit breaker в tripped."""
+        if self._circuit.get("alert_sent") and self._circuit.get("alert_key") == alert_key:
+            return
+        self._circuit["alert_sent"] = True
+        self._circuit["alert_key"] = alert_key
+        app_settings.save_circuit_state(self._circuit)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("Нет event loop для Telegram-алерта circuit breaker")
+            return
+        loop.create_task(self._send_circuit_alert(reason))
+
+    async def _send_circuit_alert(self, reason: str) -> None:
+        from .signal_notifier import send_telegram_message
+
+        text = (
+            "⚠️ CIRCUIT BREAKER MOEX\n"
+            f"Новые входы заблокированы: {reason}\n"
+            f"Equity: {self._equity:.2f}"
+        )
+        try:
+            sent = await send_telegram_message(text)
+            if not sent:
+                logger.warning("Circuit breaker: Telegram-алерт не отправлен")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Circuit breaker: ошибка Telegram-алерта: %s", exc)
+
+    def _reconcile_positions(self, figis: dict[str, str], positions: list[dict]) -> dict:
+        """Сверить локальные записи с фактическими позициями брокера.
+
+        В live-режиме любое отличие блокирует новые заявки: это безопаснее, чем
+        пытаться угадать, был ли предыдущий ордер исполнен частично или вручную.
+        В dry-run проверка не используется, поскольку виртуальные entries не
+        обязаны присутствовать в брокерском портфеле.
+        """
+        expected: dict[str, tuple[float, str]] = {}
+        issues: list[str] = []
+        for ticker, entry in self.entries.items():
+            figi = entry.get("figi") or figis.get(ticker)
+            if not figi:
+                issues.append(f"{ticker}: FIGI локальной позиции не найден")
+                continue
+            try:
+                quantity = float(entry.get("size", 0))
+            except (TypeError, ValueError):
+                quantity = 0.0
+            expected[figi] = (quantity, entry.get("direction", "long"))
+
+        watched_figis = set(figis.values())
+        actual = {
+            position["figi"]: (float(position["quantity"]), position.get("direction", "long"))
+            for position in positions
+            if position.get("figi") in watched_figis
+        }
+        for figi in sorted(set(expected) | set(actual)):
+            if figi not in expected:
+                issues.append(f"{figi}: биржевая позиция отсутствует локально")
+                continue
+            if figi not in actual:
+                issues.append(f"{figi}: локальная позиция отсутствует на бирже")
+                continue
+            expected_qty, expected_direction = expected[figi]
+            actual_qty, actual_direction = actual[figi]
+            if expected_direction != actual_direction:
+                issues.append(
+                    f"{figi}: направление local={expected_direction}, broker={actual_direction}"
+                )
+            if abs(expected_qty - actual_qty) > 1e-9:
+                issues.append(f"{figi}: количество local={expected_qty:g}, broker={actual_qty:g}")
+        return {"ok": not issues, "issues": issues}
+
     async def _candles_df(self, client, figi: str) -> pd.DataFrame:
         now = datetime.now(timezone.utc)
         interval = getattr(config, "TRADER_LIVE_INTERVAL", "hour")
@@ -367,7 +681,7 @@ class LiveTrader:
             resp = await client.market_data.get_candles(
                 figi=figi, from_=from_, to=now, interval=candle_interval
             )
-        return _candles_to_df(resp.candles)
+        return _closed_candles(_candles_to_df(resp.candles), candle_name, now)
 
     async def _compute_signals(self, client, figis: dict[str, str]) -> dict[str, dict]:
         """Сигнал по каждому тикеру + уровни стоп-лосса и тейк-профита.
@@ -445,7 +759,7 @@ class LiveTrader:
 
     def _risk_size(self, price: float, stop: float | None) -> int:
         risk_pct = float(self.strategy_params.get("risk_pct", 1.0) or 1.0) / 100.0
-        stop_dist = max((price - stop), price * 0.005) if stop else 0.0
+        stop_dist = max(abs(price - stop), price * 0.005) if stop else 0.0
         return max(
             risk_module.position_size(self._equity, risk_pct, stop_dist, price), 1
         )
@@ -495,9 +809,11 @@ class LiveTrader:
         )
 
     async def _act(self, client, account_id: str, figis: dict[str, str],
-                   signals: dict[str, dict], positions: list[dict], prices: list[dict]) -> None:
+                   signals: dict[str, dict], positions: list[dict], prices: list[dict],
+                   allow_entries: bool = True) -> None:
         held_figis = {p["figi"] for p in positions}
         held_qty = {p["figi"]: p["quantity"] for p in positions}
+        held_directions = {p["figi"]: p.get("direction", "long") for p in positions}
         price_map = {p["ticker"]: p["price"] for p in prices}
 
         for ticker, figi in figis.items():
@@ -505,7 +821,12 @@ class LiveTrader:
             action = info.get("action", "hold")
             price = price_map.get(ticker, 0.0)
             held = self.entries.get(ticker, {})
-            cur_dir = held.get("direction", "long")
+            cur_dir = held.get("direction") or held_directions.get(figi, "long")
+
+            if not isfinite(price) or price <= 0:
+                if action != "hold" or figi in held_figis or "stop" in held:
+                    self._log(f"[market-data] {ticker}: действие пропущено, цена недоступна")
+                continue
 
             # 1) Выход по стоп-лоссу / тейк-профиту
             if info.get("stop") is not None and price > 0 and (figi in held_figis or "stop" in held):
@@ -521,16 +842,21 @@ class LiveTrader:
                     await self._submit(client, account_id, figi, close_action,
                                        held_qty.get(figi, self.quantity), f"SL {ticker} по {price}")
                     self.entries.pop(ticker, None)
+                    self._save_entries()
                     continue
                 if hit_target:
                     await self._submit(client, account_id, figi, close_action,
                                        held_qty.get(figi, self.quantity), f"TP {ticker} по {price}")
                     self.entries.pop(ticker, None)
+                    self._save_entries()
                     continue
 
             if action == "hold":
                 continue
             if action in ("buy", "short"):
+                if not allow_entries:
+                    self._log(f"[circuit-breaker] {ticker}: вход заблокирован")
+                    continue
                 if figi in held_figis or "stop" in held:
                     continue
                 direction = "long" if action == "buy" else "short"
@@ -559,15 +885,27 @@ class LiveTrader:
                         )
                 else:
                     size = self._risk_size(price, info.get("stop"))
-                await self._submit(client, account_id, figi, "sell" if action == "short" else "buy",
-                                   size, f"{'SHORT' if action == 'short' else 'BUY'} {ticker} x{size}")
+                size = self._cap_position_size(size, price, direction)
+                if size <= 0:
+                    self._log(
+                        f"[risk] {ticker}: заявка отклонена, недостаточно доступных средств "
+                        "или превышен лимит позиции"
+                    )
+                    continue
+                order_id = await self._submit(
+                    client, account_id, figi, "sell" if action == "short" else "buy",
+                    size, f"{'SHORT' if action == 'short' else 'BUY'} {ticker} x{size}"
+                )
                 self.entries[ticker] = {
+                    "figi": figi,
                     "entry_price": price,
                     "stop": info.get("stop"),
                     "target": info.get("target"),
                     "size": size,
                     "direction": direction,
+                    "order_id": order_id,
                 }
+                self._save_entries()
             else:  # sell / cover
                 if figi not in held_figis and "stop" not in held:
                     continue
@@ -576,15 +914,41 @@ class LiveTrader:
                                    held_qty.get(figi, self.quantity),
                                    f"{action.upper()} {ticker}")
                 self.entries.pop(ticker, None)
+                self._save_entries()
 
     async def _submit(self, client, account_id: str, figi: str, action: str,
-                      size: int | float, label: str) -> None:
+                       size: int | float, label: str) -> str | None:
         if self.dry_run:
             self._log(f"[dry-run] {label} ({figi})")
-            return
+            return None
         try:
-            await self._post_market_order(client, account_id, figi, int(size), action)
+            response = await self._post_market_order(client, account_id, figi, int(size), action)
+            order_id = getattr(response, "order_id", None)
+            if not order_id:
+                raise RuntimeError("Биржа не вернула order_id")
+            requested = int(size)
+            status = ""
+            executed = 0
+            for attempt in range(_ORDER_CONFIRM_ATTEMPTS):
+                state = await client.orders.get_order_state(
+                    account_id=account_id,
+                    order_id=order_id,
+                )
+                status = _order_status_name(getattr(state, "execution_report_status", None))
+                executed = _order_lots(state, "lots_executed")
+                if "EXECUTION_COMPLETE" in status and executed == requested:
+                    break
+                if any(marker in status for marker in ("REJECTED", "CANCELLED", "NOT_ENOUGH")):
+                    break
+                if attempt + 1 < _ORDER_CONFIRM_ATTEMPTS:
+                    await asyncio.sleep(_ORDER_CONFIRM_DELAY)
+            if "EXECUTION_COMPLETE" not in status or executed != requested:
+                raise RuntimeError(
+                    f"Заявка {order_id} не исполнена полностью: "
+                    f"status={status or 'UNKNOWN'}, lots={executed}/{requested}"
+                )
             self._log(f"[live] {label} ({figi})")
+            return order_id
         except Exception as exc:  # noqa: BLE001
             self._log(f"Ошибка ордера {label}: {exc}")
             raise

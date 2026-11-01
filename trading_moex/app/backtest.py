@@ -30,12 +30,23 @@ class _EquityCurve(bt.Analyzer):
         self.invested_curve.append([ts, round(invested, 2)])
 
 
-def _setup_cerebro(strategy_cls, params, cash: float, commission: float, extra_params: dict | None = None) -> bt.Cerebro:
+def _setup_cerebro(
+    strategy_cls,
+    params,
+    cash: float,
+    commission: float,
+    extra_params: dict | None = None,
+    slippage: float = 0.0,
+) -> bt.Cerebro:
     cerebro = bt.Cerebro()
     feed_params = {**params, **(extra_params or {})}
     cerebro.addstrategy(strategy_cls, **feed_params)
     cerebro.broker.setcash(cash)
     cerebro.broker.setcommission(commission=commission)
+    if slippage:
+        cerebro.broker.set_slippage_perc(
+            perc=slippage, slip_open=True, slip_limit=True, slip_match=True, slip_out=False,
+        )
     cerebro.addanalyzer(btanalyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days)
     cerebro.addanalyzer(btanalyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name="trades")
@@ -49,12 +60,14 @@ def run_backtest(
     params: dict,
     cash: float = 100_000.0,
     commission: float = 0.0005,
+    slippage: float = 0.0,
 ) -> dict:
     """Выполнить бэктест на переданных OHLCV-данных (datetime-индекс).
 
-    Блокирующий вызов — запускать в отдельном потоке.
+    ``slippage`` — доля от цены исполнения, ухудшающая каждую сделку
+    (0.0005 = 0.05%). Блокирующий вызов — запускать в отдельном потоке.
     """
-    cerebro = _setup_cerebro(strategy_cls, params, cash, commission)
+    cerebro = _setup_cerebro(strategy_cls, params, cash, commission, slippage=slippage)
     cerebro.adddata(bt.feeds.PandasData(dataname=df))
     strat = cerebro.run(runonce=False)[0]
     return _collect_metrics(cerebro, strat, cash, len(df))

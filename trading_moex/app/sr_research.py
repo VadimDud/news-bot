@@ -35,6 +35,7 @@ class ExperimentSpec:
     period: str = "15min"
     scenario_mode: int = 2
     commission: float = 0.0005
+    slippage: float = 0.0005
     cash_per_ticker: float = 100_000.0
     start: str | None = None
     end: str | None = None
@@ -121,6 +122,7 @@ def run_experiment(spec: ExperimentSpec) -> dict:
             params,
             cash=spec.cash_per_ticker,
             commission=spec.commission,
+            slippage=spec.slippage,
         )
         results.append({"ticker": ticker, "status": "ok", "n_bars": len(frame), **result})
     valid = [result for result in results if result["status"] == "ok"]
@@ -231,7 +233,11 @@ def write_run_artifacts(report: dict, run_dir: str | Path, command: str | None =
         "platform": platform.platform(),
         "spec": report.get("spec", {}),
         "data_sha256": report.get("data_sha256"),
-        "execution": {"slippage": "not_modeled", "spread": "not_modeled"},
+        "execution": {
+            "commission_per_side": report.get("spec", {}).get("commission"),
+            "slippage_per_side": report.get("spec", {}).get("slippage"),
+            "spread": "not_modeled",
+        },
     }
     write_report(manifest, destination / "manifest.json")
     write_report(metrics, destination / "metrics.json")

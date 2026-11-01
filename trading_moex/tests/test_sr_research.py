@@ -1,6 +1,11 @@
 import pandas as pd
 
-from app.sr_research import ExperimentSpec, pooled_trade_metrics, select_window
+import json
+
+from app.sr_research import (
+    ExperimentSpec, pooled_trade_metrics, sanity_checks, select_window,
+    write_run_artifacts,
+)
 
 
 def test_select_window_is_chronological_and_does_not_mutate_input():
@@ -21,3 +26,28 @@ def test_pooled_metrics_do_not_sum_percentage_returns():
     assert pooled["pooled_return_pct"] == 0
     assert pooled["equal_weight_return_pct"] == 0
     assert pooled["profit_factor"] == 1.2
+
+
+def test_sanity_checks_require_complete_closed_ledger():
+    report = {"results": [{"ticker": "SBER", "status": "ok", "trades_total": 1,
+                            "trades": [{"status": "closed"}]}]}
+    checks = sanity_checks(report)
+    assert checks["passed"] is True
+
+
+def test_write_run_artifacts_creates_manifest_metrics_checks_and_ledger(tmp_path):
+    report = {
+        "spec": {"split": "train", "commission": 0.0005, "slippage": 0.0005},
+        "data_sha256": "abc", "pooled": {"trades_total": 1},
+        "results": [{"ticker": "SBER", "status": "ok", "trades_total": 1,
+                     "trades": [{"status": "closed", "pnl": 12.0}]}],
+    }
+    run_dir = write_run_artifacts(report, tmp_path / "run-001", command="pytest")
+    assert json.loads((run_dir / "manifest.json").read_text())["run_id"] == "run-001"
+    assert json.loads((run_dir / "checks.json").read_text())["passed"] is True
+    assert (run_dir / "metrics.json").exists()
+    assert (run_dir / "trades.csv.gz").exists()
+    execution = json.loads((run_dir / "manifest.json").read_text())["execution"]
+    assert execution["commission_per_side"] == 0.0005
+    assert execution["slippage_per_side"] == 0.0005
+    assert execution["spread"] == "not_modeled"

@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--period", default="15min")
     parser.add_argument("--scenario", type=int, default=2, choices=(0, 1, 2))
     parser.add_argument("--commission", type=float, default=0.0005)
+    parser.add_argument("--slippage", type=float, default=0.0005)
     parser.add_argument("--split", choices=("full", "train", "test"), default="full")
     parser.add_argument("--split-at", default="2026-04-01")
     parser.add_argument("--start")
@@ -35,6 +36,7 @@ def main() -> None:
         period=args.period,
         scenario_mode=args.scenario,
         commission=args.commission,
+        slippage=args.slippage,
         split=args.split,
         split_at=args.split_at,
         start=args.start,

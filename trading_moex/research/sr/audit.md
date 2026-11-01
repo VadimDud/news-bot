@@ -14,7 +14,8 @@ results. Mark each item with a test name, commit, and run ID when complete.
 - [ ] retest touch-count filtering and expiration
 - [ ] retest invalidation and one-time consumption
 - [ ] strict pivot confirmation and no lookahead
-- [ ] timezone-independent slow bucket and warmup
+- [x] pivot unavailable until right confirmation bars complete (`test_sr_lookahead.py`)
+- [ ] timezone-independent slow bucket and warmup (naive input timestamps still depend on host timezone)
 - [ ] `runonce=False` agreement with the normal run
 
 No new performance claim should be promoted to `promising` or `validated` while

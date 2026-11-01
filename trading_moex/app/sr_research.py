@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
+import subprocess
+import sys
+from datetime import datetime, timezone
 import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -138,4 +143,89 @@ def data_fingerprint(spec: ExperimentSpec) -> str:
 
 
 def write_report(report: dict, output: str | Path) -> None:
-    Path(output).write_text(json.dumps(report, ensure_ascii=True, indent=2, default=str) + "\n")
+    destination = Path(output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, ensure_ascii=True, indent=2, default=str) + "\n")
+
+
+def git_metadata() -> dict:
+    """Return safe repository provenance without including environment secrets."""
+    root = Path(__file__).resolve().parents[2]
+
+    def git(*args: str) -> str | None:
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(root), *args], stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    return {
+        "commit": git("rev-parse", "HEAD"),
+        "short_commit": git("rev-parse", "--short", "HEAD"),
+        "dirty": bool(git("status", "--porcelain")),
+    }
+
+
+def new_run_id(study_id: str = "SR-001") -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    commit = git_metadata().get("short_commit") or "nogit"
+    return f"{stamp}_{study_id.lower()}_{commit}_{os.getpid()}"
+
+
+def sanity_checks(report: dict) -> dict:
+    """Run cheap ledger invariants before an artifact is marked complete."""
+    checks = {
+        "all_nonempty_results_have_closed_trades": True,
+        "no_open_trade_status": True,
+        "ledger_count_matches_metrics": True,
+    }
+    ledger_count = 0
+    for result in report.get("results", []):
+        if result.get("status") != "ok":
+            continue
+        trades = result.get("trades", [])
+        ledger_count += len(trades)
+        checks["no_open_trade_status"] &= all(trade.get("status") == "closed" for trade in trades)
+        checks["ledger_count_matches_metrics"] &= len(trades) == int(result.get("trades_total", 0))
+    checks["passed"] = all(checks.values())
+    checks["ledger_trades"] = ledger_count
+    return checks
+
+
+def write_run_artifacts(report: dict, run_dir: str | Path, command: str | None = None) -> Path:
+    """Write a complete local run bundle and return its directory."""
+    destination = Path(run_dir)
+    destination.mkdir(parents=True, exist_ok=False)
+    started = datetime.now(timezone.utc).isoformat()
+    checks = sanity_checks(report)
+    ledger = []
+    for result in report.get("results", []):
+        if result.get("status") != "ok":
+            continue
+        for trade in result.get("trades", []):
+            ledger.append({"ticker": result["ticker"], **trade})
+    metrics = {key: value for key, value in report.items() if key not in {"results"}}
+    metrics["results"] = [
+        {key: value for key, value in result.items() if key != "trades"}
+        for result in report.get("results", [])
+    ]
+    manifest = {
+        "run_id": destination.name,
+        "study_id": "SR-001",
+        "status": "completed",
+        "started_at_utc": started,
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        "command": command,
+        "git": git_metadata(),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "spec": report.get("spec", {}),
+        "data_sha256": report.get("data_sha256"),
+        "execution": {"slippage": "not_modeled", "spread": "not_modeled"},
+    }
+    write_report(manifest, destination / "manifest.json")
+    write_report(metrics, destination / "metrics.json")
+    write_report(checks, destination / "checks.json")
+    pd.DataFrame(ledger).to_csv(destination / "trades.csv.gz", index=False, compression="gzip")
+    return destination

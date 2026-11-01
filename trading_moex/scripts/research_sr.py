@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
-from app.sr_research import DEFAULT_TICKERS, ExperimentSpec, run_experiment, write_report
+from app.sr_research import (
+    DEFAULT_TICKERS, ExperimentSpec, new_run_id, run_experiment,
+    write_report, write_run_artifacts,
+)
 
 
 def main() -> None:
@@ -22,7 +26,8 @@ def main() -> None:
     parser.add_argument("--split-at", default="2026-04-01")
     parser.add_argument("--start")
     parser.add_argument("--end")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", help="Legacy single JSON output path")
+    parser.add_argument("--run-dir", help="Artifact directory; defaults to artifacts/runs/sr/<run-id>")
     parser.add_argument("--tickers", nargs="+", default=list(DEFAULT_TICKERS))
     args = parser.parse_args()
     spec = ExperimentSpec(
@@ -37,7 +42,10 @@ def main() -> None:
         tickers=tuple(args.tickers),
     )
     report = run_experiment(spec)
-    write_report(report, args.output)
+    run_dir = Path(args.run_dir) if args.run_dir else Path("artifacts/runs/sr") / new_run_id()
+    write_run_artifacts(report, run_dir, command=" ".join(__import__("sys").argv))
+    if args.output:
+        write_report(report, args.output)
     print(json.dumps(report["pooled"], ensure_ascii=True, indent=2))
 
 

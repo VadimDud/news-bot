@@ -154,7 +154,9 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
     longest_loss_streak = int((ta.get("streak") or {}).get("longest", {}).get("lost", 0))
 
     equity = strat.analyzers.equity.curve or [[str(strat.data.datetime.datetime(0).isoformat()), round(initial, 2)]]
-    trades = getattr(strat, "recorded_trades", [])[-100:]
+    # Research reports need the complete ledger. Consumers that only need a
+    # preview should truncate after loading the result, not during the run.
+    trades = list(getattr(strat, "recorded_trades", []))
     dividends_income = getattr(strat, "_dividends_income", 0.0)
 
     return {

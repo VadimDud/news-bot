@@ -12,3 +12,8 @@ dbdata/
 bot.log
 web_app.log
 .code-review-graph/
+
+# Local research outputs. Keep study specifications and decisions in
+# trading_moex/research/; generated runs are local artifacts.
+trading_moex/artifacts/
+trading_moex/research/**/runs/

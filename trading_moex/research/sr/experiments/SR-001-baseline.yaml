@@ -1,0 +1,23 @@
+study_id: SR-001
+name: h4_m15_breakout_retest_baseline
+status: proposed
+hypothesis: >-
+  A confirmed H4 support/resistance breakout with an M15 retest has positive
+  net expectancy after declared costs and remains stable across tickers/windows.
+baseline:
+  strategy: support_resistance_mtf
+  scenario_mode: 2
+  timeframe: 15min
+  level_timeframe: 240min
+data:
+  source: data/trader_4h.db
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+  test_boundary: '2026-04-01'
+costs:
+  commission_per_side: [0.0, 0.0005, 0.001]
+  slippage_per_side: [0.0005, 0.001]
+gates:
+  clean_commit_required: true
+  execution_audit_required: true
+  independent_holdout_required: true
+  portfolio_metrics_required: true

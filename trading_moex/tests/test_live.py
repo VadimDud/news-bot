@@ -108,12 +108,32 @@ def test_cap_position_size_limits_long_by_cash_and_equity(monkeypatch):
     assert trader._cap_position_size(100, 100.0, "long") == 10
 
 
-def test_cap_position_size_limits_short_by_equity():
+def test_cap_position_size_limits_short_by_equity(monkeypatch):
+    trader = LiveTrader()
+    trader._equity = 100_000
+    trader._available_cash = 1_000_000
+    monkeypatch.setattr("app.config.TRADER_MAX_POSITION_PCT", 50.0)
+
+    # Cash is abundant, so the equity cap binds at 50%.
+    assert trader._cap_position_size(1_000, 1_000.0, "short") == 50
+
+
+def test_cap_position_size_limits_short_by_available_cash(monkeypatch):
+    trader = LiveTrader()
+    trader._equity = 100_000
+    trader._available_cash = 5_000
+    monkeypatch.setattr("app.config.TRADER_MAX_POSITION_PCT", 50.0)
+
+    # A short still needs margin: only 5 shares' worth of cash is free.
+    assert trader._cap_position_size(1_000, 1_000.0, "short") == 5
+
+
+def test_cap_position_size_rejects_short_when_cash_is_empty():
     trader = LiveTrader()
     trader._equity = 100_000
     trader._available_cash = 0
 
-    assert trader._cap_position_size(1_000, 1_000.0, "short") == 50
+    assert trader._cap_position_size(1_000, 1_000.0, "short") == 0
 
 
 def test_cap_position_size_rejects_when_long_cash_is_empty():

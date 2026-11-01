@@ -515,13 +515,18 @@ class LiveTrader:
         return self._portfolio_cash(portfolio)
 
     def _cap_position_size(self, size: int, price: float, direction: str) -> int:
-        """Ограничить заявку equity-лимитом и доступными деньгами."""
+        """Ограничить заявку equity-лимитом и доступными деньгами.
+
+        Свободные RUB — единственная маржинальная величина, которую брокер
+        отдаёт независимо от направления, поэтому лимит применяется к обеим
+        сторонам: шорт на марже всё равно требует обеспечения, и раньше он
+        мог открыться на полный ``TRADER_MAX_POSITION_PCT`` при почти пустом
+        счёте.
+        """
         if size <= 0 or price <= 0:
             return 0
         max_pct = min(max(float(getattr(config, "TRADER_MAX_POSITION_PCT", 50.0)), 0.0), 100.0)
-        max_value = self._equity * max_pct / 100.0
-        if direction == "long":
-            max_value = min(max_value, self._available_cash)
+        max_value = min(self._equity * max_pct / 100.0, self._available_cash)
         capped = min(size, int(max_value / price))
         return max(capped, 0)
 

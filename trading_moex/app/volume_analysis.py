@@ -15,6 +15,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .risk import rolling_atr
+from .timezones import as_utc_naive_index
+
 
 @dataclass(frozen=True)
 class AnalysisConfig:
@@ -77,7 +80,7 @@ def load_candles(db_path: str | Path, ticker: str = "T", period: str = "15min") 
 
     if frame.empty:
         raise ValueError(f"No candles found for {ticker.upper()} / {period}")
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame["timestamp"] = as_utc_naive_index(frame["timestamp"], errors="coerce")
     for column in ("open", "high", "low", "close", "volume"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = (
@@ -142,16 +145,7 @@ def prepare_candles(frame: pd.DataFrame, config: AnalysisConfig | None = None) -
         )
     ]
 
-    previous_close = out["close"].shift(1)
-    true_range = pd.concat(
-        [
-            out["high"] - out["low"],
-            (out["high"] - previous_close).abs(),
-            (out["low"] - previous_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    out["atr"] = true_range.rolling(config.atr_period, min_periods=config.atr_period).mean().shift(1)
+    out["atr"] = rolling_atr(out, config.atr_period, shift=1)
     out["atr_spread"] = out["range"].div(out["atr"].replace(0, np.nan))
 
     prior_volume = out["volume"].shift(1)

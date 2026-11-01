@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+
+from app.risk import rolling_atr
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -147,6 +149,25 @@ def test_fibonacci_features_use_only_confirmed_pivots() -> None:
     }
     # A pivot at bar j cannot affect a Fib context before j + swing_bars.
     assert fib.loc[0, "fib_context"] == "No confirmed swing"
+
+
+def test_rolling_atr_shift_and_groups_keep_causal_windows_independent() -> None:
+    frame = pd.DataFrame(
+        {
+            "high": [11, 13, 15, 21, 25],
+            "low": [9, 11, 13, 19, 23],
+            "close": [10, 12, 14, 20, 24],
+        }
+    )
+    groups = pd.Series([0, 0, 0, 1, 1])
+
+    atr = rolling_atr(frame, 2, shift=1, groups=groups)
+
+    assert pd.isna(atr.iloc[0])
+    assert pd.isna(atr.iloc[1])
+    assert atr.iloc[2] == 2.5
+    assert pd.isna(atr.iloc[3])
+    assert pd.isna(atr.iloc[4])
 
 
 def test_vsa_categories_and_forward_metrics() -> None:

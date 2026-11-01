@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .risk import rolling_atr
 from .volume_analysis import FIB_COUNTS, load_candles
 
 
@@ -56,16 +57,7 @@ def prepare_vsa(frame: pd.DataFrame, config: VSAConfig | None = None) -> pd.Data
     out["upper_wick_ratio"] = out["upper_wick"].div(out["range"].replace(0, np.nan)).fillna(0.0)
     out["lower_wick_ratio"] = out["lower_wick"].div(out["range"].replace(0, np.nan)).fillna(0.0)
 
-    previous_close = out["close"].shift(1)
-    true_range = pd.concat(
-        [
-            out["high"] - out["low"],
-            (out["high"] - previous_close).abs(),
-            (out["low"] - previous_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    out["atr"] = true_range.rolling(config.atr_period, min_periods=config.atr_period).mean().shift(1)
+    out["atr"] = rolling_atr(out, config.atr_period, shift=1)
     previous_volume = out["volume"].shift(1)
     out["volume_sma"] = previous_volume.rolling(
         config.volume_window, min_periods=config.volume_window

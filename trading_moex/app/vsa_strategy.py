@@ -14,6 +14,9 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from .timezones import as_utc_naive_index
+
+from .risk import rolling_atr
 
 from .volume_analysis import FIB_COUNTS
 
@@ -144,7 +147,7 @@ def _required_columns(frame: pd.DataFrame) -> None:
 def _higher_timeframe_context(frame: pd.DataFrame, config: StrategyConfig) -> pd.Series:
     """Return completed 4-hour context aligned strictly before each 15m bar."""
     source = frame[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-    source["timestamp"] = pd.to_datetime(source["timestamp"], errors="coerce")
+    source["timestamp"] = as_utc_naive_index(source["timestamp"], errors="coerce")
     source = source.dropna(subset=["timestamp"]).sort_values("timestamp")
     higher = (
         source.set_index("timestamp")
@@ -185,7 +188,7 @@ def context_diagnostics(frame: pd.DataFrame, config: StrategyConfig | None = Non
     """Report 4-hour context availability without weakening its warmup rule."""
     config = config or StrategyConfig()
     _required_columns(frame)
-    timestamps = pd.Series(pd.to_datetime(frame["timestamp"], errors="coerce").dropna(), name="timestamp")
+    timestamps = pd.Series(as_utc_naive_index(frame["timestamp"], errors="coerce").dropna(), name="timestamp")
     start = timestamps.max() - pd.Timedelta(days=config.context_lookback_days)
     recent = timestamps[timestamps >= start]
     periods = int(recent.dt.floor("4h").nunique())
@@ -204,7 +207,7 @@ def prepare_strategy_frame(frame: pd.DataFrame, config: StrategyConfig | None = 
     _validate_config(config)
     _required_columns(frame)
     out = frame.copy().reset_index(drop=True)
-    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+    out["timestamp"] = as_utc_naive_index(out["timestamp"], errors="coerce")
     numeric = ["open", "high", "low", "close", "volume"]
     for column in numeric:
         out[column] = pd.to_numeric(out[column], errors="coerce")
@@ -227,14 +230,7 @@ def prepare_strategy_frame(frame: pd.DataFrame, config: StrategyConfig | None = 
     out["body_ratio"] = out["body"].div(out["range"].replace(0, np.nan)).fillna(0.0)
     out["upper_wick"] = (out["high"] - out[["open", "close"]].max(axis=1)).clip(lower=0)
     out["lower_wick"] = (out[["open", "close"]].min(axis=1) - out["low"]).clip(lower=0)
-    previous_close = out["close"].shift(1)
-    true_range = pd.concat(
-        [out["high"] - out["low"], (out["high"] - previous_close).abs(),
-         (out["low"] - previous_close).abs()], axis=1,
-    ).max(axis=1)
-    out["atr"] = true_range.groupby(out["segment"], sort=False).transform(
-        lambda values: values.rolling(config.atr_period, min_periods=config.atr_period).mean().shift(1)
-    )
+    out["atr"] = rolling_atr(out, config.atr_period, shift=1, groups=out["segment"])
     out["volume_sma"] = out["volume"].groupby(out["segment"], sort=False).transform(
         lambda values: values.shift(1).rolling(config.volume_window, min_periods=config.volume_window).mean()
     )

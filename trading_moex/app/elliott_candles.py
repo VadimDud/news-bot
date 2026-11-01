@@ -28,6 +28,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from .risk import rolling_atr
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -36,9 +38,7 @@ logger = logging.getLogger(__name__)
 
 def _atr(series: pd.DataFrame, period: int = 14) -> pd.Series:
     """True Range → rolling ATR."""
-    h, l, prev_c = series["high"], series["low"], series["close"].shift(1)
-    tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-    return tr.rolling(period, min_periods=1).mean()
+    return rolling_atr(series, period, min_periods=1)
 
 
 def classify_candles(

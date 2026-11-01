@@ -33,6 +33,24 @@ def atr(df: pd.DataFrame, period: int = DEFAULT_ATR_PERIOD) -> pd.Series:
     return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
+def rolling_atr(
+    df: pd.DataFrame,
+    period: int = DEFAULT_ATR_PERIOD,
+    *,
+    min_periods: int | None = None,
+    shift: int = 0,
+    groups: pd.Series | None = None,
+) -> pd.Series:
+    """Simple rolling ATR with optional causal shift and independent groups."""
+    minimum = period if min_periods is None else min_periods
+    tr = true_range(df)
+    if groups is None:
+        return tr.rolling(period, min_periods=minimum).mean().shift(shift)
+    return tr.groupby(groups, sort=False).transform(
+        lambda values: values.rolling(period, min_periods=minimum).mean().shift(shift)
+    )
+
+
 def stop_distance(
     df: pd.DataFrame,
     period: int = DEFAULT_ATR_PERIOD,

@@ -375,3 +375,38 @@ def test_closed_last_candle_is_kept():
     closed = _closed_candles(df, "HOUR", pd.Timestamp("2026-01-01 12:01", tz="UTC"))
 
     assert list(closed["close"]) == [100.0, 101.0]
+
+
+def test_failed_order_does_not_starve_other_ticker_stops():
+    """A rejected order must not skip stop checks for the remaining tickers."""
+    import asyncio
+
+    trader = LiveTrader()
+    trader.dry_run = False
+    trader._save_entries = lambda: None
+    trader.entries = {
+        "AAA": {"figi": "F1", "size": 10, "direction": "long", "stop": 100.0},
+        "BBB": {"figi": "F2", "size": 10, "direction": "long", "stop": 50.0},
+    }
+    submitted = []
+
+    async def failing_submit(client, account_id, figi, action, size, label):
+        submitted.append(figi)
+        if figi == "F1":
+            raise RuntimeError("Заявка не исполнена полностью: lots=0/10")
+        return "order-ok"
+
+    trader._submit = failing_submit
+    signals = {
+        "AAA": {"action": "hold", "stop": 100.0},
+        "BBB": {"action": "hold", "stop": 50.0},
+    }
+    prices = [{"ticker": "AAA", "price": 95.0}, {"ticker": "BBB", "price": 40.0}]
+
+    asyncio.run(
+        trader._act(None, "account", {"AAA": "F1", "BBB": "F2"}, signals, [], prices)
+    )
+
+    assert submitted == ["F1", "F2"], "BBB's stop must still be evaluated"
+    assert "AAA" in trader.entries, "a failed close must keep the local entry"
+    assert "BBB" not in trader.entries, "a filled close must clear the local entry"

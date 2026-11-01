@@ -817,104 +817,119 @@ class LiveTrader:
         price_map = {p["ticker"]: p["price"] for p in prices}
 
         for ticker, figi in figis.items():
-            info = signals.get(ticker, {}) or {}
-            action = info.get("action", "hold")
-            price = price_map.get(ticker, 0.0)
-            held = self.entries.get(ticker, {})
-            cur_dir = held.get("direction") or held_directions.get(figi, "long")
-
-            if not isfinite(price) or price <= 0:
-                if action != "hold" or figi in held_figis or "stop" in held:
-                    self._log(f"[market-data] {ticker}: действие пропущено, цена недоступна")
-                continue
-
-            # 1) Выход по стоп-лоссу / тейк-профиту
-            if info.get("stop") is not None and price > 0 and (figi in held_figis or "stop" in held):
-                if cur_dir == "short":
-                    hit_stop = price >= info["stop"]
-                    hit_target = info.get("target") is not None and price <= info["target"]
-                    close_action, close_label = "buy", "COVER"
-                else:
-                    hit_stop = price <= info["stop"]
-                    hit_target = info.get("target") is not None and price >= info["target"]
-                    close_action, close_label = "sell", "CLOSE"
-                if hit_stop:
-                    await self._submit(client, account_id, figi, close_action,
-                                       held_qty.get(figi, self.quantity), f"SL {ticker} по {price}")
-                    self.entries.pop(ticker, None)
-                    self._save_entries()
-                    continue
-                if hit_target:
-                    await self._submit(client, account_id, figi, close_action,
-                                       held_qty.get(figi, self.quantity), f"TP {ticker} по {price}")
-                    self.entries.pop(ticker, None)
-                    self._save_entries()
-                    continue
-
-            if action == "hold":
-                continue
-            if action in ("buy", "short"):
-                if not allow_entries:
-                    self._log(f"[circuit-breaker] {ticker}: вход заблокирован")
-                    continue
-                if figi in held_figis or "stop" in held:
-                    continue
-                direction = "long" if action == "buy" else "short"
-                # Pre-trade gate: проверка перед входом
-                if config.TRADER_SKILLS_ENABLED:
-                    gate_report = self._run_pretrade_gate(
-                        ticker, price, info.get("stop"), info.get("target"), figi, direction
-                    )
-                    if gate_report.verdict == "BLOCKED":
-                        self._log(
-                            f"[gate] {ticker}: BLOCKED — {gate_report.first_blocker}"
-                        )
-                        continue
-                    if gate_report.verdict == "RESIZE" and config.TRADER_SKILLS_MODE == "enforce":
-                        original_size = self._risk_size(price, info.get("stop"))
-                        gate_size = gate_report.checks.get("sizing", {}).get("size", original_size)
-                        size = min(original_size, gate_size)
-                        self._log(f"[gate] {ticker}: RESIZE → size={size}")
-                    else:
-                        size = self._risk_size(price, info.get("stop"))
-                    # В shadow-режиме логируем вердикт, но не блокируем
-                    if config.TRADER_SKILLS_MODE == "shadow":
-                        self._log(
-                            f"[gate:shadow] {ticker}: {gate_report.verdict}"
-                            + (f" — {gate_report.first_blocker}" if gate_report.first_blocker else "")
-                        )
-                else:
-                    size = self._risk_size(price, info.get("stop"))
-                size = self._cap_position_size(size, price, direction)
-                if size <= 0:
-                    self._log(
-                        f"[risk] {ticker}: заявка отклонена, недостаточно доступных средств "
-                        "или превышен лимит позиции"
-                    )
-                    continue
-                order_id = await self._submit(
-                    client, account_id, figi, "sell" if action == "short" else "buy",
-                    size, f"{'SHORT' if action == 'short' else 'BUY'} {ticker} x{size}"
+            try:
+                await self._act_for(
+                    client, account_id, figi, ticker, signals, prices,
+                    held_figis, held_qty, held_directions, price_map, allow_entries,
                 )
-                self.entries[ticker] = {
-                    "figi": figi,
-                    "entry_price": price,
-                    "stop": info.get("stop"),
-                    "target": info.get("target"),
-                    "size": size,
-                    "direction": direction,
-                    "order_id": order_id,
-                }
+            except Exception as exc:  # noqa: BLE001
+                # Один сбойный инструмент не должен лишать остальные позиции
+                # проверки стопа; цикл продолжается на следующем тикере.
+                self._log(f"[order] {ticker}: действие не выполнено: {exc}")
                 self._save_entries()
-            else:  # sell / cover
-                if figi not in held_figis and "stop" not in held:
-                    continue
-                close_action = "buy" if action == "cover" else "sell"
+
+
+    async def _act_for(self, client, account_id: str, figi: str, ticker: str,
+                        signals: dict[str, dict], prices: list[dict],
+                        held_figis: set, held_qty: dict, held_directions: dict,
+                        price_map: dict, allow_entries: bool) -> None:
+        info = signals.get(ticker, {}) or {}
+        action = info.get("action", "hold")
+        price = price_map.get(ticker, 0.0)
+        held = self.entries.get(ticker, {})
+        cur_dir = held.get("direction") or held_directions.get(figi, "long")
+
+        if not isfinite(price) or price <= 0:
+            if action != "hold" or figi in held_figis or "stop" in held:
+                self._log(f"[market-data] {ticker}: действие пропущено, цена недоступна")
+            return
+
+        # 1) Выход по стоп-лоссу / тейк-профиту
+        if info.get("stop") is not None and price > 0 and (figi in held_figis or "stop" in held):
+            if cur_dir == "short":
+                hit_stop = price >= info["stop"]
+                hit_target = info.get("target") is not None and price <= info["target"]
+                close_action, close_label = "buy", "COVER"
+            else:
+                hit_stop = price <= info["stop"]
+                hit_target = info.get("target") is not None and price >= info["target"]
+                close_action, close_label = "sell", "CLOSE"
+            if hit_stop:
                 await self._submit(client, account_id, figi, close_action,
-                                   held_qty.get(figi, self.quantity),
-                                   f"{action.upper()} {ticker}")
+                                   held_qty.get(figi, self.quantity), f"SL {ticker} по {price}")
                 self.entries.pop(ticker, None)
                 self._save_entries()
+                return
+            if hit_target:
+                await self._submit(client, account_id, figi, close_action,
+                                   held_qty.get(figi, self.quantity), f"TP {ticker} по {price}")
+                self.entries.pop(ticker, None)
+                self._save_entries()
+                return
+
+        if action == "hold":
+            return
+        if action in ("buy", "short"):
+            if not allow_entries:
+                self._log(f"[circuit-breaker] {ticker}: вход заблокирован")
+                return
+            if figi in held_figis or "stop" in held:
+                return
+            direction = "long" if action == "buy" else "short"
+            # Pre-trade gate: проверка перед входом
+            if config.TRADER_SKILLS_ENABLED:
+                gate_report = self._run_pretrade_gate(
+                    ticker, price, info.get("stop"), info.get("target"), figi, direction
+                )
+                if gate_report.verdict == "BLOCKED":
+                    self._log(
+                        f"[gate] {ticker}: BLOCKED — {gate_report.first_blocker}"
+                    )
+                    return
+                if gate_report.verdict == "RESIZE" and config.TRADER_SKILLS_MODE == "enforce":
+                    original_size = self._risk_size(price, info.get("stop"))
+                    gate_size = gate_report.checks.get("sizing", {}).get("size", original_size)
+                    size = min(original_size, gate_size)
+                    self._log(f"[gate] {ticker}: RESIZE → size={size}")
+                else:
+                    size = self._risk_size(price, info.get("stop"))
+                # В shadow-режиме логируем вердикт, но не блокируем
+                if config.TRADER_SKILLS_MODE == "shadow":
+                    self._log(
+                        f"[gate:shadow] {ticker}: {gate_report.verdict}"
+                        + (f" — {gate_report.first_blocker}" if gate_report.first_blocker else "")
+                    )
+            else:
+                size = self._risk_size(price, info.get("stop"))
+            size = self._cap_position_size(size, price, direction)
+            if size <= 0:
+                self._log(
+                    f"[risk] {ticker}: заявка отклонена, недостаточно доступных средств "
+                    "или превышен лимит позиции"
+                )
+                return
+            order_id = await self._submit(
+                client, account_id, figi, "sell" if action == "short" else "buy",
+                size, f"{'SHORT' if action == 'short' else 'BUY'} {ticker} x{size}"
+            )
+            self.entries[ticker] = {
+                "figi": figi,
+                "entry_price": price,
+                "stop": info.get("stop"),
+                "target": info.get("target"),
+                "size": size,
+                "direction": direction,
+                "order_id": order_id,
+            }
+            self._save_entries()
+        else:  # sell / cover
+            if figi not in held_figis and "stop" not in held:
+                return
+            close_action = "buy" if action == "cover" else "sell"
+            await self._submit(client, account_id, figi, close_action,
+                               held_qty.get(figi, self.quantity),
+                               f"{action.upper()} {ticker}")
+            self.entries.pop(ticker, None)
 
     async def _submit(self, client, account_id: str, figi: str, action: str,
                        size: int | float, label: str) -> str | None:

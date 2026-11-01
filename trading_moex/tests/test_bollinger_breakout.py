@@ -9,7 +9,12 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.backtest import run_backtest  # noqa: E402
-from app.strategies import BollingerBreakoutStrategy, STRATEGIES  # noqa: E402
+from app.strategies import (  # noqa: E402
+    BollingerBreakoutShortStrategy,
+    BollingerBreakoutStrategy,
+    STRATEGIES,
+    SupportResistanceMtfStrategy,
+)
 
 
 def _candles(closes, lows=None, start="2024-01-08 05:00", freq="15min"):
@@ -37,6 +42,248 @@ def test_strategy_is_registered_with_requested_parameters():
     assert params["close_at_eod"] == 1
     assert params["breakout_confirm_bars"] == 2
     assert params["ema_period"] == 200
+    assert params["geometry_mode"] == 0
+    assert params["elliott_mode"] == 0
+
+
+def test_support_resistance_strategy_registered_with_research_risk_defaults():
+    item = STRATEGIES["support_resistance_mtf"]
+    params = {param["key"]: param["default"] for param in item["params"]}
+    assert params["slow_tf_minutes"] == 240
+    assert params["risk_pct"] == 1.0
+    assert params["min_rr"] == 3.0
+    assert params["min_room_r"] == 2.5
+    assert params["breakeven_r"] == 1.5
+    assert params["retest_max_wait"] == 16
+
+
+def test_sr_breakout_requires_crossing_the_zone_boundary():
+    assert SupportResistanceMtfStrategy._breakout_crossed(100.21, 100.2, 100.0, 0.2, "resistance") is False
+    assert SupportResistanceMtfStrategy._breakout_crossed(100.2, 100.21, 100.0, 0.2, "resistance") is True
+    assert SupportResistanceMtfStrategy._breakout_crossed(99.79, 99.8, 100.0, 0.2, "support") is False
+    assert SupportResistanceMtfStrategy._breakout_crossed(99.8, 99.79, 100.0, 0.2, "support") is True
+
+
+def test_sr_retest_breakout_filters_levels_by_touch_count():
+    class Line:
+        def __init__(self, values):
+            self.values = values
+
+        def __getitem__(self, index):
+            return self.values[-1 + index]
+
+    strategy = object.__new__(SupportResistanceMtfStrategy)
+    strategy.lines = []
+    strategy._levels = [(100.0, "resistance", 1, 1), (101.0, "resistance", 2, 2)]
+    strategy._retest = None
+    strategy._retest_bars = 0
+    strategy.p = type("Params", (), {
+        "level_touches": 2, "scenario_mode": 2, "retest_max_wait": 16,
+        "zone_atr_mult": 0.2,
+    })()
+    strategy.data = type("Data", (), {
+        "close": Line([100.0, 102.0]), "high": Line([100.0, 102.0]),
+        "low": Line([100.0, 102.0]), "open": Line([100.0, 102.0]),
+        "__len__": lambda self: 2,
+    })()
+    strategy._volume_ok = lambda: True
+    strategy._atr_value = lambda: 1.0
+    strategy._nearest_level = lambda *_args: None
+    strategy._signal()
+    assert strategy._retest == ("long", 101.0)
+    assert strategy._retest_bars == 0
+
+
+def test_sr_insufficient_cash_does_not_submit_zero_capacity_order():
+    class Broker:
+        def getvalue(self):
+            return 100.0
+
+        def getcash(self):
+            return 0.0
+
+    strategy = object.__new__(SupportResistanceMtfStrategy)
+    strategy.data = type("Data", (), {"close": [100.0]})()
+    strategy.broker = Broker()
+    strategy.p = type("Params", (), {"stop_buffer_atr": 0.2, "risk_pct": 1.0, "min_rr": 3.0, "min_room_r": 2.5})()
+    strategy._atr_value = lambda: 1.0
+    strategy._levels = []
+    strategy.buy = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected order"))
+    strategy.sell = strategy.buy
+    strategy._pending_stop = strategy._pending_target = None
+    strategy._submit_entry(1, 99.9)
+    assert strategy._pending_stop is None
+    assert strategy._pending_target is None
+
+
+def test_support_resistance_strategy_runs_without_order_errors():
+    from app.backtest import run_backtest
+
+    n = 500
+    rng = np.random.default_rng(22)
+    closes = list(100 + np.cumsum(rng.normal(0.0, 0.35, n)))
+    data = _candles(closes)
+    item = STRATEGIES["support_resistance_mtf"]
+    params = {param["key"]: param["default"] for param in item["params"]}
+    params.update({"session_start": 0, "session_end": 24, "close_at_eod": 0, "level_touches": 1})
+    result = run_backtest(data, item["cls"], params, cash=100_000, commission=0)
+    assert result["final_value"] > 0
+    assert all(trade["status"] == "closed" for trade in result["trades"])
+
+
+def test_short_geometry_compression_filter_blocks_without_compression():
+    closes = [100.0] * 20 + [99.0, 98.0, 97.0, 96.0]
+    data = _candles(closes)
+    # Make the preceding range expand instead of contract.
+    data.loc[data.index[16:20], "high"] += 5.0
+    result = run_backtest(
+        data,
+        BollingerBreakoutShortStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "geometry_mode": 1,
+            "geometry_bars": 8,
+            "geometry_ratio": 0.75,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "session_start": 0,
+            "session_end": 24,
+            "session_offset_hours": 0,
+            "close_at_eod": 0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 0
+
+
+def test_short_elliott_ratio_filter_blocks_overextended_impulse():
+    closes = [100.0] * 12 + [110.0] * 8 + [90.0, 89.0, 88.0, 87.0]
+    result = run_backtest(
+        _candles(closes),
+        BollingerBreakoutShortStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "elliott_mode": 1,
+            "elliott_impulse_bars": 8,
+            "elliott_min_ratio": 0.382,
+            "elliott_max_ratio": 1.618,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "session_start": 0,
+            "session_end": 24,
+            "session_offset_hours": 0,
+            "close_at_eod": 0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+    assert result["trades_total"] == 0
+
+
+def test_short_mirror_enters_on_lower_breakout_and_exits_with_buy_stop():
+    closes = [100.0] * 20 + [90.0, 89.0, 88.0, 87.0, 86.0] + [110.0] * 8
+    result = run_backtest(
+        _candles(closes),
+        BollingerBreakoutShortStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "session_start": 0,
+            "session_end": 24,
+            "session_offset_hours": 0,
+            "close_at_eod": 0,
+            "entry_mode": 0,
+            "stop_mode": 0,
+            "risk_pct": 1,
+        },
+        cash=100_000,
+        commission=0,
+    )
+
+    assert result["trades_total"] == 1
+    trade = result["trades"][0]
+    assert trade["entry_price"] == 90.0
+    assert trade["exit_price"] > trade["entry_price"]
+
+
+def test_short_mirror_take_profit_exits_downward_without_long_flip():
+    closes = [100.0] * 20 + [90.0, 89.0, 87.0, 87.0, 87.0] + [87.0] * 8
+    result = run_backtest(
+        _candles(closes),
+        BollingerBreakoutShortStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "session_start": 0,
+            "session_end": 24,
+            "session_offset_hours": 0,
+            "close_at_eod": 0,
+            "entry_mode": 0,
+            "stop_mode": 1,
+            "atr_stop_mult": 2,
+            "tp_rr": 0.1,
+            "risk_pct": 1,
+        },
+        cash=100_000,
+        commission=0,
+    )
+
+    assert result["trades_total"] == 1
+    trade = result["trades"][0]
+    assert trade["entry_price"] > trade["exit_price"]
+
+
+def test_speed_filter_blocks_slow_short_breakout():
+    closes = [100.0] * 20 + [99.0, 98.0, 97.0, 96.0]
+    result = run_backtest(
+        _candles(closes),
+        BollingerBreakoutShortStrategy,
+        {
+            "bb_period": 20,
+            "bb_stddev": 2.0,
+            "breakout_confirm_bars": 1,
+            "speed_bars": 3,
+            "speed_min_pct": 1.0,
+            "ema_period": 0,
+            "candle_body_ratio": 0,
+            "close_position_min": 0,
+            "atr_period": 0,
+            "max_breakout_atr": 0,
+            "session_start": 0,
+            "session_end": 24,
+            "session_offset_hours": 0,
+            "close_at_eod": 0,
+            "entry_mode": 0,
+            "stop_mode": 0,
+        },
+        cash=100_000,
+        commission=0,
+    )
+
+    assert result["trades_total"] == 0
 
 
 def test_breakout_is_filled_at_signal_close_and_exits_on_lower_band_stop():
@@ -319,85 +566,3 @@ def test_mtf_bollinger_adx_filter_blocks_choppy_and_allows_trend():
     raw = run_backtest(data, _M, no_adx, cash=100_000, commission=0)
     assert raw["trades_total"] >= base["trades_total"]
     assert base["final_value"] < 1_000_000
-
-
-def test_mtf_bollinger_ema_stack_mode_runs():
-    from app.strategies import MtfBollingerStrategy as _M
-
-    item = STRATEGIES["mtf_bollinger"]
-    defaults = {p["key"]: p["default"] for p in item["params"]}
-    params = dict(defaults)
-    params["slow_bias_mode"] = 1
-    params["slow_ema_fast"] = 20
-    params["slow_ema_period"] = 50
-    params["slow_adx_period"] = 0
-
-    n = 800
-    rng = np.random.default_rng(5)
-    closes = list(100 + np.cumsum(rng.normal(0.2, 0.4, n)))
-    data = _candles(closes)
-    result = run_backtest(data, _M, params, cash=100_000, commission=0)
-    assert result["final_value"] < 1_000_000
-
-
-def test_mirror_short_registered_and_shorts_on_downside_breakout():
-    from app.strategies import MirrorBollingerShortStrategy as _S
-
-    item = STRATEGIES["mirror_bollinger_short"]
-    assert item["cls"] is _S
-    params = {p["key"]: p["default"] for p in item["params"]}
-    assert params["bb_period"] == 20
-    assert params["session_start"] == 10
-    assert params["close_at_eod"] == 1
-
-    lo = dict(params)
-    lo["ema_period"] = 0
-    lo["ema_slope_bars"] = 0
-    lo["candle_body_ratio"] = 0.0
-    lo["close_position_min"] = 0.0
-    lo["max_breakout_atr"] = 0.0
-    lo["breakout_confirm_bars"] = 1
-    lo["session_start"] = 0
-    lo["session_end"] = 24
-    lo["close_at_eod"] = 0
-    lo["stop_mode"] = 1
-    lo["atr_stop_mult"] = 2.0
-
-    rng = np.random.default_rng(7)
-    base = 100 + np.cumsum(rng.normal(0.05, 0.6, 120))
-    down = np.cumsum(rng.normal(-1.2, 0.6, 60))
-    bounce = np.cumsum(rng.normal(1.4, 0.6, 80))
-    closes = list(np.r_[base, base[-1] + down, base[-1] + down[-1] + bounce])
-    data = _candles(closes)
-    result = run_backtest(data, _S, lo, cash=100_000, commission=0)
-    assert result["final_value"] < 1_000_000
-    assert result["trades_total"] >= 1
-    for trade in result["trades"]:
-        assert trade["status"] == "closed"
-        assert trade["entry_price"] > 0
-
-
-def test_mirror_short_does_not_buy_upside_breakout():
-    from app.strategies import MirrorBollingerShortStrategy as _S
-
-    item = STRATEGIES["mirror_bollinger_short"]
-    params = {p["key"]: p["default"] for p in item["params"]}
-    params["ema_period"] = 0
-    params["ema_slope_bars"] = 0
-    params["candle_body_ratio"] = 0.0
-    params["close_position_min"] = 0.0
-    params["max_breakout_atr"] = 0.0
-    params["breakout_confirm_bars"] = 1
-    params["session_start"] = 0
-    params["session_end"] = 24
-    params["close_at_eod"] = 0
-    rng = np.random.default_rng(8)
-    n = 260
-    base = 100 + np.cumsum(rng.normal(0.05, 0.6, 120))
-    up = np.cumsum(rng.normal(1.4, 0.6, n - 120))
-    closes = list(np.r_[base, base[-1] + up])
-    data = _candles(closes)
-    result = run_backtest(data, _S, params, cash=100_000, commission=0)
-    assert result["final_value"] < 1_000_000
-    for trade in result["trades"]:
-        assert trade["status"] == "closed"

@@ -19,3 +19,7 @@ results. Mark each item with a test name, commit, and run ID when complete.
 
 No new performance claim should be promoted to `promising` or `validated` while
 an unchecked item can change the trade ledger materially.
+
+The research runner now records broker positions left open at the end of a run
+and fails its sanity checks when any are present. This detects, but does not
+resolve, the final-bar and EOD liquidation risks above.

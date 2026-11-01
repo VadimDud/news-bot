@@ -158,6 +158,15 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
     # preview should truncate after loading the result, not during the run.
     trades = list(getattr(strat, "recorded_trades", []))
     dividends_income = getattr(strat, "_dividends_income", 0.0)
+    open_positions = []
+    for data in strat.datas:
+        position = strat.getposition(data)
+        if position.size:
+            open_positions.append({
+                "ticker": getattr(data, "_name", None) or data._name,
+                "size": float(position.size),
+                "price": round(float(position.price), 8),
+            })
 
     return {
         "initial_cash": initial,
@@ -179,6 +188,7 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
         "equity_curve": equity,
         "invested_curve": getattr(strat.analyzers.equity, "invested_curve", []),
         "trades": trades,
+        "open_positions": open_positions,
         "dividends_income": round(dividends_income, 2),
     }
 

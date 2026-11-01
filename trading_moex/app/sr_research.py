@@ -178,6 +178,7 @@ def sanity_checks(report: dict) -> dict:
     checks = {
         "all_nonempty_results_have_closed_trades": True,
         "no_open_trade_status": True,
+        "no_open_broker_positions": True,
         "ledger_count_matches_metrics": True,
     }
     ledger_count = 0
@@ -186,6 +187,7 @@ def sanity_checks(report: dict) -> dict:
             continue
         trades = result.get("trades", [])
         ledger_count += len(trades)
+        checks["no_open_broker_positions"] &= not result.get("open_positions", [])
         checks["no_open_trade_status"] &= all(trade.get("status") == "closed" for trade in trades)
         checks["ledger_count_matches_metrics"] &= len(trades) == int(result.get("trades_total", 0))
     checks["passed"] = all(checks.values())

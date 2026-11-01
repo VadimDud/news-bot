@@ -240,3 +240,258 @@ def test_no_reversal_into_opposite_direction_after_stop():
     assert strat.getposition(strat.data).size == 0
     assert strat.recorded_trades[0]["pnl"] < 0
     assert strat.recorded_trades[0]["exit_price"] == STOP_PRICE
+
+
+FLAT_TAIL = [(100.9, 101.4, 100.4, 100.9)] * 4
+
+
+def _breakeven_bars(follow):
+    """A long opened after a long warmup, followed by the bars under test."""
+    return [(100.0, 100.5, 99.5, 100.0)] * 60 + [ENTRY] + follow + FLAT_TAIL
+
+
+def test_breakeven_moves_stop_to_entry_after_r_multiple():
+    bars = _breakeven_bars(
+        [(101.0, 102.6, 100.9, 102.4), (102.4, 102.9, 100.4, 100.6), (100.6, 100.8, 99.5, 99.6)]
+        + [(99.6, 99.8, 99.0, 99.2)] * 3
+    )
+    strat = _run(bars, SUPPORT, breakeven_r=1.0)
+    assert strat.recorded_trades, "the position must be closed"
+    trade = strat.recorded_trades[0]
+    assert trade["exit_price"] == 100.0, "the stop must have been moved to breakeven"
+    assert trade["pnl"] >= 0
+    assert strat.getposition(strat.data).size == 0
+
+
+def test_breakeven_is_not_armed_below_the_r_multiple():
+    bars = _breakeven_bars([(100.0, 100.2, 98.9, 99.1), (99.1, 99.3, 97.0, 97.2)])
+    strat = _run(bars, SUPPORT, breakeven_r=100.0)
+    assert strat.recorded_trades
+    trade = strat.recorded_trades[0]
+    assert trade["exit_price"] == STOP_PRICE
+    assert trade["pnl"] < 0
+
+
+def test_retest_zone_requires_enough_touches():
+    support_1_touch = [(100.0, "support", 1, 1), (108.0, "resistance", 2, 5)]
+    support_2_touches = [(100.0, "support", 1, 2), (108.0, "resistance", 2, 5)]
+
+    class _Sig(_StubStrategy):
+        seen: list = []
+
+        def next(self):
+            super().next()
+            if len(self) == 21:
+                _Sig.seen.append(self._signal())
+
+    def signal_for(levels, touches):
+        _Sig.seen = []
+        cerebro = bt.Cerebro()
+        cerebro.addstrategy(
+            _Sig, fixed_atr=1.0, fixed_levels=levels, **_params(level_touches=touches)
+        )
+        cerebro.broker.setcash(1_000_000)
+        cerebro.broker.setcommission(commission=0.0)
+        cerebro.adddata(bt.feeds.PandasData(dataname=_frame(WARMUP + [ENTRY])))
+        cerebro.run(runonce=False)
+        return _Sig.seen[0] if _Sig.seen else None
+
+    assert signal_for(support_2_touches, 2) is not None
+    assert signal_for(support_1_touch, 2) is None
+
+
+def test_retest_expires_after_max_wait_bars():
+    support_2_touches = [(100.0, "support", 1, 2), (108.0, "resistance", 2, 5)]
+    far_bars = [(120.0, 120.5, 119.5, 120.0)] * 6
+
+    class _Sig(_StubStrategy):
+        flagged: list = []
+
+        def __init__(self):
+            super().__init__()
+            self._armed = False
+
+        def next(self):
+            super().next()
+            if self.position:
+                return
+            if not self._armed and len(self) >= 3:
+                self._armed = True
+                self._retest = ("long", 100.0)
+                self._retest_bars = 0
+                return
+            if self._armed:
+                self._signal()
+                _Sig.flagged.append((self._retest, self._retest_bars))
+
+    _Sig.flagged = []
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(
+        _Sig,
+        fixed_atr=1.0,
+        fixed_levels=support_2_touches,
+        **_params(retest_max_wait=3, scenario_mode=0),
+    )
+    cerebro.broker.setcash(1_000_000)
+    cerebro.broker.setcommission(commission=0.0)
+    cerebro.adddata(bt.feeds.PandasData(dataname=_frame(WARMUP + far_bars)))
+    cerebro.run(runonce=False)
+    assert _Sig.flagged, "the scan must be reached"
+    assert _Sig.flagged[0][0] == ("long", 100.0)
+    last_retest, last_bars = _Sig.flagged[-1]
+    assert last_retest is None and last_bars == 0, "a retest past retest_max_wait must be cleared"
+
+
+def test_entry_is_skipped_when_cash_cannot_cover_minimum_position():
+    bars = WARMUP + [ENTRY, (101.0, 101.4, 100.9, 101.2), (101.2, 101.5, 101.0, 101.3)]
+    strat = _run(bars, SUPPORT, cash=50.0)
+    assert strat.getposition(strat.data).size == 0
+    assert strat.recorded_trades == []
+    assert all(order.status != bt.Order.Completed for order in strat.broker.orders)
+
+
+def test_runonce_matches_next_based_ledger():
+    bars = WARMUP + [
+        ENTRY,
+        (101.0, 103.0, 100.9, 102.8),
+        (102.8, 105.0, 102.7, 104.8),
+        (104.8, 109.0, 104.7, 108.6),
+        (108.6, 109.5, 108.0, 109.0),
+    ]
+
+    def ledger(runonce):
+        cerebro = bt.Cerebro()
+        cerebro.addstrategy(_StubStrategy, fixed_atr=1.0, fixed_levels=SUPPORT, **_params())
+        cerebro.broker.setcash(1_000_000)
+        cerebro.broker.setcommission(commission=0.0)
+        cerebro.adddata(bt.feeds.PandasData(dataname=_frame(bars)))
+        strat = cerebro.run(runonce=runonce)[0]
+        return [(t["entry_price"], t["exit_price"], t["pnl"]) for t in strat.recorded_trades]
+
+    assert ledger(runonce=False) == ledger(runonce=True)
+
+
+def test_slow_bucket_and_ledger_are_host_timezone_independent():
+    """The UTC-normalised slow bucket must not shift with the process timezone."""
+    import os
+    import time
+
+    bars = WARMUP + [
+        ENTRY,
+        (101.0, 103.0, 100.9, 102.8),
+        (102.8, 105.0, 102.7, 104.8),
+        (104.8, 109.0, 104.7, 108.6),
+        (108.6, 109.5, 108.0, 109.0),
+    ]
+
+    def ledger():
+        cerebro = bt.Cerebro()
+        cerebro.addstrategy(_StubStrategy, fixed_atr=1.0, fixed_levels=SUPPORT, **_params())
+        cerebro.broker.setcash(1_000_000)
+        cerebro.broker.setcommission(commission=0.0)
+        cerebro.adddata(bt.feeds.PandasData(dataname=_frame(bars)))
+        strat = cerebro.run(runonce=False)[0]
+        return [(t["opened"], t["entry_price"], t["exit_price"], t["pnl"]) for t in strat.recorded_trades]
+
+    original = os.environ.get("TZ")
+    try:
+        results = []
+        for zone in ("UTC", "Europe/Moscow", "America/New_York"):
+            os.environ["TZ"] = zone
+            time.tzset()
+            results.append(ledger())
+        assert results[0] == results[1] == results[2]
+        assert results[0], "the reference run must produce at least one trade"
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
+
+
+def _retest_trace(bars, levels, **overrides):
+    """Trace ``_signal`` on real (unpinned-ATR) bars with a stable level list."""
+
+    class _Sig(SupportResistanceMtfStrategy):
+        trace: list = []
+
+        def next(self):
+            self._levels = list(levels)
+            signal = self._signal()
+            _Sig.trace.append((len(self), signal, tuple(self._retest) if self._retest else None))
+
+    _Sig.trace = []
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(_Sig, **_params(**overrides))
+    cerebro.broker.setcash(1_000_000)
+    cerebro.broker.setcommission(commission=0.0)
+    cerebro.adddata(bt.feeds.PandasData(dataname=_frame(bars)))
+    cerebro.run(runonce=False)
+    return _Sig.trace
+
+
+BIG_SUPPORT = [(100.0, "support", 1, 2), (108.0, "resistance", 2, 5)]
+SCRIPTED_RETEST = (
+    [(100.0, 100.5, 99.5, 100.0)] * 70
+    + [(109.5, 110.0, 109.2, 109.8), (109.8, 110.0, 109.0, 109.2), (109.2, 109.4, 108.0, 108.2)]
+    + [(108.0, 108.2, 107.9, 108.1)] * 4
+)
+
+
+def test_retest_arms_then_is_consumed_exactly_once():
+    trace = _retest_trace(SCRIPTED_RETEST, BIG_SUPPORT, scenario_mode=0, level_touches=1, volume_mult=0.5)
+    rearmed = [entry for entry in trace if entry[2] == ("long", 108.0)]
+    assert rearmed, "a volume-confirmed breakout must arm a long retest"
+    fires = [entry for entry in trace if entry[1] == (1, 108.0)]
+    assert len(fires) == 1, "the armed retest must fire exactly once"
+
+
+def test_retest_is_cleared_after_it_fires():
+    trace = _retest_trace(SCRIPTED_RETEST, BIG_SUPPORT, scenario_mode=0, level_touches=1, volume_mult=0.5)
+    fire_index = next(i for i, entry in enumerate(trace) if entry[1] == (1, 108.0))
+    _, _, state_after = trace[fire_index]
+    assert state_after is None, "the retest must be consumed in the same scan that fires it"
+
+
+def test_retest_does_not_fire_without_a_volume_confirmed_breakout():
+    trace = _retest_trace(SCRIPTED_RETEST, BIG_SUPPORT, scenario_mode=0, level_touches=1, volume_mult=50.0)
+    assert all(entry[2] is None for entry in trace), "no breakout means no armed retest"
+
+
+def test_retest_is_invalidated_when_price_closes_through_the_zone_against_the_side():
+    support_2_touches = [(100.0, "support", 1, 2), (108.0, "resistance", 2, 5)]
+
+    class _Sig(_StubStrategy):
+        seen: list = []
+
+        def __init__(self):
+            super().__init__()
+            self._armed = False
+
+        def next(self):
+            super().next()
+            if self.position:
+                return
+            if not self._armed:
+                self._armed = True
+                self._retest = ("long", 100.0)
+                self._retest_bars = 0
+                return
+            _Sig.seen.append(self._signal())
+
+    _Sig.seen = []
+    breakdown = (99.5, 99.8, 96.0, 96.2)
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(
+        _Sig,
+        fixed_atr=1.0,
+        fixed_levels=support_2_touches,
+        **_params(scenario_mode=0),
+    )
+    cerebro.broker.setcash(1_000_000)
+    cerebro.broker.setcommission(commission=0.0)
+    cerebro.adddata(bt.feeds.PandasData(dataname=_frame(WARMUP + [breakdown] * 3)))
+    cerebro.run(runonce=False)
+    assert _Sig.seen, "the scan must run"
+    assert all(signal is None for signal in _Sig.seen), "a close below the zone must not trigger the long retest"

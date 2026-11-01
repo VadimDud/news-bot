@@ -23,6 +23,7 @@ import pandas as pd
 
 from .backtest import run_backtest
 from .strategies import STRATEGIES
+from .timezones import MARKET_OFFSET_HOURS, MARKET_TZ_NAME, as_utc_naive_index
 
 
 DEFAULT_TICKERS = ("CHMF", "GAZP", "LKOH", "MOEX", "MTSS", "NLMK", "NVTK", "SBER", "T", "TATN")
@@ -52,6 +53,7 @@ def load_candles(db_path: str, ticker: str, period: str) -> pd.DataFrame:
     """
     with sqlite3.connect(db_path) as connection:
         frame = pd.read_sql_query(query, connection, params=(ticker, period), parse_dates=["begin"])
+    frame["begin"] = as_utc_naive_index(frame["begin"])
     frame = frame.drop_duplicates("begin").set_index("begin").sort_index()
     if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
         raise ValueError(f"invalid candle index for {ticker}/{period}")
@@ -215,6 +217,11 @@ def write_run_artifacts(report: dict, run_dir: str | Path, command: str | None =
     manifest = {
         "run_id": destination.name,
         "study_id": "SR-001",
+        "timezone": {
+            "storage": "UTC-naive",
+            "market": MARKET_TZ_NAME,
+            "offset_hours": MARKET_OFFSET_HOURS,
+        },
         "status": "completed",
         "started_at_utc": started,
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),

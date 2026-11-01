@@ -9,6 +9,13 @@
 4. Use a clean commit for confirmatory runs. Dirty-worktree runs are diagnostic
    and must be labelled as such.
 
+## Time Convention
+
+- Candle rows in SQLite are UTC-naive for backward compatibility.
+- Session and user-facing time is `Europe/Moscow` (UTC+3).
+- Normalize timestamps explicitly at data boundaries and record both zones in
+  every research manifest.
+
 ## Required Provenance
 
 Each run must save a manifest containing:

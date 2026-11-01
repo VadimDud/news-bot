@@ -15,6 +15,7 @@ import pandas as pd
 
 from . import settings
 from . import storage
+from .timezones import as_utc_naive_index
 
 logger = logging.getLogger("moex_trader.data")
 
@@ -82,7 +83,7 @@ def _resample_candles(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     Пустые бакеты (неторговые паузы) отбрасываются.
     """
     out = df.copy()
-    out["begin"] = pd.to_datetime(out["begin"])
+    out["begin"] = as_utc_naive_index(out["begin"])
     return (
         out.set_index("begin")
         .resample(rule, closed="left", label="left")
@@ -117,7 +118,7 @@ def _ensure_login():
 def normalize_history(df: pd.DataFrame) -> pd.DataFrame:
     """Привести DataFrame свечей MOEX к виду для backtrader (datetime-индекс, OHLCV)."""
     out = df[["begin", "open", "close", "high", "low", "volume"]].copy()
-    out["begin"] = pd.to_datetime(out["begin"])
+    out["begin"] = as_utc_naive_index(out["begin"])
     out = out.set_index("begin").sort_index()
     out.index.name = "datetime"
     out = out[["open", "high", "low", "close", "volume"]]

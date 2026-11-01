@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .vsa_strategy import StrategyConfig, prepare_strategy_frame
 from .market_data import aggregate_bar_market_data
+from .timezones import as_utc
 
 
 FEATURE_COLUMNS = (
@@ -348,7 +349,7 @@ def generate_forecast(
     assert vector is not None
     atr = context.current_atr
     entry = context.current_price
-    base_time = int(pd.Timestamp(prepared.iloc[-1]["timestamp"]).timestamp())
+    base_time = int(as_utc(pd.Timestamp(prepared.iloc[-1]["timestamp"]).to_pydatetime()).timestamp())
     before = pd.Timestamp(prepared.iloc[-1]["timestamp"])
     scenarios: list[DynamicScenario] = []
     probabilities: dict[str, float] = {}

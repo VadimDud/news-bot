@@ -25,10 +25,9 @@ import pandas as pd
 from . import config as trading_config
 from . import mtf_confirm
 from . import storage
+from .timezones import MARKET_TZ as MSK
 
 logger = logging.getLogger("moex_trader.mtf_notifier")
-
-MSK = timezone(timedelta(hours=3))
 
 
 # ── Telegram ────────────────────────────────────────────────────────────────

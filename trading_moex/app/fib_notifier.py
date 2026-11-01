@@ -21,10 +21,9 @@ import pandas as pd
 from . import config as trading_config
 from . import fib_pullback
 from . import storage
+from .timezones import MARKET_TZ as MSK
 
 logger = logging.getLogger("moex_trader.fib_notifier")
-
-MSK = timezone(timedelta(hours=3))
 
 _RU_DIR = {"buy": "ПОКУПКА", "sell": "ПРОДАЖА", "short": "ПРОДАЖА"}
 

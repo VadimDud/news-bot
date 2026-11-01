@@ -28,6 +28,7 @@ from .context import TradeContext
 from .regime import classify_regime
 from .rr_check import check_rr
 from .sizing import SizingResult, size_position
+from ..timezones import UTC
 
 logger = logging.getLogger("moex_trader.skills.pretrade")
 
@@ -46,7 +47,7 @@ class PretradeReport:
     checks: dict = field(default_factory=dict)
     context: TradeContext | None = None
     warnings: list[str] = field(default_factory=list)
-    checked_at: datetime = field(default_factory=lambda: datetime.utcnow())
+    checked_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def as_dict(self) -> dict:
         """Сериализация для API/дашборда."""

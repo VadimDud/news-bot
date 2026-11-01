@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from ..timezones import UTC
+
 
 @dataclass
 class TradeContext:
@@ -42,7 +44,7 @@ class TradeContext:
     # Данные о свежести
     candles_fresh: bool = True
     data_staleness_hours: float = 0.0
-    checked_at: datetime = field(default_factory=lambda: datetime.utcnow())
+    checked_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # Дополнительные метрики от скиллов
     sizing_info: dict[str, Any] = field(default_factory=dict)

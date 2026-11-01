@@ -26,13 +26,13 @@ from . import config as trading_config
 from . import fundamentals as fundamentals_module
 from . import signals
 from . import storage
+from .timezones import MARKET_TZ as MSK
+from .timezones import as_utc_naive_index
 
 logger = logging.getLogger("moex_trader.signal_notifier")
 
 # Флаг, чтобы предупреждать про отсутствие токена Т-Банк ровно один раз за сеанс
 _div_token_warned: bool = False
-
-MSK = timezone(timedelta(hours=3))  # время биржи для метки в сообщении
 
 DATA_ALERT_SETTING = "signals_data_alert_sent_on"  # дата последнего алерта (дедуп раз в сутки)
 
@@ -504,7 +504,7 @@ async def run_daily_scan() -> list[dict]:
                 continue
             # индекс-даты нужны сигнальным функциям (prices.index)
             df = df_raw.copy()
-            df["begin"] = pd.to_datetime(df["begin"])
+            df["begin"] = as_utc_naive_index(df["begin"], errors="coerce")
             df = df.set_index("begin").sort_index()[["open", "high", "low", "close", "volume"]]
 
             raw_fund = storage.load_fundamentals(ticker)

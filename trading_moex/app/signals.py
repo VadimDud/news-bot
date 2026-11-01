@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from typing import Sequence
 
+from .timezones import as_utc_naive_index
+
 
 def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(period).mean()
@@ -436,7 +438,7 @@ def roe_pb_signal(
     if avg_roe_col is not None:
         avg_roe = (
             pd.to_numeric(avg_roe_col, errors="coerce")
-            .set_axis(pd.to_datetime(fundamentals["date"]), axis=0)
+            .set_axis(as_utc_naive_index(fundamentals["date"]), axis=0)
             .reindex(prices.index)
             .values
         )
@@ -459,7 +461,7 @@ def roe_pb_signal(
     dy_arr = np.zeros(len(close), dtype=float)
     if dividends is not None and not dividends.empty and scoring == 1:
         divs = dividends.copy()
-        divs["date"] = pd.to_datetime(divs["date"])
+        divs["date"] = as_utc_naive_index(divs["date"])
         divs["dividend"] = pd.to_numeric(divs["dividend"], errors="coerce")
         divs = divs.dropna(subset=["date", "dividend"]).sort_values("date")
         if not divs.empty:
@@ -609,7 +611,7 @@ def _forward_fill_fundamentals(prices: pd.Series, fundamentals: pd.DataFrame) ->
     if "roe_stability" in fundamentals.columns:
         cols.append("roe_stability")
     fund = fundamentals.copy()
-    fund["date"] = pd.to_datetime(fund["date"])
+    fund["date"] = as_utc_naive_index(fund["date"])
     # Векторный ffill вместо iterrows: pandas 3.x при iterrows() по смешанным
     # колонкам (дата + float) превращает nan в NaT, что ломает присваивание
     # во float64-колонку (LossySetitemError).
@@ -645,7 +647,7 @@ def _rolling_avg_roe_series(
     """
     if fundamentals is not None and not fundamentals.empty:
         fund = fundamentals.copy()
-        fund["date"] = pd.to_datetime(fund["date"])
+        fund["date"] = as_utc_naive_index(fund["date"])
         fund = fund.sort_values("date")
         annual = fund.groupby(fund["date"].dt.year)["roe"].last()
     else:
@@ -692,7 +694,7 @@ def roe_score_breakdown(
     if "avg_roe" in fundamentals.columns:
         avg_roe = (
             pd.to_numeric(fundamentals["avg_roe"], errors="coerce")
-            .set_axis(pd.to_datetime(fundamentals["date"]), axis=0)
+            .set_axis(as_utc_naive_index(fundamentals["date"]), axis=0)
             .reindex(prices.index)
             .values.astype(float)
         )
@@ -732,7 +734,7 @@ def roe_score_breakdown(
     dy_val = 0.0
     if dividends is not None and not dividends.empty and close[i] > 0:
         divs = dividends.copy()
-        divs["date"] = pd.to_datetime(divs["date"])
+        divs["date"] = as_utc_naive_index(divs["date"])
         divs["dividend"] = pd.to_numeric(divs["dividend"], errors="coerce")
         divs = divs.dropna(subset=["date", "dividend"]).sort_values("date")
         if not divs.empty:

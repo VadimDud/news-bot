@@ -24,6 +24,7 @@ import inspect
 
 import numpy as np
 import pandas as pd
+from .timezones import as_utc_naive_index
 
 from .risk import atr as _atr, true_range as _true_range
 
@@ -38,10 +39,10 @@ def prepare_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     """
     out = df.copy()
     if "begin" in out.columns:
-        out["begin"] = pd.to_datetime(out["begin"], errors="coerce")
+        out["begin"] = as_utc_naive_index(out["begin"], errors="coerce")
         out = out.set_index("begin").sort_index()
     else:
-        out.index = pd.to_datetime(out.index, errors="coerce")
+        out.index = as_utc_naive_index(out.index, errors="coerce")
         out = out.sort_index()
     cols = [c for c in ("open", "high", "low", "close", "volume") if c in out.columns]
     return out[cols]

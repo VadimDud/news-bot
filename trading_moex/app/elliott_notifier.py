@@ -18,10 +18,10 @@ import pandas as pd
 from . import config as trading_config
 from . import elliott_candles
 from . import storage
+from .timezones import MARKET_TZ as MSK
+from .timezones import as_utc_naive_index
 
 logger = logging.getLogger("moex_trader.elliott_notifier")
-
-MSK = timezone(timedelta(hours=3))
 
 
 # ── Telegram (reuse signal_notifier's function if available) ────────────────
@@ -162,7 +162,7 @@ def _load_daily_candles(ticker: str) -> pd.DataFrame | None:
         logger.info("Недостаточно свечей по %s (%d), пропуск", ticker, len(df_raw))
         return None
     df = df_raw.copy()
-    df["begin"] = pd.to_datetime(df["begin"])
+    df["begin"] = as_utc_naive_index(df["begin"], errors="coerce")
     df = df.set_index("begin").sort_index()[["open", "high", "low", "close", "volume"]]
     return df
 

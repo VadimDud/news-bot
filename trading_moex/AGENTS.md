@@ -17,6 +17,15 @@ For any research task, read:
 
 ## Research Organization
 
+## Time Convention
+
+- SQLite candle timestamps are stored as UTC-naive values for compatibility with
+  the existing database; do not reinterpret or migrate them to Moscow time.
+- User-facing times and market-session logic use `Europe/Moscow` (UTC+3).
+- Use `app/timezones.py` for UTC/Moscow conversion. Do not add local
+  `timedelta(hours=3)` constants or call `timestamp()` on naive datetimes.
+- Research manifests must record the storage and market timezone contract.
+
 - Keep hypotheses, specifications, decisions, and audit checklists in
   `research/`; commit these small text files.
 - Put generated output in a new `artifacts/runs/<study>/<run-id>/` directory.

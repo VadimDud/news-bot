@@ -1,7 +1,7 @@
 """Tests for Fibonacci retracement signal notifier (synthetic data + isolated DB)."""
 
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -117,7 +117,9 @@ class TestFormat:
 
 class TestStale:
     def test_fresh(self):
-        dates = pd.date_range("2024-01-01", periods=20, freq="B")
+        # Anchor to the real clock: a hardcoded date silently rots into "stale".
+        end = datetime.now(timezone.utc)
+        dates = pd.date_range(end=end, periods=20, freq="B")
         df = pd.DataFrame({"open": [1]*20, "high": [1]*20, "low": [1]*20,
                            "close": [1]*20, "volume": [1]*20}, index=dates)
         with patch("app.fib_notifier.trading_config") as mc:
@@ -125,7 +127,7 @@ class TestStale:
             assert _is_stale(df) is False
 
     def test_old_is_stale(self):
-        dates = pd.date_range("2020-01-01", periods=5, freq="B")
+        dates = pd.date_range(end=datetime.now(timezone.utc) - timedelta(days=2000), periods=5, freq="B")
         df = pd.DataFrame({"open": [1]*5, "high": [1]*5, "low": [1]*5,
                            "close": [1]*5, "volume": [1]*5}, index=dates)
         with patch("app.fib_notifier.trading_config") as mc:

@@ -235,14 +235,15 @@ class TestScanTicker:
 
 class TestIsStale:
     def test_fresh_data(self):
-        dates = pd.date_range("2024-01-01", periods=20, freq="B")
+        # Anchor to the real clock: a hardcoded date silently rots into "stale".
+        dates = pd.date_range(end=datetime.now(timezone.utc), periods=20, freq="B")
         df = pd.DataFrame({"open": [1]*20, "high": [1]*20, "low": [1]*20, "close": [1]*20, "volume": [1]*20}, index=dates)
         with patch("app.elliott_notifier.trading_config") as mock_cfg:
             mock_cfg.TRADER_SIGNALS_MAX_STALE_DAYS = 1000
             assert _is_stale(df) is False
 
     def test_old_data(self):
-        dates = pd.date_range("2020-01-01", periods=5, freq="B")
+        dates = pd.date_range(end=datetime.now(timezone.utc) - timedelta(days=2000), periods=5, freq="B")
         df = pd.DataFrame({"open": [1]*5, "high": [1]*5, "low": [1]*5, "close": [1]*5, "volume": [1]*5}, index=dates)
         with patch("app.elliott_notifier.trading_config") as mock_cfg:
             mock_cfg.TRADER_SIGNALS_MAX_STALE_DAYS = 1

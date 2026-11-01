@@ -19,6 +19,9 @@ policy. Do not move or delete them without a separate migration plan.
 
 Cleanup is dry-run by default. A cleanup report must list exact paths, size,
 reason, age, and the durable run or decision that replaces each item.
+`scripts/cleanup_research.py` implements this report for rebuildable cache and
+scratch files. It never deletes files; `--quarantine` only moves candidates
+after an interactive confirmation. Run artifacts under `runs/` are excluded.
 
 1. Never delete active runs, cited evidence, study specifications, source data,
    secrets, or files with unclear ownership.

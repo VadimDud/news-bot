@@ -1,10 +1,16 @@
-# ZB-002: Zone Break Continuation
+# ZB: Zone Break Continuation
 
 ## Status
 
-`rejected` as a tradeable strategy, `promising` as a hypothesis that was never
-adequately tested. The baseline is positive but rests on 59 trades, and the
-strategy is indistinguishable from a no-trade baseline at the 95% level.
+**Rejected.** ZB-002 found that the 15-minute baseline rested on 59 trades,
+which was too few to separate +1.16% from zero, and named more data as the
+blocker. ZB-004 supplied that data: the same unchanged configuration on 5.7
+years of daily candles (250 trades) is positive overall but **negative in the
+largest half of the sample** and negative in the final two years. The edge does
+not survive the test it was waiting for.
+
+The unresolved blocker in ZB-002 was statistical power, not the sign of the
+result. Once that blocker was removed, the sign went with it.
 
 ## Hypothesis
 
@@ -105,3 +111,93 @@ re-run the identical `ZB-002` configuration through
 pooled PF stays above 1.0 in both halves with trade count in the hundreds. If
 the data cannot be extended, stop: repeating the sweep on this sample only
 manufactures overfitting.
+
+---
+
+# ZB-004: Same Configuration on Daily Candles
+
+## Why this run exists
+
+ZB-002 closed with "extend history to five years and re-run the identical
+configuration". This is that run. Nothing changed except the timeframe: no
+parameter tuning, no re-selection, no new filters.
+
+## Setup
+
+Identical to ZB-002 in every parameter. Only two fields differ:
+
+- period `1day` instead of `15min`;
+- `split_at=2024-01-01` instead of `2026-04-01`.
+
+The split moved because the default boundary would have put 243 of 250 trades
+in train and left 6 in test, which tests nothing. `2024-01-01` gives 161 train
+and 82 test trades.
+
+Data: daily candles `2021-01-04 .. 2026-09-11`, ten tickers. The set is worth
+noting — daily history starts in 2021, not 2010; only SBER reaches back to 2010,
+so its `+17.14%` rests on a longer window than the other nine.
+
+## Runs
+
+Clean commit `b54be12`, `dirty: False`, `sanity_checks` correctly **fails** all
+three runs because real positions remain open when the series ends (MTSS, SBER
+on full/test; TATN on train). Those open positions are listed in
+`checks.json` and were kept visible rather than closed artificially at the last
+bar, which would have invented an exit price.
+
+| split | return | PF | trades |
+|-------|-------:|----:|-------:|
+| full  | +1.85% | 1.102 | 250 |
+| train (2021-01 .. 2023-12) | +3.22% | 1.281 | 161 |
+| test  (2024-01 .. 2026-09) | **-1.59%** | **0.766** | 82 |
+
+Per calendar year, same configuration:
+
+| year | return | PF | trades |
+|------|-------:|----:|-------:|
+| 2021 | -0.34% | 0.895 | 40 |
+| 2022 | +0.08% | 1.072 | 10 |
+| 2023 | **+2.48%** | **1.720** | 56 |
+| 2024 | +0.26% | 0.678 | 22 |
+| 2025 | **-1.12%** | **0.469** | 27 |
+
+## What this establishes
+
+**The full-period positive return is one good year.** 2023 alone carries it.
+Every year after 2023 is worse than the one before, ending at PF 0.469. A
+strategy whose out-of-sample half is negative at PF 0.766 does not have a
+forward edge; it has a backtest.
+
+**The hypothesis is falsified on its own terms.** ZB-002 declared the success
+criterion as pooled PF above 1.0 in *both* halves. Test delivers 0.766.
+
+**SBER carries the result, and it carries it unfairly.** SBER contributes
+`+17.14%` of a `+1.85%` pooled total, because it is the only ticker with 2010
+history and thus competes on 68 trades from a different sample than the rest.
+Excluding SBER, the pooled figure is negative. That is not a strategy property;
+it is an artefact of uneven history depth.
+
+## What the evidence cannot establish
+
+- Whether the strategy ever worked before 2021. Only SBER has that history, so
+  it cannot be checked on a representative cross-section.
+- That 2023 was driven by continuation rather than the 2023 MOEX rally. The
+  concentration of the whole edge into one year is consistent with a regime
+  effect, not a repeatable mechanism.
+
+## Decision
+
+Rejected. Do not trade, do not promote, do not tune further on this sample.
+Parameter tuning on a strategy that fails out of sample in its own test is
+overfitting by construction.
+
+## Next Experiment
+
+None for this strategy. A defensible next step for the *programme* is to check
+the screened negative results for the same year-concentration pattern
+(`bollinger_breakout_short` is the obvious suspect, with its gain concentrated
+in MOEX/MTSS/CHMF): if several strategies earn their whole return in 2023, the
+shared signal is the market year, and the honest conclusion is that these
+breakout rules have no edge on MOEX in this dataset. If instead the next study
+must be attempted, it should be a fundamentally different family (e.g. carry,
+mean reversion at a tested level) rather than another breakout variant.

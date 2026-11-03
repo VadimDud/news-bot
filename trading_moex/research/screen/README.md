@@ -68,10 +68,15 @@ proper study".
 
 ## Next Step
 
-Done: `zone_break` was opened as study `ZB-002` in `research/zone_break/` and
-re-run through the committed harness (`scripts/research_strategy.py`), which
-reproduced the diagnostic figures exactly. Verdict there is **rejected for
-statistical power**, not for sign — 59 trades cannot separate the result from
-zero, and the wide-`rr` requirement looks like a few lucky winners. Do not trade
-it, and do not repeat this multi-strategy scan — the selection bias is exactly
-what `research/protocol.md` warns against.
+Done, and concluded negatively. `zone_break` became study ZB-002 in
+`research/zone_break/`, re-run through the committed harness and reproduced
+exactly. ZB-002 rejected it for statistical power (59 trades, wide-`rr`
+dependency). ZB-004 then supplied the missing data — same configuration, daily
+candles, 250 trades — and the strategy failed: test PF 0.766 at -1.59%, with
+the entire edge sitting in 2023.
+
+That outcome is the expected result of a multi-strategy scan, and it is the
+argument for not repeating one: the scan nominated the one strategy whose
+positive return was a single market year. Do not trade it, and do not re-run
+this scan — the selection bias is exactly what `research/protocol.md` warns
+against.

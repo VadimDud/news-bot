@@ -1,0 +1,63 @@
+study_id: ZB-004
+name: zone_break_same_config_on_daily
+status: rejected
+purpose: >-
+  Supply the statistical power ZB-002 named as its blocker, without changing a
+  single parameter. Timeframe and split boundary are the only differences.
+commit: b54be12
+dirty: false
+changes_vs_ZB-002:
+  period: 15min -> 1day
+  split_at: "2026-04-01 -> 2024-01-01"
+  reason_split: >-
+    The default boundary would place 243 of 250 trades in train and 6 in test.
+  parameters: unchanged
+data:
+  source: data/trader_4h.db
+  period: 1day
+  window: 2021-01-04 .. 2026-09-11
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+  history_depth_note: >-
+    Daily history begins in 2021 for nine tickers; only SBER reaches 2010, so
+    its 68 trades come from a longer window than the rest.
+  timezone: {storage: UTC-naive, market: Europe/Moscow}
+costs: {commission_per_side: 0.0005, slippage_per_side: 0.0005}
+runs:
+  full:  {return_pct: 1.85,  profit_factor: 1.1024, trades: 250, checks_passed: false}
+  train: {return_pct: 3.22,  profit_factor: 1.2806, trades: 161, checks_passed: false}
+  test:  {return_pct: -1.59, profit_factor: 0.7658, trades: 82,  checks_passed: false}
+checks_note: >-
+  All three runs fail no_open_broker_positions because positions remain open
+  when the series ends: MTSS and SBER on full/test, TATN on train. Reported
+  openly instead of forcing a close at the last bar, which would fabricate an
+  exit price.
+yearly:
+  2021: {return_pct: -0.34, profit_factor: 0.8952, trades: 40}
+  2022: {return_pct: 0.08,  profit_factor: 1.0715, trades: 10}
+  2023: {return_pct: 2.48,  profit_factor: 1.7204, trades: 56}
+  2024: {return_pct: 0.26,  profit_factor: 0.6784, trades: 22}
+  2025: {return_pct: -1.12, profit_factor: 0.4686, trades: 27}
+per_ticker_full:
+  SBER: {return_pct: 17.14, profit_factor: 1.34, trades: 68}
+  GAZP: {return_pct: 8.68,  profit_factor: 1.70, trades: 21}
+  TATN: {return_pct: 3.93,  profit_factor: 1.28, trades: 20}
+  CHMF: {return_pct: 1.68,  profit_factor: 1.11, trades: 24}
+  LKOH: {return_pct: 0.55,  profit_factor: 1.04, trades: 17}
+  NVTK: {return_pct: 0.45,  profit_factor: 1.03, trades: 21}
+  T:    {return_pct: 0.23,  profit_factor: 1.02, trades: 22}
+  MOEX: {return_pct: -1.24, profit_factor: 0.93, trades: 25}
+  MTSS: {return_pct: -4.79, profit_factor: 0.67, trades: 14}
+  NLMK: {return_pct: -8.16, profit_factor: 0.48, trades: 18}
+hypothesis_falsified: true
+falsification: >-
+  ZB-002 required pooled PF > 1.0 in both halves. Test returns PF 0.766.
+verdict: rejected
+elimination_reason: >-
+  The whole edge is 2023 (+2.48%, PF 1.72); every later year is worse than the
+  one before, and the out-of-sample half is negative. SBER alone contributes
+  +17.14% to a pooled +1.85% because it has a decade more history than the rest,
+  so the pooled figure is an artefact of uneven windows.
+next_step: >-
+  Do not tune this strategy further. Check the screened negatives for the same
+  year-concentration pattern; if several earn their entire return in 2023, the
+  shared signal is the market year rather than a breakout edge.

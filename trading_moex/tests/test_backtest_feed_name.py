@@ -54,3 +54,18 @@ def test_feed_name_rejects_dataframe_dataname():
         _dataname = pd.DataFrame({"close": [1.0]})
 
     assert _feed_name(FakeFeed()) == ""
+
+
+def test_report_separates_realized_and_unrealized_pnl():
+    """A marked-to-market open position must not hide inside total_return_pct."""
+    item = STRATEGIES["zone_break"]
+    params = {parameter["key"]: parameter["default"] for parameter in item["params"]}
+    result = run_backtest(
+        _frame(), item["cls"], params, cash=100_000.0, commission=0.0,
+        slippage=0.0, ticker="SBER",
+    )
+    assert result["includes_unrealized_pnl"] is bool(result["open_positions"])
+    realized = sum(float(trade.get("pnl", 0.0) or 0.0) for trade in result["trades"])
+    assert abs(result["realized_pnl"] - realized) < 0.01
+    total = result["final_value"] - result["initial_cash"]
+    assert abs(result["realized_pnl"] + result["unrealized_pnl"] - total) < 0.02

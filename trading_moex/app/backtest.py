@@ -196,10 +196,21 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
                 "price": round(float(position.price), 8),
             })
 
+    # Split the reported PnL into realized and unrealized parts. A position
+    # still open at the last bar is marked to market, so including it in
+    # ``total_return_pct`` silently credits a trade that never exited. Readers
+    # must be able to tell the two apart instead of inferring it from
+    # ``open_positions``.
+    closed_pnl = sum(float(trade.get("pnl", 0.0) or 0.0) for trade in trades)
+    has_open_positions = bool(open_positions)
+
     return {
         "initial_cash": initial,
         "final_value": round(final, 2),
         "total_return_pct": round(total_return, 2),
+        "realized_pnl": round(closed_pnl, 2),
+        "unrealized_pnl": round(final - initial - closed_pnl, 2),
+        "includes_unrealized_pnl": has_open_positions,
         "sharpe": sharpe_val,
         "max_drawdown_pct": round(max_dd, 2),
         "trades_total": total_trades,

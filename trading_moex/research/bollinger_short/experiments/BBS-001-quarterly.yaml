@@ -1,0 +1,59 @@
+study_id: BBS-001
+name: bollinger_breakout_short_quarterly_decomposition
+status: rejected
+purpose: >-
+  Follow-up demanded by ZB-004: check whether bollinger_breakout_short earns
+  its return in one market window, the way zone_break earned everything in 2023.
+commit: 61bd4b8
+dirty: false
+data:
+  source: data/trader_4h.db
+  period: 15min
+  window: 2025-08-28 .. 2026-09-21
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+  timezone: {storage: UTC-naive, market: Europe/Moscow}
+why_15min_not_1day: >-
+  The strategy is intraday by construction (session_start=10, session_end=19,
+  session_offset_hours=3, close_at_eod=1). On 1day candles it opens zero trades
+  in every year 2021-2025, so a daily test would measure nothing. 15min data
+  covers only 13 months, which rules out yearly buckets and leaves quarters.
+costs: {commission_per_side: 0.0005, slippage_per_side: 0.0005}
+quarters:
+  2025-08-28..2025-11-01: {return_pct: -0.66, profit_factor: 0.401, trades: 25}
+  2025-11-01..2026-02-01: {return_pct: 0.12,  profit_factor: 1.2227, trades: 19}
+  2026-02-01..2026-05-01: {return_pct: 0.25,  profit_factor: 0.8291, trades: 29}
+  2026-05-01..2026-08-01: {return_pct: 1.00,  profit_factor: 0.7441, trades: 50}
+  2026-08-01..2026-10-01: {return_pct: -0.07, profit_factor: 0.8665, trades: 17}
+finding_profit_factor_below_one_everywhere: >-
+  Profit factor is below 1.0 in every quarter. Positive returns in three
+  quarters come only from the mark-to-market of positions left open at the
+  period boundary, not from closed trades.
+worked_example_MTSS:
+  trades: 7
+  wins: 0
+  closed_pnl: -2703.61
+  unrealized_pnl: 11940.92
+  reported_return_pct: 9.24
+  explanation: >-
+    Seven losing closed trades and an open short marked to market. The +9.24%
+    is entirely paper profit on a position that never exited. This is the
+    concrete case that motivated splitting realized and unrealized PnL in
+    app/backtest.py.
+concentration_2026-05..08:
+  MTSS: {return_pct: 9.24, profit_factor: 0.0, trades: 7}
+  MOEX: {return_pct: 7.84, profit_factor: 0.12, trades: 4}
+  CHMF: {return_pct: 3.91, profit_factor: 0.91, trades: 9}
+  note: >-
+    The three positive tickers all have open positions at the boundary, and
+    MTSS has zero winning closed trades. The apparent gain is not realised.
+verdict: rejected
+elimination_reason: >-
+  Profit factor below 1 in every quarter. Positive quarterly returns come from
+  unclosed positions being marked to market, and the full-period gain is
+  concentrated in three tickers whose gains are unrealised. There is no
+  evidence of a repeatable short edge.
+next_step: >-
+  Stop testing breakout variants on MOEX intraday data. ZB-004 and BBS-001 both
+  reduce to the same conclusion, and a future study should start from a
+  different family with its own stated mechanism rather than another breakout
+  rule.

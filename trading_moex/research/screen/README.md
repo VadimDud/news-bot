@@ -75,8 +75,13 @@ dependency). ZB-004 then supplied the missing data — same configuration, daily
 candles, 250 trades — and the strategy failed: test PF 0.766 at -1.59%, with
 the entire edge sitting in 2023.
 
-That outcome is the expected result of a multi-strategy scan, and it is the
-argument for not repeating one: the scan nominated the one strategy whose
-positive return was a single market year. Do not trade it, and do not re-run
-this scan — the selection bias is exactly what `research/protocol.md` warns
-against.
+The other positive row from this scan, `bollinger_breakout_short`, was checked
+the same way as `BBS-001` and also rejected: its profit factor never reaches 1.0
+in any quarter, and the positive return came from open positions marked to
+market rather than from closed trades.
+
+Both positive candidates are gone, and both fell for structural reasons rather
+than bad luck: one earned everything in a single market year, the other never
+cleared PF 1.0. That is the expected outcome of a multi-strategy scan and the
+argument for not repeating one. Do not re-run this scan — the selection bias is
+exactly what `research/protocol.md` warns against.

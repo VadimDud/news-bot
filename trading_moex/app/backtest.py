@@ -204,6 +204,16 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
     closed_pnl = sum(float(trade.get("pnl", 0.0) or 0.0) for trade in trades)
     has_open_positions = bool(open_positions)
 
+    # Time in market. Without it a raw return against a zero baseline is not
+    # comparable across periods: a strategy that holds positions 10% of the
+    # time cannot be judged as if it were fully invested for the whole window.
+    invested_curve = getattr(strat.analyzers.equity, "invested_curve", [])
+    in_market = sum(1 for _, value in invested_curve if value)
+    exposure = round(in_market / len(invested_curve) * 100, 2) if invested_curve else 0.0
+    return_on_exposure = (
+        round(total_return / exposure * 100, 4) if exposure else None
+    )
+
     return {
         "initial_cash": initial,
         "final_value": round(final, 2),
@@ -211,6 +221,8 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
         "realized_pnl": round(closed_pnl, 2),
         "unrealized_pnl": round(final - initial - closed_pnl, 2),
         "includes_unrealized_pnl": has_open_positions,
+        "exposure_pct": exposure,
+        "return_on_exposure_pct": return_on_exposure,
         "sharpe": sharpe_val,
         "max_drawdown_pct": round(max_dd, 2),
         "trades_total": total_trades,

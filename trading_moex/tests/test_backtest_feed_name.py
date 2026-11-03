@@ -69,3 +69,15 @@ def test_report_separates_realized_and_unrealized_pnl():
     assert abs(result["realized_pnl"] - realized) < 0.01
     total = result["final_value"] - result["initial_cash"]
     assert abs(result["realized_pnl"] + result["unrealized_pnl"] - total) < 0.02
+
+
+def test_exposure_and_return_on_exposure_are_reported():
+    item = STRATEGIES["zone_break"]
+    params = {parameter["key"]: parameter["default"] for parameter in item["params"]}
+    result = run_backtest(_frame(), item["cls"], params, cash=100_000.0, ticker="SBER")
+    assert 0.0 <= result["exposure_pct"] <= 100.0
+    if result["exposure_pct"]:
+        expected = result["total_return_pct"] / result["exposure_pct"] * 100
+        assert abs(result["return_on_exposure_pct"] - expected) < 0.01
+    else:
+        assert result["return_on_exposure_pct"] is None

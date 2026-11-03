@@ -104,6 +104,9 @@ def pooled_trade_metrics(results: Iterable[dict]) -> dict:
         "trades_won": sum(int(item.get("trades_won", 0)) for item in items),
         "trades_lost": sum(int(item.get("trades_lost", 0)) for item in items),
         "profit_factor": round(wins / losses, 4) if losses else (None if wins else 0.0),
+        "mean_exposure_pct": round(
+            sum(float(item.get("exposure_pct", 0.0)) for item in items) / len(items), 2
+        ) if items else 0.0,
     }
 
 

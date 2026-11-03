@@ -54,6 +54,12 @@ held, MFE, MAE, and whether the target was real or synthetic.
 - Report pooled portfolio metrics separately from equal-cash per-ticker metrics.
 - Report costs, drawdown, trade count, median trade, worst trade, expectancy,
   exposure, per-ticker and per-window results, and uncertainty intervals.
+- Report exposure (`exposure_pct`) and `return_on_exposure_pct` alongside raw
+  return, and compare against buy-and-hold for the same window. A strategy that
+  holds positions part-time is not comparable to a zero baseline: in a dataset
+  split into a rising and a falling half, a mostly-flat strategy will appear to
+  "beat the market" in the falling half without doing anything. Raw return vs
+  zero alone is not evidence of edge. See `research/rsi_meanrev/README.md`.
 - Run sanity checks for lookahead, data order/duplicates, open positions,
   stop/target direction, risk limits, OCO double exits, and margin rejects.
 - Preserve failed runs and their failure reason.

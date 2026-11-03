@@ -107,6 +107,13 @@ def pooled_trade_metrics(results: Iterable[dict]) -> dict:
         "mean_exposure_pct": round(
             sum(float(item.get("exposure_pct", 0.0)) for item in items) / len(items), 2
         ) if items else 0.0,
+        # Exposure-weighted, not the mean of per-ticker ratios: a ticker with
+        # 1.6% exposure and a +2% return yields a +128% ratio that dominates an
+        # unweighted mean while meaning almost nothing. Derived from the pooled
+        # return so the numerator and denominator describe the same portfolio.
+        "exposure_weighted_return_pct": round(
+            (pooled_pnl / initial * 100) / (sum(float(item.get("exposure_pct", 0.0)) for item in items) / len(items)) * 100, 4
+        ) if items and sum(float(item.get("exposure_pct", 0.0)) for item in items) else None,
     }
 
 

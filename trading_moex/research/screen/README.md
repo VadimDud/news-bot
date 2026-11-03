@@ -85,3 +85,25 @@ than bad luck: one earned everything in a single market year, the other never
 cleared PF 1.0. That is the expected outcome of a multi-strategy scan and the
 argument for not repeating one. Do not re-run this scan — the selection bias is
 exactly what `research/protocol.md` warns against.
+
+## Exposure-adjusted recheck (EXP-003)
+
+RSI-001 concluded that raw return against zero is the wrong test when the
+dataset halves differ by 60 percentage points. EXP-003 therefore re-read both
+rejected strategies with exposure-aware metrics.
+
+| strategy | split | return | exposure | return per exposure | buy&hold |
+|----------|-------|-------:|---------:|--------------------:|---------:|
+| zone_break | train | +3.22% | 13.5% | +23.84% | +32.37% |
+| zone_break | test | -1.59% | 11.8% | -13.46% | -28.30% |
+| rsi | train | +0.43% | 24.3% | +1.78% | +32.37% |
+| rsi | test | -5.99% | 21.1% | -28.41% | -28.30% |
+
+Both keep the same sign in both halves, so the exposure correction confirms
+the rejections instead of overturning them. Note that neither strategy beats
+buy-and-hold in the rising half by any interpretation.
+
+The first attempt at this calculation was itself wrong: averaging per-ticker
+return-on-exposure ratios gave rsi a meaningless +18.45% in 2023, because GAZP
+at 1.6% exposure turned a +2.02% return into a +128.5% ratio. The pooled metric
+is now exposure-weighted and computed from pooled PnL, guarded by a test.

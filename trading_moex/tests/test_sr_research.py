@@ -80,3 +80,20 @@ def test_experiment_spec_defaults_keep_sr_behaviour():
     spec = ExperimentSpec()
     assert spec.strategy == "support_resistance_mtf"
     assert spec.study_id == "SR-001"
+
+
+def test_pooled_exposure_return_is_weighted_not_mean_of_ratios():
+    """A tiny-exposure ticker must not dominate the pooled exposure return."""
+    from app.sr_research import pooled_trade_metrics
+
+    items = [
+        {"initial_cash": 100_000, "final_value": 102_000, "avg_win": 0,
+         "avg_loss": 0, "trades_won": 0, "trades_lost": 0,
+         "total_return_pct": 2.0, "exposure_pct": 1.6},
+        {"initial_cash": 100_000, "final_value": 100_000, "avg_win": 0,
+         "avg_loss": 0, "trades_won": 0, "trades_lost": 0,
+         "total_return_pct": 0.0, "exposure_pct": 20.0},
+    ]
+    pooled = pooled_trade_metrics(items)
+    assert pooled["exposure_weighted_return_pct"] < 20.0
+    assert abs(pooled["exposure_weighted_return_pct"] - 1.0 / 10.8 * 100) < 0.01

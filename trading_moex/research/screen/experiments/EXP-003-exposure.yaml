@@ -1,0 +1,37 @@
+study_id: EXP-003
+name: exposure_adjusted_recheck
+status: completed
+purpose: >-
+  Re-read the zone_break and rsi split results with exposure-aware metrics, as
+  RSI-001 said the raw-return comparison was the wrong test.
+commit: be5d828
+dirty: false
+data:
+  source: data/trader_4h.db
+  period: 1day
+  split_at: "2024-01-01"
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+costs: {commission_per_side: 0.0005, slippage_per_side: 0.0005}
+buy_and_hold:
+  train: 32.37
+  test: -28.30
+results:
+  zone_break:
+    train: {return_pct: 3.22,  exposure_pct: 13.5, exposure_weighted_return_pct: 23.84,  profit_factor: 1.2806}
+    test:  {return_pct: -1.59, exposure_pct: 11.8, exposure_weighted_return_pct: -13.46, profit_factor: 0.7658}
+  rsi:
+    train: {return_pct: 0.43,  exposure_pct: 24.3, exposure_weighted_return_pct: 1.78,   profit_factor: 1.0339}
+    test:  {return_pct: -5.99, exposure_pct: 21.1, exposure_weighted_return_pct: -28.41, profit_factor: 0.5895}
+finding: >-
+  Normalising by exposure does not rescue either strategy. zone_break earns
+  +23.84% per unit of time in market during train and -13.46% in test; rsi
+  moves from +1.78% to -28.41%. Both sign flips were already visible in the raw
+  returns, so the exposure correction confirms the rejections rather than
+  overturning them.
+methodology_defect_found: >-
+  A first attempt averaged per-ticker return-on-exposure ratios and produced a
+  nonsensical +18.45% for rsi in 2023, driven by GAZP at 1.6% exposure whose
+  +2.02% return yields a +128.5% ratio. The pooled figure is now
+  exposure-weighted and derived from pooled PnL, with a regression test pinning
+  the tiny-exposure case.
+verdict: rejections of zone_break and rsi stand

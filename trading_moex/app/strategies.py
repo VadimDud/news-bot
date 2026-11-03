@@ -4520,7 +4520,215 @@ class IctSweepFvgStrategy(RiskAwareStrategy):
             self._open_short_ict()
 
 
+_ATR_EXHAUSTION_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 14),
+    ("extension_mult", 2.0),
+    ("swing_lookback", 3),
+    ("weakness", "engulf"),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("max_hold_bars", 3),
+    ("direction", -1),
+)
+
+
+class AtrExhaustionStrategy(TradeRecordingStrategy):
+    """Шорт на растяжении по ATR с подтверждением свечой ослабления.
+
+    ОТВЕРГНУТА. См. ``research/atr_exhaustion/README.md``.
+
+    Первичная оценка на 1day (945 событий) показывала ход вниз +0.62% за 3
+    бара на медвежьем поглощении после растяжения, но она опиралась на
+    пивот, который в разметке использовался до его подтверждения: фрактал
+    известен только через ``swing_lookback`` баров. После исправления
+    (1834 события) средний ход +0.18%, win 51%, край над контролем +0.13%,
+    доза-ответ исчез. Полный бэктест: PF 0.796, −7.83%, положителен 1 из 10
+    тикеров. Зеркальный лонг хуже: PF 0.860, −5.90%. Недельный профиль
+    после сигнала отстаёт от случайного входа на 0.12 п.п. (шорт) и
+    0.31 п.п. (лонг).
+
+    Оставлена в реестре для воспроизведения. Не включать в живой набор.
+
+    Вход — шорт по закрытию бара-подтверждения (сигнал известен на закрытии),
+    выход — ``max_hold_bars`` баров или SL/TP по ATR.
+
+    ``weakness``: engulf — медвежье поглощение; wick — длинный верхний хвост;
+    red_after_green — первая медвежья после трёх бычьих; any — любое из трёх.
+    ``direction``: -1 = только шорт (по умолчанию), 1 = только лонг.
+    """
+
+    params = _ATR_EXHAUSTION_PARAMS_TUPLE + (("window", 300),)
+
+    def __init__(self):
+        super().__init__()
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        self._sl_order = None
+        self._tp_order = None
+        self._hold = 0
+
+    def _atr_value(self) -> float:
+        val = float(self.atr_ind[0])
+        return 0.0 if val != val or val <= 0 else val
+
+    def _arrays(self) -> tuple[np.ndarray, ...]:
+        look = max(int(self.p.swing_lookback), 1)
+        m = min(int(self.data.buflen()), int(self.p.window))
+        m = max(m, look * 2 + 4)
+        idx = range(m - 1, -1, -1)
+        o = np.array([float(self.data.open[-k]) for k in idx])
+        h = np.array([float(self.data.high[-k]) for k in idx])
+        l = np.array([float(self.data.low[-k]) for k in idx])
+        c = np.array([float(self.data.close[-k]) for k in idx])
+        return o, h, l, c
+
+    def _last_swing_low(self, lows: np.ndarray, look: int) -> float:
+        """Most recent confirmed fractal low, known by the signal bar.
+
+        A bar j is a pivot once ``look`` bars follow it, so the newest usable
+        pivot is at index ``len(lows) - 1 - look``; anything later is future
+        data. Return the most recent such pivot, not the lowest one overall.
+        """
+        last_usable = len(lows) - 1 - look
+        for j in range(last_usable, look - 1, -1):
+            window = lows[j - look:j + look + 1]
+            if len(window) < 2 * look + 1:
+                continue
+            if lows[j] <= window.min():
+                return float(lows[j])
+        return np.nan
+
+    def _weakness(self, o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray) -> bool:
+        mode = str(self.p.weakness)
+        i = len(c) - 1
+        rng = max(h[i] - l[i], 1e-12)
+        upper_wick = h[i] - max(o[i], c[i])
+        is_red = c[i] < o[i]
+        is_green = c[i] > o[i]
+        wick = upper_wick >= 0.5 * rng
+        engulf = (
+            is_red
+            and c[i] < o[i - 1]
+            and abs(c[i] - o[i]) > abs(c[i - 1] - o[i - 1])
+        )
+        red_after = is_red and bool((c[i - 3:i] > o[i - 3:i]).all())
+        if mode == "wick":
+            return wick
+        if mode == "engulf":
+            return engulf
+        if mode == "red_after_green":
+            return red_after
+        return wick or engulf or red_after
+
+    def _signal(self) -> int:
+        atr = self._atr_value()
+        if atr <= 0:
+            return 0
+        look = max(int(self.p.swing_lookback), 1)
+        o, h, l, c = self._arrays()
+        if len(c) < look * 2 + 3:
+            return 0
+        low = self._last_swing_low(l, look)
+        if low != low:
+            return 0
+        extension = (h[-1] - low) / atr
+        if extension < float(self.p.extension_mult):
+            return 0
+        if not self._weakness(o, h, l, c):
+            return 0
+        direction = int(self.p.direction)
+        if direction < 0:
+            return -1
+        if direction > 0:
+            return 1
+        return 0
+
+    def _risk_size(self, price: float, stop_dist: float) -> int:
+        return risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, stop_dist, price
+        )
+
+    def _place_bracket(self) -> None:
+        if self.position.size == 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = abs(self.position.size)
+        if self.position.size > 0:
+            self._sl_order = self.sell(exectype=bt.Order.Stop, price=price - stop_dist, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit,
+                                       price=price + stop_dist * float(self.p.rr_ratio), size=size)
+        else:
+            self._sl_order = self.buy(exectype=bt.Order.Stop, price=price + stop_dist, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit,
+                                      price=price - stop_dist * float(self.p.rr_ratio), size=size)
+
+    def _cancel_bracket(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        if self.position.size:
+            self._cancel_bracket()
+            self._place_bracket()
+        else:
+            self._cancel_bracket()
+            self._hold = 0
+
+    def _close(self) -> None:
+        self._cancel_bracket()
+        if self.position.size:
+            self.close()
+
+    def next(self):
+        if self.position.size:
+            self._hold += 1
+            max_hold = int(self.p.max_hold_bars)
+            if max_hold > 0 and self._hold >= max_hold:
+                self._close()
+            return
+        direction = self._signal()
+        if direction == 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = self._risk_size(price, stop_dist)
+        if size <= 0:
+            return
+        self._hold = 0
+        if direction > 0:
+            self.buy(size=size)
+        else:
+            self.sell(size=size)
+
+
 STRATEGIES = {
+    "atr_exhaustion": {
+        "name": "Растяжение ATR + свеча ослабления (шорт)",
+        "cls": AtrExhaustionStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 14},
+            {"key": "extension_mult", "label": "Растяжение от свинга, ATR", "type": "float", "default": 2.0},
+            {"key": "swing_lookback", "label": "Окно фрактала", "type": "int", "default": 3},
+            {"key": "weakness", "label": "Ослабление: engulf | wick | red_after_green | any", "type": "str", "default": "engulf"},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+            {"key": "max_hold_bars", "label": "Макс. удержание, баров", "type": "int", "default": 3},
+            {"key": "direction", "label": "Направление: -1=шорт, 1=лонг", "type": "int", "default": -1},
+        ],
+    },
     "sma_cross": {
         "name": "SMA Crossover",
         "cls": SmaCross,

@@ -1,0 +1,36 @@
+study: ATRX-002
+title: Short on ATR extension plus bearish engulfing
+status: rejected
+conclusion: >-
+  Rejected after a look-ahead defect in swing marking was fixed. Corrected
+  edge +0.13% over control and negative at 20 bp. Full backtest PF 0.796,
+  -7.83%, positive on 1 of 10 tickers.
+period: 1day
+split_at: "2026-04-01"
+commission: 0.0005
+slippage: 0.0005
+tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+params:
+  risk_pct: 1.0
+  atr_period: 14
+  extension_mult: 2.0
+  swing_lookback: 3
+  weakness: engulf
+  atr_stop_mult: 1.5
+  rr_ratio: 2.0
+  max_hold_bars: 3
+  direction: -1
+results:
+  full: {trades: 1253, won_pct: 43.0, profit_factor: 0.796, return_pct: -7.83, exposure_pct: 19.7}
+  positive_tickers: 1
+  events_corrected: 1834
+  mean_forward_pct: 0.18
+  win_pct: 51.0
+  edge_over_control_pct: 0.13
+  edge_at_20bp_pct: -0.016
+defect: >-
+  The original event study (945 events, +0.62% mean, dose-response) read the
+  swing pivot at bar p although a fractal confirms only swing_lookback bars
+  later, and searched a range that extended into future bars. Dependence was
+  concentrated in the bucket the defect inflated; correcting it doubled the
+  event count and collapsed the edge.

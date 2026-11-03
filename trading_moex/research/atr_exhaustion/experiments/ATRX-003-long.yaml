@@ -1,0 +1,40 @@
+study: ATRX-003-LONG
+title: Long mirror of ATR exhaustion plus bullish engulfing
+status: rejected
+conclusion: >-
+  Mirror construction rejected harder than the short. PF 0.860, -5.90%,
+  underperforms a random long by 0.31 pp on the weekly horizon with no
+  favourable day.
+period: 1day
+split_at: "2026-04-01"
+commission: 0.0005
+slippage: 0.0005
+tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+params:
+  risk_pct: 1.0
+  atr_period: 14
+  extension_mult: 2.0
+  swing_lookback: 3
+  weakness: engulf
+  atr_stop_mult: 1.5
+  rr_ratio: 2.0
+  max_hold_bars: 3
+  direction: 1
+results:
+  pooled:
+    initial_cash: 1000000.0
+    final_value: 941018.6
+    return_pct: -5.8981
+    trades: 1282
+    won_pct: 49.06
+    profit_factor: 0.8595
+    exposure_pct: 20.21
+  events: 1574
+  mean_forward_pct: -0.162
+  win_pct: 46.7
+  edge_over_random_long_pct: -0.172
+  week_edge_over_random_day5_pct: -0.308
+defect: >-
+  Same swing-pivot timing as ATRX-002; fixed before this run. The asymmetry
+  between the two directions (short +0.184% vs long -0.162% over 3 bars) is
+  market drift, not a reversal signal, and the long side makes that visible.

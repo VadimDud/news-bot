@@ -16,6 +16,7 @@ run outputs belong under `artifacts/runs/` and are intentionally not committed.
 | `LEVEL-TEST-001` | Price levels exist in OHLCV beyond what random price lines produce | archived | rejected; seven formulations, every apparent effect failed a matched control | `levels_event_study/` |
 | `DS-001` / `SF-001` | A fast departure from a level, as momentum or as exhaustion, is tradeable | archived | rejected; momentum -22.88% realised, fade -65.76% net, all 10 tickers | `departure_speed/` |
 | `VOL-001` | Breakout volume predicts continuation (or reversal) | archived | rejected; sign flips by timeframe, intraday effect below costs and unstable | `volume_effect/` |
+| `ATRX-002` / `ATRX-003` | A move of N ATR from a swing plus a reversal candle is exhaustion; short after a rise, long after a fall | archived | rejected; a look-ahead defect inflated the swing study, corrected edge +0.13% is below costs, both directions lose (PF 0.796 / 0.860); extension forecasts volatility, not direction | `atr_exhaustion/` |
 
 ## Overall State
 
@@ -40,6 +41,16 @@ built matters less than usual.
 The corollary for cost: absorption and resting-order execution are only visible
 in the order book and the trade tape. Either acquire that data, or stop working
 on level-based intraday ideas on this feed.
+
+`ATRX-002`/`ATRX-003` is the load-bearing result for self-criticism. It was the
+strongest finding of the sequence — dose-response, 10 of 11 tickers, surviving a
+20 bp cost — and it was wrong: the swing pivot was read before a fractal could
+confirm it. Correcting the timing doubled the event count and collapsed the
+edge. The lesson is not about ATR. It is that a convenient result is a suspect,
+and that the riskiest error in this work is in one's own measurement code, not
+in the market. ATR extension forecasts volatility, not direction: both the short
+and the long lose once a random baseline is applied. Before any future
+swing-based study, place the pivot at `len - 1 - look`.
 
 ## Required Files
 

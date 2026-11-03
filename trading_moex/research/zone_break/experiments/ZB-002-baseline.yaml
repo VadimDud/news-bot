@@ -1,0 +1,61 @@
+study_id: ZB-002
+name: zone_break_continuation_baseline
+status: rejected
+hypothesis: >-
+  A 15min close breaking the prior 20-bar high with a strong body (>=1x ATR and
+  >=60% of range) reaches 2R before the 1.5-ATR stop, after 0.05% commission and
+  0.05% slippage per side, in both chronological halves.
+falsified: false
+rejected_despite_positive_return: true
+rejection_reason: >-
+  Insufficient statistical power. 59 trades with PF 1.325 give +1.16% over
+  thirteen months; the interval spans zero. Train holds only 8 trades and turns
+  negative at higher cost. Wide rr_ratio is required for positivity (rr=1.5
+  gives +0.04%), which is the signature of a few lucky winners.
+commit: ba4217e
+dirty: false
+data:
+  source: data/trader_4h.db
+  period: 15min
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+  window: 2025-08-28 .. 2026-09-21
+  split_at: "2026-04-01"
+  timezone: {storage: UTC-naive, market: Europe/Moscow}
+strategy: zone_break
+params:
+  risk_pct: 1.0
+  atr_period: 20
+  atr_stop_mult: 1.5
+  rr_ratio: 2.0
+  direction: 1
+  zone: 20
+  strong_candle: 1
+  atr_k: 1.0
+  body_ratio_min: 0.6
+  exit_zone: 0
+costs: {commission_per_side: 0.0005, slippage_per_side: 0.0005}
+runs:
+  full:  {run: ZB-002-full,  return_pct: 1.16,  profit_factor: 1.3251, trades: 59, checks_passed: true}
+  train: {run: ZB-002-train, return_pct: 0.09,  profit_factor: 1.2223, trades: 8,  checks_passed: true}
+  test:  {run: ZB-002-test,  return_pct: 1.08,  profit_factor: 1.3429, trades: 51, checks_passed: true}
+per_ticker:
+  CHMF: {return_pct: -4.77, profit_factor: 0.44, trades: 9}
+  GAZP: {return_pct: 1.46,  profit_factor: 1.83, trades: 4}
+  LKOH: {return_pct: 5.76,  profit_factor: 2.26, trades: 10}
+  MOEX: {return_pct: 2.05,  profit_factor: null, trades: 1}
+  MTSS: {return_pct: 0.00,  profit_factor: 0.0,  trades: 0}
+  NLMK: {return_pct: 0.68,  profit_factor: 1.11, trades: 9}
+  NVTK: {return_pct: 4.50,  profit_factor: 2.84, trades: 7}
+  SBER: {return_pct: -1.30, profit_factor: 0.0,  trades: 1}
+  T:    {return_pct: -0.04, profit_factor: 0.98, trades: 4}
+  TATN: {return_pct: 3.29,  profit_factor: 1.37, trades: 14}
+diagnostic_sensitivity_uncommitted: true
+sensitivity_note: >-
+  Numbers below came from the throwaway scan harness, not the committed runner.
+  zone 10/15/20/30/40 -> +0.76/+0.95/+1.16/+1.32/+1.17%;
+  body_ratio 0.4/0.5/0.6/0.7 -> +1.75/+1.69/+1.16/+0.89%;
+  rr 1.5/2.0/2.5/3.0 -> +0.04/+1.16/+1.03/+0.75%.
+next_step: >-
+  Extend candle history to >=5 years and re-run the identical configuration
+  through scripts/research_strategy; require pooled PF > 1.0 in both halves with
+  trade count in the hundreds. Do not sweep this sample further.

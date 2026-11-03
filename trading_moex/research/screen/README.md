@@ -68,7 +68,10 @@ proper study".
 
 ## Next Step
 
-Open `zone_break` as its own study with a predeclared hypothesis and gates, and
-re-run it through a committed harness so the numbers are reproducible. Do not
-trade it, and do not repeat this multi-strategy scan — the selection bias is
-exactly what `research/protocol.md` warns against.
+Done: `zone_break` was opened as study `ZB-002` in `research/zone_break/` and
+re-run through the committed harness (`scripts/research_strategy.py`), which
+reproduced the diagnostic figures exactly. Verdict there is **rejected for
+statistical power**, not for sign — 59 trades cannot separate the result from
+zero, and the wide-`rr` requirement looks like a few lucky winners. Do not trade
+it, and do not repeat this multi-strategy scan — the selection bias is exactly
+what `research/protocol.md` warns against.

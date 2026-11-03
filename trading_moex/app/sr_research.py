@@ -139,6 +139,7 @@ def run_experiment(spec: ExperimentSpec, param_overrides: dict | None = None) ->
             cash=spec.cash_per_ticker,
             commission=spec.commission,
             slippage=spec.slippage,
+            ticker=ticker,
         )
         results.append({"ticker": ticker, "status": "ok", "n_bars": len(frame), **result})
     valid = [result for result in results if result["status"] == "ok"]

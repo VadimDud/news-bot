@@ -61,14 +61,16 @@ def run_backtest(
     cash: float = 100_000.0,
     commission: float = 0.0005,
     slippage: float = 0.0,
+    ticker: str | None = None,
 ) -> dict:
     """Выполнить бэктест на переданных OHLCV-данных (datetime-индекс).
 
     ``slippage`` — доля от цены исполнения, ухудшающая каждую сделку
-    (0.0005 = 0.05%). Блокирующий вызов — запускать в отдельном потоке.
+    (0.0005 = 0.05%). ``ticker`` only labels open positions in the report;
+    it does not affect the run. Блокирующий вызов — запускать в отдельном потоке.
     """
     cerebro = _setup_cerebro(strategy_cls, params, cash, commission, slippage=slippage)
-    cerebro.adddata(bt.feeds.PandasData(dataname=df))
+    cerebro.adddata(bt.feeds.PandasData(dataname=df, name=ticker or "data0"))
     strat = cerebro.run(runonce=False)[0]
     return _collect_metrics(cerebro, strat, cash, len(df))
 
@@ -90,7 +92,7 @@ def run_backtest_mtf(
     and stay synchronised bar-by-bar; otherwise ``df_slow`` is added verbatim.
     """
     cerebro = _setup_cerebro(strategy_cls, params, cash, commission)
-    data = bt.feeds.PandasData(dataname=df_fast)
+    data = bt.feeds.PandasData(dataname=df_fast, name="fast")
     cerebro.adddata(data)
     if slow_timeframe and int(slow_timeframe) > 0:
         cerebro.resampledata(
@@ -101,7 +103,7 @@ def run_backtest_mtf(
             boundoff=1,
         )
     else:
-        cerebro.adddata(bt.feeds.PandasData(dataname=df_slow))
+        cerebro.adddata(bt.feeds.PandasData(dataname=df_slow, name="slow"))
     strat = cerebro.run(runonce=False)[0]
     return _collect_metrics(cerebro, strat, cash, len(df_fast))
 
@@ -132,12 +134,25 @@ def run_portfolio_backtest(
     cerebro = _setup_cerebro(strategy_cls, params, cash, commission, extra_params=extra or None)
     n_bars = 0
     for ticker, df in data_map.items():
-        feed = bt.feeds.PandasData(dataname=df)
-        feed._name = ticker
-        cerebro.adddata(feed)
+        cerebro.adddata(bt.feeds.PandasData(dataname=df, name=ticker))
         n_bars = max(n_bars, len(df))
     strat = cerebro.run(runonce=False)[0]
     return _collect_metrics(cerebro, strat, cash, n_bars)
+
+
+def _feed_name(data) -> str:
+    """Resolve the ticker label of a backtrader feed without truth-testing it.
+
+    ``_dataname`` holds the source DataFrame, so it must never be used in a
+    boolean ``or`` chain.
+    """
+    name = getattr(data, "_name", None)
+    if isinstance(name, str) and name:
+        return name
+    dataname = getattr(data, "_dataname", None)
+    if isinstance(dataname, str) and dataname:
+        return dataname
+    return ""
 
 
 def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
@@ -176,7 +191,7 @@ def _collect_metrics(cerebro, strat, cash: float, n_bars: int) -> dict:
         position = strat.getposition(data)
         if position.size:
             open_positions.append({
-                "ticker": getattr(data, "_name", None) or data._name,
+                "ticker": _feed_name(data),
                 "size": float(position.size),
                 "price": round(float(position.price), 8),
             })

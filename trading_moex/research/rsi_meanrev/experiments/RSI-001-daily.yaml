@@ -1,0 +1,42 @@
+study_id: RSI-001
+name: rsi_mean_reversion_daily
+status: rejected
+purpose: >-
+  Test the one genuinely counter-trend family in the registry, on a timeframe
+  where the hypothesis is meaningful, before writing a new strategy.
+hypothesis: >-
+  Daily RSI(14) dropping below 30 marks short-term oversold conditions that
+  revert, so buying the dip and selling at 70 is profitable after 0.05%
+  commission and 0.05% slippage per side, in both chronological halves.
+commit: 61bd4b8
+dirty: false
+why_daily: >-
+  The diagnostic scan ran this strategy on 15min and produced 2644 trades,
+  which measures noise rather than the mean-reversion hypothesis. Daily candles
+  give 5.7 years and a sample where an RSI swing means something.
+strategy: rsi
+params: {period: 14, buy_threshold: 30, sell_threshold: 70, risk_pct: 1.0,
+         atr_period: 14, atr_stop_mult: 1.5, rr_ratio: 2.0, trend_period: 0}
+data:
+  source: data/trader_4h.db
+  period: 1day
+  window: 2021-01-04 .. 2026-09-11
+  split_at: "2024-01-01"
+  tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+costs: {commission_per_side: 0.0005, slippage_per_side: 0.0005}
+runs:
+  full:  {return_pct: -5.21, profit_factor: 0.7689, trades: 316}
+  train: {return_pct: 0.43,  profit_factor: 1.0339, trades: 123}
+  test:  {return_pct: -5.99, profit_factor: 0.5895, trades: 191}
+yearly:
+  2021: {return_pct: 0.80,  profit_factor: 1.3421, trades: 26}
+  2022: {return_pct: -0.25, profit_factor: 0.9062, trades: 47}
+  2023: {return_pct: 0.02,  profit_factor: 0.9023, trades: 20}
+  2024: {return_pct: -1.32, profit_factor: 0.7366, trades: 70}
+  2025: {return_pct: -0.57, profit_factor: 0.8384, trades: 50}
+verdict: rejected
+elimination_reason: >-
+  Profit factor sits near or below 1.0 in every year and the out-of-sample half
+  loses 5.99%. Unlike the breakout strategies, this is not concentration in one
+  window: the weakness is uniform, which is what a true absence of edge looks
+  like rather than an artefact.

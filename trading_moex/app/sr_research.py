@@ -42,6 +42,8 @@ class ExperimentSpec:
     split: str = "full"
     split_at: str = "2026-04-01"
     tickers: tuple[str, ...] = DEFAULT_TICKERS
+    strategy: str = "support_resistance_mtf"
+    study_id: str = "SR-001"
 
 
 def load_candles(db_path: str, ticker: str, period: str) -> pd.DataFrame:
@@ -105,11 +107,25 @@ def pooled_trade_metrics(results: Iterable[dict]) -> dict:
     }
 
 
-def run_experiment(spec: ExperimentSpec) -> dict:
-    """Run one immutable experiment and return a JSON-serializable report."""
-    item = STRATEGIES["support_resistance_mtf"]
+def resolve_params(item: dict, overrides: dict | None = None) -> dict:
+    """Resolve registry defaults for one strategy, then apply explicit overrides."""
     params = {parameter["key"]: parameter["default"] for parameter in item["params"]}
-    params.update({"scenario_mode": spec.scenario_mode, "close_at_eod": 0})
+    if overrides:
+        unknown = set(overrides) - set(params)
+        if unknown:
+            raise ValueError(f"unknown params for {item['name']}: {sorted(unknown)}")
+        params.update(overrides)
+    return params
+
+
+def run_experiment(spec: ExperimentSpec, param_overrides: dict | None = None) -> dict:
+    """Run one immutable experiment and return a JSON-serializable report."""
+    if spec.strategy not in STRATEGIES:
+        raise ValueError(f"unknown strategy: {spec.strategy}")
+    item = STRATEGIES[spec.strategy]
+    params = resolve_params(item, param_overrides)
+    if spec.strategy == "support_resistance_mtf":
+        params.update({"scenario_mode": spec.scenario_mode, "close_at_eod": 0})
     results = []
     for ticker in spec.tickers:
         frame = select_window(load_candles(spec.db_path, ticker, spec.period), spec)
@@ -128,7 +144,7 @@ def run_experiment(spec: ExperimentSpec) -> dict:
     valid = [result for result in results if result["status"] == "ok"]
     return {
         "spec": asdict(spec),
-        "strategy": "support_resistance_mtf",
+        "strategy": spec.strategy,
         "params": params,
         "data_sha256": data_fingerprint(spec),
         "pooled": pooled_trade_metrics(valid),
@@ -218,7 +234,8 @@ def write_run_artifacts(report: dict, run_dir: str | Path, command: str | None =
     ]
     manifest = {
         "run_id": destination.name,
-        "study_id": "SR-001",
+        "study_id": report.get("spec", {}).get("study_id", "SR-001"),
+        "strategy": report.get("strategy"),
         "timezone": {
             "storage": "UTC-naive",
             "market": MARKET_TZ_NAME,

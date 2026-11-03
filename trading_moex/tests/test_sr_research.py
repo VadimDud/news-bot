@@ -51,3 +51,32 @@ def test_write_run_artifacts_creates_manifest_metrics_checks_and_ledger(tmp_path
     assert execution["commission_per_side"] == 0.0005
     assert execution["slippage_per_side"] == 0.0005
     assert execution["spread"] == "not_modeled"
+
+
+def test_resolve_params_uses_registry_defaults_and_rejects_unknown_keys():
+    from app.sr_research import resolve_params
+    from app.strategies import STRATEGIES as registry
+
+    item = registry["zone_break"]
+    params = resolve_params(item)
+    assert params["zone"] == 20
+    assert resolve_params(item, {"zone": 40})["zone"] == 40
+    import pytest
+
+    with pytest.raises(ValueError):
+        resolve_params(item, {"not_a_param": 1})
+
+
+def test_run_experiment_rejects_unknown_strategy():
+    import pytest
+
+    from app.sr_research import run_experiment
+
+    with pytest.raises(ValueError):
+        run_experiment(ExperimentSpec(strategy="does_not_exist", tickers=("SBER",)))
+
+
+def test_experiment_spec_defaults_keep_sr_behaviour():
+    spec = ExperimentSpec()
+    assert spec.strategy == "support_resistance_mtf"
+    assert spec.study_id == "SR-001"

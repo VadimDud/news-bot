@@ -1,0 +1,53 @@
+study: LEVEL-TEST-001
+title: Do price levels exist beyond random lines?
+status: rejected
+conclusion: no formulation differs from random price lines under a matched control
+method: event study, no strategy wrapper
+question: is the phenomenon present, independently of any strategy built on it
+formulations:
+  - id: swing_clusters
+    control: neighbouring-level midpoint
+    real_move_pct: 4.106
+    control_move_pct: 4.078
+    ratio: 1.007
+    tickers_favouring_real: "5/11"
+    verdict: circular, no effect
+  - id: wick_tips
+    control: random prices, same ticker
+    real_clustered: 0.827
+    control_clustered: 0.837
+    tickers_real_gt_control: "3/11"
+    verdict: no effect
+  - id: absorption
+    control: ordinary high-volume bars
+    absorption_forward_pct: 3.598
+    control_forward_pct: 3.645
+    ratio: 0.987
+    reversal_after_pct: -0.043
+    verdict: no footprint
+  - id: fractal_flat_4h
+    control: flat-bar midpoints
+    hit_rate: 0.561
+    bounce_pct: 0.253
+    tickers: "9/9"
+    verdict: artifact, flat threshold forced (2.5 ATR empty, 15min yields 0.0% flat)
+  - id: level_migration
+    control: static levels, same data
+    migrating_hit: 0.494
+    static_hit: 0.495
+    verdict: no difference
+  - id: confirmation_by_touch
+    control: random price lines and random fractals
+    first_run_hit: 0.517
+    matched_control:
+      confirmed_hit: 0.495
+      random_lines_hit: 0.494
+      random_fractals_hit: 0.494
+    active_bars_pct: 83.8
+    verdict: artifact, activity filter applied to one side only
+  - id: departure_speed_bounce
+    control: random price lines
+    real: {fast_atr: 3.78, fast_break_pct: 59.5, slow_atr: 1.21, slow_break_pct: 94.4, corr: 0.594}
+    control: {fast_atr: 4.31, fast_break_pct: 60.0, slow_atr: 1.07, slow_break_pct: 94.0, corr: 0.595}
+    verdict: volatility autocorrelation, not a level effect
+data_limitation: absorption and resting-order execution are not observable in OHLCV

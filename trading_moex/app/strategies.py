@@ -3950,6 +3950,374 @@ class ZoneBreakStrategy(TradeRecordingStrategy):
                 self._open_short(close)
 
 
+_DEPARTURE_SPEED_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("lookback", 4),
+    ("speed_threshold", 0.35),
+    ("baseline_bars", 60),
+    ("atr_stop_mult", 1.5),
+    ("rr_ratio", 2.0),
+    ("direction", 0),
+    ("max_hold_bars", 0),
+)
+
+
+class DepartureSpeedStrategy(TradeRecordingStrategy):
+    """Торговля по скорости ухода цены от локального экстремума.
+
+    Гипотеза: у истинного уровня цена уходит быстро, а медленный дрейф
+    предсказывает пробой. Скорость измеряется как доля ATR, которую цена
+    проходит за ``lookback`` баров в направлении от недавнего экстремума.
+
+    Вход только когда скорость ПРЕВЫШАЕТ норму самой бумаги
+    (``speed_threshold`` умножить на медианную скорость за ``baseline_bars``),
+    иначе это обычная волатильность, а не событие. Направление — по направлению
+    ухода, то есть это momentum-продолжение, а не отскок.
+
+    ``direction``: 1 = только лонг, -1 = только шорт, 0 = оба.
+    Выход: SL/TP по ATR, опционально ``max_hold_bars``.
+    """
+
+    params = _DEPARTURE_SPEED_PARAMS_TUPLE + (("window", 300),)
+
+    def __init__(self):
+        super().__init__()
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        self._sl_order = None
+        self._tp_order = None
+        self._hold = 0
+
+    def _atr_value(self) -> float:
+        val = float(self.atr_ind[0])
+        return 0.0 if val != val or val <= 0 else val
+
+    def _closes(self) -> np.ndarray:
+        m = min(int(self.data.buflen()), int(self.p.window))
+        m = max(m, int(self.p.lookback) + int(self.p.baseline_bars) + 2)
+        line = self.data.close
+        return np.array([float(line[-k]) for k in range(m - 1, -1, -1)])
+
+    def _speed(self, closes: np.ndarray, bars: int) -> np.ndarray:
+        """Per-bar departure speed in ATR units over a rolling window."""
+        if len(closes) <= bars:
+            return np.array([])
+        return np.abs(closes[bars:] - closes[:-bars]) / bars
+
+    def _signal(self) -> int:
+        """+1 long, -1 short, 0 none. Uses only bars up to the current close."""
+        atr = self._atr_value()
+        if atr <= 0:
+            return 0
+        lookback = max(int(self.p.lookback), 1)
+        baseline = max(int(self.p.baseline_bars), lookback + 2)
+        closes = self._closes()
+        if len(closes) < baseline + lookback + 1:
+            return 0
+        speeds = self._speed(closes, lookback) / atr
+        if len(speeds) < baseline:
+            return 0
+        now = float(speeds[-1])
+        norm = float(np.median(speeds[-baseline:]))
+        if norm <= 0:
+            return 0
+        if now < float(self.p.speed_threshold) * norm:
+            return 0
+        # Direction from the sign of the move; require the move to be away
+        # from the recent extreme, i.e. a fresh breakout bar.
+        recent = closes[-lookback - 1:]
+        if recent[-1] > recent[:-1].max():
+            return 1
+        if recent[-1] < recent[:-1].min():
+            return -1
+        return 0
+
+    def _risk_size(self, price: float, stop_dist: float) -> int:
+        return risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, stop_dist, price
+        )
+
+    def _place_bracket(self) -> None:
+        if self.position.size == 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = abs(self.position.size)
+        if self.position.size > 0:
+            self._sl_order = self.sell(exectype=bt.Order.Stop, price=price - stop_dist, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit,
+                                       price=price + stop_dist * float(self.p.rr_ratio), size=size)
+        else:
+            self._sl_order = self.buy(exectype=bt.Order.Stop, price=price + stop_dist, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit,
+                                      price=price - stop_dist * float(self.p.rr_ratio), size=size)
+
+    def _cancel_bracket(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        size = self.position.size
+        if order.isbuy():
+            if size > 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+                self._hold = 0
+        else:
+            if size < 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+                self._hold = 0
+
+    def _close(self) -> None:
+        self._cancel_bracket()
+        if self.position.size:
+            self.close()
+
+    def next(self):
+        if self.position.size:
+            self._hold += 1
+            max_hold = int(self.p.max_hold_bars)
+            if max_hold > 0 and self._hold >= max_hold:
+                self._close()
+            return
+        direction = self._signal()
+        if direction == 0:
+            return
+        if direction > 0 and int(self.p.direction) < 0:
+            return
+        if direction < 0 and int(self.p.direction) > 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = self._risk_size(price, stop_dist)
+        if size <= 0:
+            return
+        self._hold = 0
+        if direction > 0:
+            self.buy(size=size)
+        else:
+            self.sell(size=size)
+
+
+_SPEED_FADE_PARAMS_TUPLE = (
+    ("risk_pct", 1.0),
+    ("atr_period", 20),
+    ("lookback", 4),
+    ("speed_threshold", 0.35),
+    ("baseline_bars", 60),
+    ("entry_wait", 1),
+    ("atr_stop_mult", 2.5),
+    ("rr_ratio", 1.5),
+    ("direction", 0),
+    ("max_hold_bars", 48),
+)
+
+
+class SpeedFadeStrategy(TradeRecordingStrategy):
+    """Контрдвижение против быстрого ухода цены от локального экстремума.
+
+    Данные said: after a FAST departure from a level the price does NOT continue
+    in 59.5% of cases - it comes back. The momentum version above bets on
+    continuation and loses. This bets on the return:
+
+      - a fast one-sided push away from the recent extreme (speed above
+        ``speed_threshold`` times the ticker's median speed) is exhaustion
+      - wait ``entry_wait`` bars for the push to stall
+      - enter AGAINST the push, stop beyond the extreme, target the origin
+
+    If the push keeps running, the stop takes us out; that is the residual
+    40.5% of outcomes. ``direction``: 1 = only fade up-pushes (short),
+    -1 = only fade down-pushes (long), 0 = both.
+    """
+
+    params = _SPEED_FADE_PARAMS_TUPLE + (("window", 300),)
+
+    def __init__(self):
+        super().__init__()
+        self.atr_ind = bt.indicators.ATR(self.data, period=int(self.p.atr_period))
+        self._sl_order = None
+        self._tp_order = None
+        self._hold = 0
+        self._pending = 0
+        self._pending_extreme = None
+        self._wait = 0
+
+    def _atr_value(self) -> float:
+        val = float(self.atr_ind[0])
+        return 0.0 if val != val or val <= 0 else val
+
+    def _closes(self) -> np.ndarray:
+        m = min(int(self.data.buflen()), int(self.p.window))
+        m = max(m, int(self.p.lookback) + int(self.p.baseline_bars) + 2)
+        line = self.data.close
+        return np.array([float(line[-k]) for k in range(m - 1, -1, -1)])
+
+    def _signal(self) -> tuple[int, float]:
+        """Return (push direction, extreme price). Push uses only known bars."""
+        atr = self._atr_value()
+        if atr <= 0:
+            return 0, 0.0
+        lookback = max(int(self.p.lookback), 1)
+        baseline = max(int(self.p.baseline_bars), lookback + 2)
+        closes = self._closes()
+        if len(closes) < baseline + lookback + 1:
+            return 0, 0.0
+        speeds = np.abs(closes[lookback:] - closes[:-lookback]) / lookback / atr
+        if len(speeds) < baseline:
+            return 0, 0.0
+        now = float(speeds[-1])
+        norm = float(np.median(speeds[-baseline:]))
+        if norm <= 0 or now < float(self.p.speed_threshold) * norm:
+            return 0, 0.0
+        recent = closes[-lookback - 1:]
+        if recent[-1] > recent[:-1].max():
+            return 1, float(recent[-1])
+        if recent[-1] < recent[:-1].min():
+            return -1, float(recent[-1])
+        return 0, 0.0
+
+    def _risk_size(self, price: float, stop_dist: float) -> int:
+        return risk_module.position_size(
+            float(self.broker.getvalue()), float(self.p.risk_pct) / 100.0, stop_dist, price
+        )
+
+    def _place_bracket(self) -> None:
+        if self.position.size == 0:
+            return
+        price = float(self.data.close[0])
+        stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+        size = abs(self.position.size)
+        if self.position.size > 0:
+            self._sl_order = self.sell(exectype=bt.Order.Stop, price=price - stop_dist, size=size)
+            self._tp_order = self.sell(exectype=bt.Order.Limit,
+                                       price=price + stop_dist * float(self.p.rr_ratio), size=size)
+        else:
+            self._sl_order = self.buy(exectype=bt.Order.Stop, price=price + stop_dist, size=size)
+            self._tp_order = self.buy(exectype=bt.Order.Limit,
+                                      price=price - stop_dist * float(self.p.rr_ratio), size=size)
+
+    def _cancel_bracket(self) -> None:
+        for order in (self._sl_order, self._tp_order):
+            if order is not None and order.status in (
+                bt.Order.Submitted, bt.Order.Accepted, bt.Order.Partial
+            ):
+                self.cancel(order)
+        self._sl_order = None
+        self._tp_order = None
+
+    def notify_order(self, order):
+        if order.status != bt.Order.Completed:
+            if order is self._sl_order:
+                self._sl_order = None
+            if order is self._tp_order:
+                self._tp_order = None
+            return
+        size = self.position.size
+        if order.isbuy():
+            if size > 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+                self._hold = 0
+        else:
+            if size < 0:
+                self._cancel_bracket()
+                self._place_bracket()
+            elif size == 0:
+                self._cancel_bracket()
+                self._hold = 0
+
+    def _close(self) -> None:
+        self._cancel_bracket()
+        if self.position.size:
+            self.close()
+
+    def next(self):
+        if self.position.size:
+            self._hold += 1
+            max_hold = int(self.p.max_hold_bars)
+            if max_hold > 0 and self._hold >= max_hold:
+                self._close()
+            return
+
+        # Waiting out the push after the stall delay.
+        if self._pending != 0:
+            self._wait += 1
+            if self._wait < int(self.p.entry_wait):
+                return
+            push = self._pending
+            extreme = self._pending_extreme
+            self._pending = 0
+            self._pending_extreme = None
+            self._wait = 0
+            price = float(self.data.close[0])
+            # Fade the push: enter against its direction.
+            if push > 0:
+                if int(self.p.direction) > 0:
+                    return
+                side = -1
+            else:
+                if int(self.p.direction) < 0:
+                    return
+                side = 1
+            stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+            # Stop goes beyond the extreme that started the push.
+            if extreme:
+                stop_dist = max(stop_dist, abs(price - extreme) * 1.1)
+            size = self._risk_size(price, stop_dist)
+            if size <= 0:
+                return
+            self._hold = 0
+            if side > 0:
+                self.buy(size=size)
+            else:
+                self.sell(size=size)
+            return
+
+        push, extreme = self._signal()
+        if push == 0:
+            return
+        if push > 0 and int(self.p.direction) > 0:
+            return
+        if push < 0 and int(self.p.direction) < 0:
+            return
+        if int(self.p.entry_wait) <= 0:
+            # Immediate entry, no stall confirmation.
+            price = float(self.data.close[0])
+            stop_dist = max(self._atr_value() * float(self.p.atr_stop_mult), price * 0.005)
+            if extreme:
+                stop_dist = max(stop_dist, abs(price - extreme) * 1.1)
+            size = self._risk_size(price, stop_dist)
+            if size <= 0:
+                return
+            self._hold = 0
+            if push > 0:
+                self.sell(size=size)
+            else:
+                self.buy(size=size)
+            return
+        self._pending = push
+        self._pending_extreme = extreme
+        self._wait = 0
+
+
 # Параметры ICT (Liquidity Sweep + FVG). Разворотный сетап: sweep пула
 # ликвидности → displacement/FVG → ретест по 50 % (Equilibrium) → вход.
 # min_rr=2.5 — жёсткий порог по ТЗ (риск/прибыль ≥ 1:2.5). Фильтры
@@ -4500,6 +4868,37 @@ STRATEGIES = {
             {"key": "v_dir", "label": "Требовать согласие скорости (1 = да)", "type": "int", "default": 1},
             {"key": "cool_bars", "label": "Выход: баров против позиции", "type": "int", "default": 2},
             {"key": "min_hold", "label": "Мин. удержание, баров", "type": "int", "default": 0},
+        ],
+    },
+    "departure_speed": {
+        "name": "Скорость ухода от экстремума (momentum)",
+        "cls": DepartureSpeedStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "lookback", "label": "Окно скорости, баров", "type": "int", "default": 4},
+            {"key": "speed_threshold", "label": "Порог: скорость / медиана", "type": "float", "default": 0.35},
+            {"key": "baseline_bars", "label": "База нормы, баров", "type": "int", "default": 60},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 1.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 2.0},
+            {"key": "direction", "label": "Направление: 1=лонг, -1=шорт, 0=оба", "type": "int", "default": 0},
+            {"key": "max_hold_bars", "label": "Макс. удержание, баров (0 = без лимита)", "type": "int", "default": 0},
+        ],
+    },
+    "speed_fade": {
+        "name": "Фейд быстрого ухода (контрдвижение)",
+        "cls": SpeedFadeStrategy,
+        "params": [
+            {"key": "risk_pct", "label": "Риск на сделку, %", "type": "float", "default": 1.0},
+            {"key": "atr_period", "label": "Период ATR", "type": "int", "default": 20},
+            {"key": "lookback", "label": "Окно скорости, баров", "type": "int", "default": 4},
+            {"key": "speed_threshold", "label": "Порог: скорость / медиана", "type": "float", "default": 0.35},
+            {"key": "baseline_bars", "label": "База нормы, баров", "type": "int", "default": 60},
+            {"key": "entry_wait", "label": "Ждать после толчка, баров", "type": "int", "default": 1},
+            {"key": "atr_stop_mult", "label": "Стоп, ATR", "type": "float", "default": 2.5},
+            {"key": "rr_ratio", "label": "Тейк / стоп (R:R)", "type": "float", "default": 1.5},
+            {"key": "direction", "label": "Направление: 1=шортить толчки, -1=покупать проливы, 0=оба", "type": "int", "default": 0},
+            {"key": "max_hold_bars", "label": "Макс. удержание, баров (0 = без лимита)", "type": "int", "default": 48},
         ],
     },
     "zone_break": {

@@ -1,0 +1,24 @@
+study: DS-001
+title: Momentum on departure speed
+status: rejected
+conclusion: negative in every window and every ticker once PnL is realised
+period: 15min
+split_at: "2026-04-01"
+commission: 0.0005
+slippage: 0.0005
+tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+params:
+  risk_pct: 1.0
+  atr_period: 20
+  lookback: 4
+  speed_threshold: 0.35
+  baseline_bars: 60
+  atr_stop_mult: 1.5
+  rr_ratio: 2.0
+  direction: 0
+  max_hold_bars: 0
+results:
+  full:  {trades: 194, won: 4, profit_factor: 0.023, realized_pct: -22.88, unrealized_pct: 32.67}
+  train: {trades: 189, won: 4, profit_factor: 0.024, realized_pct: -22.4,  unrealized_pct: 11.4}
+  test:  {trades: 60,  won: 0, profit_factor: 0.0,   realized_pct: -7.8,   unrealized_pct: 34.4}
+defect: exit only via stop/target; 99.1% exposure; total return is unrealised mark-to-market

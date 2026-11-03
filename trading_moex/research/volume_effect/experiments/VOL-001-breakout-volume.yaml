@@ -1,0 +1,31 @@
+study: VOL-001
+title: Breakout continuation vs volume, 15min and 1day
+status: rejected
+conclusion: sign flips between timeframes; intraday effect is below costs and unstable by half
+method: event study, no strategy wrapper
+breakout: close outside the previous 20-bar high/low
+high_volume: "z >= 1.5 vs own 20-bar mean/std"
+low_volume: "z <= 0"
+horizon: {15min: 16, "1day": 10}
+cost_per_trade: 0.002
+controls: [placebo_volume_permutation, split_half, per_ticker_unit]
+results_15min:
+  tickers: 10
+  low_volume:  {continuation_pct: 42.5, move_atr: -0.201}
+  high_volume: {continuation_pct: 46.7, move_atr: -0.142}
+  difference_pp: 4.2
+  net_per_trade_pct: {H1: 0.060, H2: -0.026}
+  tickers_positive_both_halves: 3
+  placebo_diff_pct: -0.023
+results_1day:
+  tickers: 8
+  low_volume:  {net_pct: 0.549}
+  high_volume: {net_pct: 0.309}
+  difference_pct: -0.240
+  tickers_favouring_high_volume: 3
+  halves: {H1: -0.646, H2: -0.169}
+results_fast_departure_15min:
+  low_volume_continuation_pct: 46.5
+  high_volume_continuation_pct: 47.2
+  difference_pp: 0.7
+  verdict: noise

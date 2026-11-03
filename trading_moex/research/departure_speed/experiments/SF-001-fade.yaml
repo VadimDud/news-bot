@@ -1,0 +1,27 @@
+study: SF-001
+title: Fade a fast push (contrarian)
+status: rejected
+conclusion: negative in all 10 tickers; parameter plateau does not rescue it
+period: 15min
+split_at: "2026-04-01"
+commission: 0.0005
+slippage: 0.0005
+tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+params:
+  risk_pct: 1.0
+  atr_period: 20
+  lookback: 4
+  speed_threshold: 0.35
+  baseline_bars: 60
+  entry_wait: 1
+  atr_stop_mult: 2.5
+  rr_ratio: 1.5
+  direction: 0
+  max_hold_bars: 48
+results:
+  full:  {trades: 5810, won: 2108, profit_factor: 0.730, net_pct: -65.76}
+  train: {trades: 2934, won: 1028, profit_factor: 0.678, net_pct: -50.87}
+  test:  {trades: 2865, won: 1074, profit_factor: 0.830, net_pct: -29.51}
+variants:
+  - {rr_ratio: 3.0, atr_stop_mult: 1.5, trades: 6313,  win_rate: 0.309, profit_factor: 0.713, net_pct: -76.1}
+  - {rr_ratio: 0.8, atr_stop_mult: 3.0, max_hold_bars: 16, trades: 11000, win_rate: 0.387, profit_factor: 0.551, net_pct: -86.5}

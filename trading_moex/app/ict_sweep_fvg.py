@@ -332,6 +332,10 @@ def _compute_arrays(
     fib_tp: float = 0.0,
     use_htf: int = 0,
     htf_trend_period: int = 50,
+    adaptive: int = 0,
+    retest_atr: float = 6.0,
+    rr_take_profit: int = 0,
+    max_hold_bars: int = 0,
 ) -> dict:
     """Векторизованный предрасчёт ICT-состояния на каждом баре.
 
@@ -339,6 +343,21 @@ def _compute_arrays(
     ``fvg`` (list[dict|None]), ``in_zone``, ``entry_price``, ``stop_price``,
     ``target_price``, ``rr``, ``entry_ok_long``, ``entry_ok_short``, ``ts_hour``,
     ``kill_ok``, ``mss_ok``.
+
+    **Adaptive-режим** (``adaptive=1``) заменяет абсолютные пороги на
+    относительные к волатильности, чтобы один набор параметров ложился на
+    бумаги с разным диапазоном (2h-диапазон тикеров отличается вдвое:
+
+    - окно ожидания FVG+retest задаётся в ATR (``retest_atr``), а не в барах:
+      на тикере с широкими барами разворот доходит до зоны за меньшее число
+      баров, и фиксированные 3 бара систематически режут вход;
+    - гейт R:R по умолчанию снят: цель — противоположный пул ликвидности,
+      которая часто ближе ``min_rr``, и фиксированный 2.5 выбрасывает валидный
+      сетап. Отключить ``min_rr`` можно также в обычном режиме;
+    - ``rr_take_profit`` задаёт **достижимый** тейк (``rr_take_profit``·риск)
+      вместо дальнего пула, чтобы не ждать недостижимую цель;
+    - ``max_hold_bars`` — принудительный выход по времени (0 = без лимита),
+      поскольку уровень цели может не быть достигнут.
     """
     n = len(df)
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -442,6 +461,24 @@ def _compute_arrays(
     entry_ok_short = np.zeros(n, dtype=bool)
     mss_ok = np.zeros(n, dtype=bool)
 
+    # Адаптивное окно: сколько ATR цена должна пройти от sweep-экстремума,
+    # прежде чем сетап считается забытым. В adaptive-режиме бар-лимит не нужен,
+    # поэтому ``retest_bars`` игнорируется.
+    adaptive_mode = bool(int(adaptive))
+
+    def _expire(pending: dict, i: int, kind: str) -> bool:
+        """Истёк ли сетап на баре ``i`` (ожидание FVG или ожидание retest)."""
+        if adaptive_mode:
+            base_ext = float(pending.get("sweep_extreme", np.nan))
+            cur = c[i]
+            a_now = atr_arr[i]
+            if not np.isfinite(base_ext) or not np.isfinite(a_now) or a_now <= 0:
+                return True
+            travel = abs(cur - base_ext) / a_now
+            limit = float(retest_atr) if kind == "fvg" else float(retest_atr) * 2.0
+            return travel > limit
+        return pending.get("age", 0) > int(retest_bars)
+
     pending: dict | None = None
     age = 0
     for i in range(n):
@@ -450,9 +487,10 @@ def _compute_arrays(
             side = int(pending["side"])
             f = pending.get("fvg")
             a = atr_arr[i]
-            # Пока FVG не найден — ждём его появления, но не дольше retest_bars
-            # от sweep (причинно: fvg_list[i] уже известен на баре i).
+            # Пока FVG не найден — ждём его появления, но не дольше окна
+            # ожидания (причинно: fvg_list[i] уже известен на баре i).
             if f is None:
+                pending["age"] = age
                 cand = fvg_list[i]
                 if cand is not None and int(cand["side"]) == side:
                     if int(fvg_ob_required) and not _fvg_ob_overlap(
@@ -463,15 +501,16 @@ def _compute_arrays(
                         pending["fvg"] = cand
                         pending["fvg_idx"] = i
                         age = 0
-                if age > int(retest_bars):
+                if age > 0 and _expire(pending, i, "fvg"):
                     pending = None
                 continue
 
             # FVG есть → ждём возврата цены в зону (retest) и входим по 50 %.
             # Считаем возраст от бара появления FVG; дальний край против сделки
             # инвалидирует сетап.
+            pending["age"] = age
             invalid = (side == 1 and c[i] < f["lo"]) or (side == -1 and c[i] > f["hi"])
-            if invalid or age > int(retest_bars):
+            if invalid or _expire(pending, i, "retest"):
                 pending = None
                 continue
 
@@ -490,22 +529,31 @@ def _compute_arrays(
                 buf = float(a) if np.isfinite(a) else 0.0
                 if side == 1:
                     stop_price[i] = min(f["lo"], pending["sweep_extreme"]) - buf
+                    risk = eq - stop_price[i]
                     tgt = pending.get("target")
+                    if int(rr_take_profit) and risk > 0:
+                        # достижимый тейк: фиксированное кратное риска,
+                        # а не дальний пул ликвидности
+                        tgt = eq + risk * float(min_rr if np.isfinite(min_rr) else 2.5)
                     if tgt is None or not np.isfinite(tgt) or tgt <= eq:
-                        risk = eq - stop_price[i]
                         tgt = eq + risk * float(min_rr)
                     target_price[i] = tgt
                 else:
                     stop_price[i] = max(f["hi"], pending["sweep_extreme"]) + buf
+                    risk = stop_price[i] - eq
                     tgt = pending.get("target")
+                    if int(rr_take_profit) and risk > 0:
+                        tgt = eq - risk * float(min_rr if np.isfinite(min_rr) else 2.5)
                     if tgt is None or not np.isfinite(tgt) or tgt >= eq:
-                        risk = stop_price[i] - eq
                         tgt = eq - risk * float(min_rr)
                     target_price[i] = tgt
                 risk = abs(entry_price[i] - stop_price[i])
                 reward = abs(target_price[i] - entry_price[i])
                 rr[i] = reward / risk if risk > 0 else np.nan
-                if np.isfinite(rr[i]) and rr[i] >= float(min_rr):
+                # Адаптивный режим: не режем валидный сетап по дальности цели —
+                # принимаем любой положительный R:R (цель достижима по построению).
+                rr_gate = 0.0 if adaptive_mode else float(min_rr)
+                if np.isfinite(rr[i]) and rr[i] > rr_gate:
                     if side == 1:
                         entry_ok_long[i] = True
                     else:
@@ -601,6 +649,7 @@ def ict_sweep_fvg_signal(
     pos = np.zeros(n, dtype=int)
     entry_i = -1
     side = 0
+    hold_cap = int(params.get("max_hold_bars", 0) or 0)
     for i in range(n):
         if pos[i - 1] if i > 0 else 0:
             pos[i] = pos[i - 1]
@@ -613,6 +662,8 @@ def ict_sweep_fvg_signal(
                 hit = (np.isfinite(stop) and lo <= stop) or (np.isfinite(tgt) and hi >= tgt)
             else:
                 hit = (np.isfinite(stop) and hi >= stop) or (np.isfinite(tgt) and lo <= tgt)
+            if hold_cap and (i - entry_i) >= hold_cap:
+                hit = True
             if hit:
                 pos[i] = 0
                 side = 0

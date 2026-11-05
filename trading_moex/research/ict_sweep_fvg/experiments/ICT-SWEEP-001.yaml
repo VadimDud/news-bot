@@ -1,0 +1,46 @@
+study: ICT-SWEEP-001
+title: Liquidity sweep + fair value gap reversal, absolute and adaptive
+status: rejected
+conclusion: >-
+  Rejected. The originating web-UI run (+12.21%, PF 2.36, 60% wins) was a
+  small-sample fit: 80% wins in the first half vs 40% in the second. The best
+  test cell (min_rr=1.0) is the worst train cell. Widening the FVG window
+  doubles entries but keeps PF near 1.0. Adaptive (relative) thresholds plus a
+  reachable target give PF 1.04 train / 1.06 test, but the edge sits entirely
+  in one of three time thirds (0.95 / 1.11 / 0.24).
+period: 2h
+split_at: "2026-04-01"
+commission: 0.0005
+slippage: 0.0005
+tickers: [CHMF, GAZP, LKOH, MOEX, MTSS, NLMK, NVTK, SBER, T, TATN]
+params:
+  risk_pct: 1.0
+  direction: 0
+  atr_period: 14
+  min_rr: 2.5
+  retest_bars: 3
+  swing_bars: 10
+  body_atr_k: 1.0
+  body_ratio_min: 0.6
+  adaptive: 1
+  retest_atr: 6.0
+  rr_take_profit: 1
+  max_hold_bars: 0
+results:
+  origin_run: {return_pct: 12.21, profit_factor: 2.36, win_pct: 60, trades: 20, ticker: T}
+  origin_halves: {first: {trades: 10, win_pct: 80, profit_factor: 6.88}, second: {trades: 10, win_pct: 40, profit_factor: 1.15}}
+  funnel_entries_per_ticker: [11, 23]
+  funnel_conversion_pct: 2.1
+  default: {split: test, return_pct: 0.32, profit_factor: 1.04}
+  retest20: {split: test, return_pct: 0.37, profit_factor: 1.12}
+  adaptive: {train: {trades: 157, win_pct: 41, profit_factor: 0.905, return_pct: -0.69}, test: {trades: 108, win_pct: 40, profit_factor: 0.914, return_pct: -0.56}}
+  adaptive_reachable_tp: {train: {trades: 147, win_pct: 44, profit_factor: 1.040, return_pct: 0.42}, test: {trades: 100, win_pct: 43, profit_factor: 1.058, return_pct: 0.36}}
+  thirds:
+    - {trades: 119, profit_factor: 0.953, return_pct: -0.09}
+    - {trades: 120, profit_factor: 1.107, return_pct: 0.98}
+    - {trades: 11, profit_factor: 0.243, return_pct: -0.83}
+defect: >-
+  The best web-UI configuration sets body_ratio_min=0.2 while body_atr_k=1.0.
+  The ratio gate only binds when the body fails the 1.0-ATR test, so at that
+  setting it is inert; body_ratio_min 0.5..2.5 and ob_overlap_min all produced
+  identical results across seven runs. The displayed "tuned" value does nothing.

@@ -4347,6 +4347,10 @@ _ICT_PARAMS_TUPLE = (
     ("htf_confirmation_required", 0),
     ("use_htf", 0),
     ("htf_trend_period", 50),
+    ("adaptive", 0),
+    ("retest_atr", 6.0),
+    ("rr_take_profit", 0),
+    ("max_hold_bars", 0),
     ("precomputed", None),
 )
 
@@ -4360,6 +4364,11 @@ class IctSweepFvgStrategy(RiskAwareStrategy):
     рассчитанных уровней (стоп за FVG+экстремум sweep, тейк — противоположный
     пул ликвидности с R:R-fallback). Р:R-гейт ``min_rr`` (по умолчанию 2.5)
     встроен в детектор.
+
+    Этот сетап **не даёт края** на OHLCV: см. `research/ict_sweep_fvg/README.md`.
+    ``adaptive``-режим (окно в ATR, достижимый тейк) даёт PF ≈ 1.0 без
+    устойчивости по времени; он оставлен для воспроизведения отрицательного
+    результата, а не как сигнал к торговле.
     """
 
     params = _ICT_PARAMS_TUPLE
@@ -4419,6 +4428,10 @@ class IctSweepFvgStrategy(RiskAwareStrategy):
             "min_rr": float(self.p.min_rr),
             "use_htf": int(getattr(self.p, "use_htf", 0)),
             "htf_trend_period": int(self.p.htf_trend_period),
+            "adaptive": int(getattr(self.p, "adaptive", 0)),
+            "retest_atr": float(getattr(self.p, "retest_atr", 6.0)),
+            "rr_take_profit": int(getattr(self.p, "rr_take_profit", 0)),
+            "max_hold_bars": int(getattr(self.p, "max_hold_bars", 0)),
         }
         st = ict_module._compute_arrays(df, None, **params)
         st["idx"] = len(df) - 1
@@ -5151,6 +5164,10 @@ STRATEGIES = {
             {"key": "htf_confirmation_required", "label": "Контртренд: требовать внешний пул (1 = да)", "type": "int", "default": 0},
             {"key": "use_htf", "label": "Фильтр тренда старшего ТФ (1 = да)", "type": "int", "default": 0},
             {"key": "htf_trend_period", "label": "HTF: период EMA тренда", "type": "int", "default": 50},
+            {"key": "adaptive", "label": "Адаптивный режим: окно в ATR, без R:R-гейта (1 = да)", "type": "int", "default": 0},
+            {"key": "retest_atr", "label": "Адаптив: окно ожидания FVG/ретеста, ATR", "type": "float", "default": 6.0},
+            {"key": "rr_take_profit", "label": "Тейк = риск × min_rr вместо пула (1 = да)", "type": "int", "default": 0},
+            {"key": "max_hold_bars", "label": "Принудительный выход, баров (0 = без лимита)", "type": "int", "default": 0},
         ],
     },
 }

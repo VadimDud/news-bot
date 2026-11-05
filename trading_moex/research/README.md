@@ -17,6 +17,7 @@ run outputs belong under `artifacts/runs/` and are intentionally not committed.
 | `DS-001` / `SF-001` | A fast departure from a level, as momentum or as exhaustion, is tradeable | archived | rejected; momentum -22.88% realised, fade -65.76% net, all 10 tickers | `departure_speed/` |
 | `VOL-001` | Breakout volume predicts continuation (or reversal) | archived | rejected; sign flips by timeframe, intraday effect below costs and unstable | `volume_effect/` |
 | `ATRX-002` / `ATRX-003` | A move of N ATR from a swing plus a reversal candle is exhaustion; short after a rise, long after a fall | archived | rejected; a look-ahead defect inflated the swing study, corrected edge +0.13% is below costs, both directions lose (PF 0.796 / 0.860); extension forecasts volatility, not direction | `atr_exhaustion/` |
+| `ICT-SWEEP-001` | A liquidity sweep + displacement + FVG retest reverses with a positive edge after costs | archived | rejected; originating +12.21% is a 20-trade fit (80%→40% wins across halves), best test cell is worst train cell, adaptive mode holds PF 1.04/1.06 but the edge lives in one third of the sample | `ict_sweep_fvg/` |
 
 ## Overall State
 
@@ -51,6 +52,19 @@ and that the riskiest error in this work is in one's own measurement code, not
 in the market. ATR extension forecasts volatility, not direction: both the short
 and the long lose once a random baseline is applied. Before any future
 swing-based study, place the pivot at `len - 1 - look`.
+
+`ICT-SWEEP-001` restates the cost corollary from a different angle. Unlike the
+other studies it was not built from a scan: it was promoted from a single
+web-UI run that happened to look good on twenty trades. When rebuilt and split
+chronologically, the only surviving cell (adaptive thresholds plus a reachable
+target) reaches PF 1.04/1.06 — indistinguishable from noise — and its profit
+lives in one of three time thirds. The instructive part is the funnel: the
+detector rejects 98% of sweeps, and relaxing that filter until it trades often
+returns PF to 1.0 regardless of whether thresholds are measured in bars, ATR,
+or R multiples. Changing the unit of a filter does not add information that is
+not in the data. The same order-book limit that closed `LEVEL-TEST-001` closes
+this one: a sweep is a claim about resting liquidity, and OHLCV cannot see it.
+
 
 ## Required Files
 

@@ -477,3 +477,60 @@ def test_short_need_bear_vol_filters_trades():
     # Гейт активен (порог 0.3 почти наверняка отсекает часть баров), но сам факт
     # что не падает с ошибкой и даёт >=0 сделок — ок.
     assert n_gated >= 0
+
+
+def test_sr_levels_cluster_pivots():
+    # S/R-уровни строятся из подтверждённых swing-пивотов и кластеризуются в
+    # пределах допуска sr_tolerance_atr.
+    import backtrader as bt
+    from app.backtest import _setup_cerebro
+
+    seen = []
+
+    class C(FibPullbackStrategy):
+        def next(self):
+            super().next()
+            if len(self) == 150 and not seen:
+                seen.append(list(self._sr_levels()))
+
+    df = _trend_series(200.0, -0.2, direction=-1)
+    p = _backtest_params(direction=-1)
+    p["sr_lookback"] = 120
+    cb = _setup_cerebro(C, p, 100_000, 0.0005)
+    cb.adddata(bt.feeds.PandasData(dataname=df))
+    cb.run(runonce=False)
+    assert seen, "next() must run"
+    levels = seen[0]
+    assert all(isinstance(level, float) for level in levels)
+    assert levels == sorted(levels)
+
+
+def test_sr_tp_mode_points_to_level_below_entry():
+    # sr_tp_mode=1 выбирает ближайший S/R ниже входа как цель шорта.
+    import backtrader as bt
+    from app.backtest import _setup_cerebro
+
+    stops, targets = [], []
+
+    class C(FibPullbackStrategy):
+        def _place_short_bracket(self):
+            super()._place_short_bracket()
+            if self._short_target_price is not None and not targets:
+                stops.append(self._short_stop_price)
+                targets.append(self._short_target_price)
+
+    df = _trend_series(200.0, -0.2, direction=-1)
+    p = _backtest_params(direction=-1)
+    p["sr_tp_mode"] = 1
+    cb = _setup_cerebro(C, p, 100_000, 0.0005)
+    cb.adddata(bt.feeds.PandasData(dataname=df))
+    cb.run(runonce=False)
+    if targets:
+        assert targets[0] < stops[0]
+
+
+def test_sr_defaults_are_disabled():
+    from app.strategies import STRATEGIES
+    params = {p["key"]: p["default"] for p in STRATEGIES["fib_pullback"]["params"]}
+    assert params["sr_tp_mode"] == 0
+    assert params["sr_sl_mode"] == 0

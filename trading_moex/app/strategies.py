@@ -2558,6 +2558,17 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     # ``flip_on_stop``: 1 = реверс по закрытию за уровнем; 2 = реверс только
     # при подтверждении (close за уровнем И свеча в сторону пробоя).
     ("flip_on_stop", 0),
+    # S/R-уровни в брекете. ``sr_tp_mode``: 0=Fibonacci-цель (прод-поведение),
+    # 1=ближайший S/R-уровень как цель, 2=минимум из двух (ближе к входу).
+    # ``sr_sl_mode``: 0=swing/ATR-стоп (прод), 1=за ближайшим S/R + буфер
+    # ``sr_buffer_atr`` ATR. ``sr_lookback`` — окно поиска подтверждённых swing
+    # пивотов, ``sr_tolerance_atr`` — допуск кластеризации уровней в ATR.
+    # Все значения по умолчанию выключены — baseline не меняется.
+    ("sr_tp_mode", 0),
+    ("sr_sl_mode", 0),
+    ("sr_lookback", 120),
+    ("sr_tolerance_atr", 0.5),
+    ("sr_buffer_atr", 0.25),
 )
 
 
@@ -2710,13 +2721,66 @@ class FibPullbackStrategy(RiskAwareStrategy):
 
     # ── Структурный стоп для шорта (за экстремум swing high) ────────────────
     def _short_stop_distance(self) -> float:
+        price = float(self.data.close[0])
+        if int(getattr(self.p, "sr_sl_mode", 0)):
+            level = self._sr_level(above=True, ref=price)
+            if level is not None:
+                dist = level + self._atr_value() * float(getattr(self.p, "sr_buffer_atr", 0.25)) - price
+                if dist >= price * 0.002:
+                    return dist
         if int(getattr(self.p, "sl_beyond_swing", 1)) and self._last_swing_high is not None:
-            price = float(self.data.close[0])
             if self._last_swing_high > price:
                 dist = self._last_swing_high - price
                 if dist >= price * 0.002:
                     return dist
         return super()._stop_distance()
+
+    def _sr_levels(self) -> list[float]:
+        """Кластеры подтверждённых swing-пивотов в окне ``sr_lookback``.
+
+        Уровни строятся только из доступного прошлого (пивот подтверждается
+        спустя ``sr_swing_bars`` баров), поэтому без заглядывания вперёд.
+        """
+        lookback = max(int(getattr(self.p, "sr_lookback", 120)), 3)
+        # len(self.data) — фактически загруженная/накопленная длина (при
+        # runonce=False растёт от бара к бару), окно ограничиваем ею.
+        bars = int(min(lookback, len(self.data)))
+        if bars < 3:
+            return []
+        swing = max(int(self.p.swing_bars), 1)
+        if bars < 2 * swing + 1:
+            return []
+        highs = np.asarray(self.data.high.get(ago=-bars, size=bars), dtype=float)
+        lows = np.asarray(self.data.low.get(ago=-bars, size=bars), dtype=float)
+        if highs.size != bars or lows.size != bars:
+            return []
+        atr = self._atr_value()
+        if atr <= 0:
+            return []
+        tolerance = atr * float(getattr(self.p, "sr_tolerance_atr", 0.5))
+        pivots = []
+        for j in range(swing, bars - swing):
+            if highs[j] >= highs[j - swing: j + swing + 1].max():
+                pivots.append(float(highs[j]))
+            if lows[j] <= lows[j - swing: j + swing + 1].min():
+                pivots.append(float(lows[j]))
+        pivots.sort()
+        clusters: list[list[float]] = []
+        for price in pivots:
+            if clusters and abs(clusters[-1][0] - price) <= tolerance:
+                clusters[-1][0] = (clusters[-1][0] * clusters[-1][1] + price) / (clusters[-1][1] + 1)
+                clusters[-1][1] += 1
+            else:
+                clusters.append([price, 1])
+        return [cluster[0] for cluster in clusters]
+
+    def _sr_level(self, above: bool, ref: float) -> float | None:
+        """Ближайший S/R-кластер выше (``above``) или ниже ``ref``."""
+        candidates = [level for level in self._sr_levels()
+                      if (level > ref if above else level < ref)]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda level: abs(level - ref))
 
     # ── Структурный стоп за экстремум swing low ─────────────────────────────
     def _stop_distance(self) -> float:
@@ -2850,6 +2914,18 @@ class FibPullbackStrategy(RiskAwareStrategy):
             if v == v and v > 0 and v < price:  # не NaN и ниже входа
                 # Fib-расширение: цель = entry - target_mult*(entry - swing_low)
                 target = price - target_mult * (price - v)
+        # S/R-цель: ближайший кластер поддержки под входом (шорт закрывается у
+        # неё). Режим 1 — брать S/R вместо Fib-цели, режим 2 — более близкую.
+        sr_tp_mode = int(getattr(self.p, "sr_tp_mode", 0) or 0)
+        if sr_tp_mode:
+            sr_target = self._sr_level(above=False, ref=price)
+            if sr_target is not None and 0 < sr_target < price:
+                if target is None or not (0 < target < price):
+                    target = sr_target
+                elif sr_tp_mode == 1:
+                    target = sr_target
+                else:
+                    target = max(target, sr_target)
         if target is None or not (0 < target < price):
             # фолбэк 2R от стопа
             target = price - stop_dist * float(self.p.rr_ratio)
@@ -5045,6 +5121,11 @@ STRATEGIES = {
             {"key": "vol_max_rel", "label": "Объём: макс. относительный (0 = без потолка)", "type": "float", "default": 0.0},
             {"key": "long_need_bull_vol", "label": "Лонг: мин. доля быков на баре (0 = выкл)", "type": "float", "default": 0.0},
             {"key": "short_need_bear_vol", "label": "Шорт: макс. доля быков на баре (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "sr_tp_mode", "label": "S/R цель: 0=Fib, 1=только S/R, 2=ближайшая", "type": "int", "default": 0},
+            {"key": "sr_sl_mode", "label": "S/R стоп: 0=swing/ATR, 1=за ближайшим S/R", "type": "int", "default": 0},
+            {"key": "sr_lookback", "label": "S/R: окно поиска пивотов, свечей", "type": "int", "default": 120},
+            {"key": "sr_tolerance_atr", "label": "S/R: допуск кластера, ATR", "type": "float", "default": 0.5},
+            {"key": "sr_buffer_atr", "label": "S/R-стоп: буфер за уровнем, ATR", "type": "float", "default": 0.25},
         ],
     },
     "elliott_candles": {

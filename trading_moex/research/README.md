@@ -19,6 +19,8 @@ run outputs belong under `artifacts/runs/` and are intentionally not committed.
 | `ATRX-002` / `ATRX-003` | A move of N ATR from a swing plus a reversal candle is exhaustion; short after a rise, long after a fall | archived | rejected; a look-ahead defect inflated the swing study, corrected edge +0.13% is below costs, both directions lose (PF 0.796 / 0.860); extension forecasts volatility, not direction | `atr_exhaustion/` |
 | `ICT-SWEEP-001` | A liquidity sweep + displacement + FVG retest reverses with a positive edge after costs | archived | rejected; originating +12.21% is a 20-trade fit (80%→40% wins across halves), best test cell is worst train cell, adaptive mode holds PF 1.04/1.06 but the edge lives in one third of the sample | `ict_sweep_fvg/` |
 | `TA-ELEMENTS` | Elementary detectors (swing, level, breakout, retest, return, failure) can be verified individually and composed into systems | active (building) | library built and causally tested; recognition report on 6 tickers; not a strategy — trading layer is out of scope here | `ta_elements/` |
+| `FIB-SHORT-FUT-LQDT-001` | The Fib short 1day loss is caused by stock borrow fees; a futures leg plus LQDT on free margin removes it | reviewed | borrow fully explains the stock loss (gross +16k, net -355k, 180 trades); futures+LQDT turns it positive (+19.9%) but almost all of the gain is the LQDT rate, signal-only leg PF 1.14 (noise) | `fib_short_futures_lqdt/` |
+| `FIB-SR-001` | S/R levels from confirmed swing pivots improve a Fib-short TP/SL bracket | reviewed | supported on 1day: best variant sr_min_sl NET −118,648 vs −359,236, gross +54,917 vs +11,904, PF 1.41 vs 1.12; main driver is a closer structural stop cutting carry in half | `fib_sr_bracket/` |
 
 ## Overall State
 

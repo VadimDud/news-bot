@@ -77,6 +77,23 @@ def _adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return dx.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
+_PIVOT_CACHE: dict[tuple[int, int, int, int], tuple[np.ndarray, np.ndarray]] = {}
+_PIVOT_CACHE_ORDER: list[tuple[int, int, int, int]] = []
+_PIVOT_CACHE_MAX = 64
+
+
+def _pivot_cache_key(df: pd.DataFrame, bars: int) -> tuple[int, int, int, int]:
+    """Идентичность данных по длине, первому/последнему close и bars.
+
+    Для одного и того же DataFrame (бэктест, подбор по сетке) ключ стабилен,
+    поэтому дорогие фракталы считаются один раз. Хэш закрытия крайних баров
+    ловит подмену данных без копирования всей серии.
+    """
+    first = float(df["close"].iloc[0]) if len(df) else 0.0
+    last = float(df["close"].iloc[-1]) if len(df) else 0.0
+    return (len(df), hash((first, last)), int(bars), id(df))
+
+
 def _confirmed_pivots(df: pd.DataFrame, bars: int) -> tuple[pd.Series, pd.Series]:
     """Последние подтверждённые swing low/high из фракталов за ``bars`` свечей.
 
@@ -85,6 +102,10 @@ def _confirmed_pivots(df: pd.DataFrame, bars: int) -> tuple[pd.Series, pd.Series
     используется пивот с индексом ``<= i - bars`` (без заглядывания вперёд).
     Возвращает (swing_low, swing_high) с ffill-заполнением последнего пивота.
     """
+    key = _pivot_cache_key(df, bars)
+    cached = _PIVOT_CACHE.get(key)
+    if cached is not None:
+        return pd.Series(cached[0], index=df.index), pd.Series(cached[1], index=df.index)
     n = len(df)
     low = df["low"].values
     high = df["high"].values
@@ -92,22 +113,35 @@ def _confirmed_pivots(df: pd.DataFrame, bars: int) -> tuple[pd.Series, pd.Series
     ph = np.full(n, np.nan)
     if bars <= 0:
         return pd.Series(low, index=df.index), pd.Series(high, index=df.index)
-    for j in range(bars, n - bars):
-        w_low = low[j - bars: j + bars + 1]
-        w_high = high[j - bars: j + bars + 1]
-        if low[j] <= w_low.min():
-            pl[j] = low[j]
-        if high[j] >= w_high.max():
-            ph[j] = high[j]
+    if n <= 2 * bars:
+        return (
+            pd.Series(pl, index=df.index).ffill(),
+            pd.Series(ph, index=df.index).ffill(),
+        )
+    # Векторизация: rolling min/max по окну 2*bars+1 совпадает с ручным
+    # перебором, но без Python-цикла на каждый бар.
+    window = 2 * bars + 1
+    low_s = pd.Series(low)
+    high_s = pd.Series(high)
+    win_low = low_s.rolling(window, center=True, min_periods=window).min().values
+    win_high = high_s.rolling(window, center=True, min_periods=window).max().values
+    pl = np.where(low <= win_low, low, np.nan)
+    ph = np.where(high >= win_high, high, np.nan)
     # Пивот с индексом j известен только на баре j+bars → сдвиг вправо на bars
     lag = bars
     pl_known = np.full(n, np.nan)
     ph_known = np.full(n, np.nan)
     pl_known[lag:] = pl[: n - lag]
     ph_known[lag:] = ph[: n - lag]
+    pl_filled = pd.Series(pl_known, index=df.index).ffill().values
+    ph_filled = pd.Series(ph_known, index=df.index).ffill().values
+    _PIVOT_CACHE[key] = (pl_filled, ph_filled)
+    _PIVOT_CACHE_ORDER.append(key)
+    if len(_PIVOT_CACHE_ORDER) > _PIVOT_CACHE_MAX:
+        _PIVOT_CACHE.pop(_PIVOT_CACHE_ORDER.pop(0), None)
     return (
-        pd.Series(pl_known, index=df.index).ffill(),
-        pd.Series(ph_known, index=df.index).ffill(),
+        pd.Series(pl_filled, index=df.index),
+        pd.Series(ph_filled, index=df.index),
     )
 
 
@@ -144,6 +178,33 @@ def _bearish_confirmation(o, h, l, c, po, pc, confirm_candle: int) -> bool:
 
 
 # ── Предрасчёт всех массивов сигнала ─────────────────────────────────────────
+
+def _confirmation_masks(o, h, l, c, confirm_candle: int) -> tuple[np.ndarray, np.ndarray]:
+    """Векторизованные маски пинбара/поглощения (паритет с *_confirmation)."""
+    n = len(o)
+    bull = np.zeros(n, dtype=bool)
+    bear = np.zeros(n, dtype=bool)
+    if not confirm_candle or n < 2:
+        return bull, bear
+    prev_o = np.roll(o, 1)
+    prev_c = np.roll(c, 1)
+    body = np.abs(c - o)
+    rng = h - l
+    has_body = (rng > 0) & (body > 0)
+    lower = np.minimum(o, c) - l
+    upper = h - np.maximum(o, c)
+    bull_hammer = has_body & (lower >= 2.0 * body) & (upper <= body)
+    bull_engulf = (prev_c < prev_o) & (c > o) & (np.minimum(o, c) < np.minimum(prev_o, prev_c)) \
+        & (np.maximum(o, c) > np.maximum(prev_o, prev_c))
+    bull = bull_hammer | bull_engulf
+    bear_hammer = has_body & (upper >= 2.0 * body) & (lower <= body)
+    bear_engulf = (prev_o < prev_c) & (c < o) & (np.maximum(o, c) > np.maximum(prev_o, prev_c)) \
+        & (np.minimum(o, c) < np.minimum(prev_o, prev_c))
+    bear = bear_hammer | bear_engulf
+    bull[0] = False
+    bear[0] = False
+    return bull, bear
+
 
 def _compute_arrays(
     df: pd.DataFrame,
@@ -234,45 +295,34 @@ def _compute_arrays(
     # Ретрейсмент (глубина отката от экстремума): 0% — цена на swing high,
     # 100% — на swing low. Discount-зона (по видеокурсу) — глубина 50–61.8 %.
     # Премиальная зона для шорта — зеркально: откат вверх от swing low на 50–61.8 %.
-    retrace = np.full(n, np.nan)
-    retrace_up = np.full(n, np.nan)
-    target = np.full(n, np.nan)
-    target_short = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(seg[i]) and seg[i] > 0:
-            r = (swing_high[i] - close[i]) / seg[i]
-            r_up = (close[i] - swing_low[i]) / seg[i]
-            retrace[i] = r
-            retrace_up[i] = r_up
-            if fib_in_low <= r <= fib_in_high:
-                in_discount[i] = True
-            if fib_in_low <= r_up <= fib_in_high:
-                in_premium[i] = True
-            # Цель: притягательная зона 0 % (swing high) минус ``fib_tp`` долей.
-            target[i] = swing_high[i] - fib_tp * seg[i]
-            # Шорт-цель: swing low плюс ``fib_tp`` долей (зеркально).
-            target_short[i] = swing_low[i] + fib_tp * seg[i]
+    # Векторизованный расчёт: раньше это был Python-цикл на каждый бар с
+    # numpy-скалярами, что доминировало во времени бэктеста и подбора.
+    valid_seg = np.isfinite(seg) & (seg > 0)
+    safe_seg = np.where(valid_seg, seg, 1.0)
+    retrace = np.where(valid_seg, (swing_high - close) / safe_seg, np.nan)
+    retrace_up = np.where(valid_seg, (close - swing_low) / safe_seg, np.nan)
+    in_discount = valid_seg & (retrace >= fib_in_low) & (retrace <= fib_in_high)
+    in_premium = valid_seg & (retrace_up >= fib_in_low) & (retrace_up <= fib_in_high)
+    # Цель: притягательная зона 0 % (swing high) минус ``fib_tp`` долей.
+    target = np.where(valid_seg, swing_high - fib_tp * safe_seg, np.nan)
+    # Шорт-цель: swing low плюс ``fib_tp`` долей (зеркально).
+    target_short = np.where(valid_seg, swing_low + fib_tp * safe_seg, np.nan)
 
     # Конфлюэнция (фактор F1 — зона, всегда требуется; F2 — свеча; F3 — RSI)
-    factors = np.zeros(n, dtype=int)
-    factors_short = np.zeros(n, dtype=int)
     o = df["open"].values
     h = df["high"].values
     l = df["low"].values
     c = df["close"].values
-    for i in range(1, n):
-        f = 1  # зона Фибо (вход всегда от неё)
-        if _bullish_confirmation(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1], confirm_candle):
-            f += 1
-        if rsi_arr[i] <= rsi_oversold:
-            f += 1
-        factors[i] = f
-        fs = 1  # зона Фибо (вход всегда от неё)
-        if _bearish_confirmation(o[i], h[i], l[i], c[i], o[i - 1], c[i - 1], confirm_candle):
-            fs += 1
-        if rsi_arr[i] >= rsi_overbought:
-            fs += 1
-        factors_short[i] = fs
+    bull_conf, bear_conf = _confirmation_masks(o, h, l, c, confirm_candle)
+    factors = np.ones(n, dtype=int)  # зона Фибо (вход всегда от неё)
+    factors_short = np.ones(n, dtype=int)
+    factors += bull_conf.astype(int)
+    factors += (rsi_arr <= rsi_oversold).astype(int)
+    factors_short += bear_conf.astype(int)
+    factors_short += (rsi_arr >= rsi_overbought).astype(int)
+    if n:
+        factors[0] = 0
+        factors_short[0] = 0
 
     # ── Объёмные фичи (причинные) + маски для гейтов ────────────────────────
     vol = df["volume"].values.astype(float)

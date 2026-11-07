@@ -120,7 +120,7 @@ def load_df(ticker: str, db: str, period: str) -> pd.DataFrame:
     return df[~df.index.duplicated(keep="last")]
 
 
-def base_params(ticker: str) -> dict:
+def base_params(ticker: str, bracket: dict | None = None) -> dict:
     """Прод-конфиг шорта 1day: TICKER_OVERRIDES + direction=-1, без EOD-флэта."""
     params = dict(_FIB_PULLBACK_PARAMS_TUPLE)
     overrides = TICKER_OVERRIDES.get(("fib_pullback", ticker.upper()), {})
@@ -129,12 +129,15 @@ def base_params(ticker: str) -> dict:
             params[key] = value
     params["direction"] = -1
     params["flat_mode"] = 0
+    if bracket:
+        params.update(bracket)
     return params
 
 
-def run_ticker(ticker: str, df: pd.DataFrame, cost: CostModel) -> list[dict]:
+def run_ticker(ticker: str, df: pd.DataFrame, cost: CostModel,
+               bracket: dict | None = None) -> list[dict]:
     cb = _setup_cerebro(
-        _Recorder, base_params(ticker), CASH_PER_TICKER,
+        _Recorder, base_params(ticker, bracket), CASH_PER_TICKER,
         cost.commission_per_side, slippage=cost.slippage_per_side,
     )
     feed = bt.feeds.PandasData(dataname=df)
@@ -241,8 +244,19 @@ def main() -> None:
                         help="Проскальзывание фьючерсной ноги на сторону")
     parser.add_argument("--futures-margin", type=float, default=0.20,
                         help="Ставка ГО фьючерса как доля нецинала")
+    parser.add_argument("--sr-variant", default="baseline",
+                        choices=["baseline", "sr_tp", "sr_tp_min", "sr_tp_sl", "sr_min_sl"],
+                        help="Вариант брекета с S/R (см. scripts/backtest_fib_sr.py)")
     parser.add_argument("--run-dir", default=None)
     args = parser.parse_args()
+
+    bracket = {
+        "baseline": {},
+        "sr_tp": {"sr_tp_mode": 1},
+        "sr_tp_min": {"sr_tp_mode": 2},
+        "sr_tp_sl": {"sr_tp_mode": 1, "sr_sl_mode": 1},
+        "sr_min_sl": {"sr_tp_mode": 2, "sr_sl_mode": 1},
+    }[args.sr_variant]
 
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     lqdt_daily = args.lqdt_annual_pct / 365.0
@@ -283,7 +297,7 @@ def main() -> None:
         if df.empty:
             continue
         weekend[ticker] = _has_weekend_candles(df)
-        raw_trades[ticker] = run_ticker(ticker, df, trade_cost)
+        raw_trades[ticker] = run_ticker(ticker, df, trade_cost, bracket)
 
     initial_cash = CASH_PER_TICKER * max(len(raw_trades), 1)
     summaries = {}
@@ -295,7 +309,8 @@ def main() -> None:
         all_ledgers[leg] = ledger
         summaries[leg] = summarize(leg, ledger, initial_cash)
 
-    print(f"Fib short {args.period} | {len(raw_trades)} тикеров | капитал {initial_cash:,.0f} ₽")
+    print(f"Fib short {args.period} | брекет={args.sr_variant} | {len(raw_trades)} тикеров | "
+          f"капитал {initial_cash:,.0f} ₽")
     print(f"LQDT {args.lqdt_annual_pct:.2f}%/год = {lqdt_daily:.4f}%/день; "
           f"фьючерс: комиссия {args.futures_commission*100:.3f}%/стор., "
           f"ГО {args.futures_margin*100:.0f}%\n")
@@ -313,6 +328,7 @@ def main() -> None:
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "db": args.db,
         "period": args.period,
+        "bracket_variant": args.sr_variant,
         "tickers": list(raw_trades),
         "cash_per_ticker": CASH_PER_TICKER,
         "initial_cash": initial_cash,

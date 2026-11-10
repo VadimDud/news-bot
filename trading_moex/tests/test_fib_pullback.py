@@ -534,3 +534,27 @@ def test_sr_defaults_are_disabled():
     params = {p["key"]: p["default"] for p in STRATEGIES["fib_pullback"]["params"]}
     assert params["sr_tp_mode"] == 0
     assert params["sr_sl_mode"] == 0
+
+
+def test_weakness_defaults_are_disabled():
+    from app.strategies import STRATEGIES
+    params = {p["key"]: p["default"] for p in STRATEGIES["fib_pullback"]["params"]}
+    assert params["weak_need_doji"] == 0
+    assert params["weak_need_consolidation_atr"] == 0
+    assert params["weak_need_upper_shadow"] == 0
+    assert params["weak_need_lower_shadow"] == 0
+
+
+def test_weakness_masks_detect_doji_and_shadows():
+    import numpy as np
+    from app.fib_pullback import weakness_masks
+    o = [100.0, 100.0]
+    h = [101.0, 105.0]
+    l = [99.0, 99.5]
+    c = [100.0, 100.2]
+    m = weakness_masks(o, h, l, c, doji_body_ratio=0.15, upper_shadow_ratio=0.5,
+                       lower_shadow_ratio=0.5)
+    assert m["doji"].tolist() == [True, True]
+    assert m["upper_shadow"].tolist() == [True, True]
+    assert m["lower_shadow"].tolist() == [True, False]
+    assert not m["consolidation"].any()

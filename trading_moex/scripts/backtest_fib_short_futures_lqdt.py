@@ -247,6 +247,9 @@ def main() -> None:
     parser.add_argument("--sr-variant", default="baseline",
                         choices=["baseline", "sr_tp", "sr_tp_min", "sr_tp_sl", "sr_min_sl"],
                         help="Вариант брекета с S/R (см. scripts/backtest_fib_sr.py)")
+    parser.add_argument("--weak-params", default="{}",
+                        help="JSON доп. параметров фильтра ослабления (напр. "
+                             "'{\"weak_need_upper_shadow\": 0.5}')")
     parser.add_argument("--run-dir", default=None)
     args = parser.parse_args()
 
@@ -257,6 +260,7 @@ def main() -> None:
         "sr_tp_sl": {"sr_tp_mode": 1, "sr_sl_mode": 1},
         "sr_min_sl": {"sr_tp_mode": 2, "sr_sl_mode": 1},
     }[args.sr_variant]
+    bracket.update(json.loads(args.weak_params))
 
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     lqdt_daily = args.lqdt_annual_pct / 365.0

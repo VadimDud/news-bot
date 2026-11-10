@@ -2569,6 +2569,15 @@ _FIB_PULLBACK_PARAMS_TUPLE = (
     ("sr_lookback", 120),
     ("sr_tolerance_atr", 0.5),
     ("sr_buffer_atr", 0.25),
+    # Свечи ослабления тренда (доджи / консолидация / длинные тени). Вход
+    # требует признак «покупатели/продавцы кончились» на баре входа. Все
+    # значения по умолчанию выключены — baseline не меняется.
+    ("weak_need_doji", 0.0),            # макс. body/range для «доджи» (0 = выкл)
+    ("weak_need_consolidation_atr", 0.0),  # range <= k*ATR (0 = выкл)
+    ("weak_narrow_range_ratio", 0.5),   # range <= ratio*prev_range, если ATR не задан
+    ("weak_need_upper_shadow", 0.0),    # мин. доля верхней тени для шорта (0 = выкл)
+    ("weak_need_lower_shadow", 0.0),    # мин. доля нижней тени для лонга (0 = выкл)
+    ("weak_min_signals", 1),            # сколько признаков слабости нужно
 )
 
 
@@ -2656,6 +2665,12 @@ class FibPullbackStrategy(RiskAwareStrategy):
             "vol_max_rel": float(getattr(self.p, "vol_max_rel", 0.0)),
             "long_need_bull_vol": float(getattr(self.p, "long_need_bull_vol", 0.0)),
             "short_need_bear_vol": float(getattr(self.p, "short_need_bear_vol", 0.0)),
+            "weak_need_doji": float(getattr(self.p, "weak_need_doji", 0.0)),
+            "weak_need_consolidation_atr": float(getattr(self.p, "weak_need_consolidation_atr", 0.0)),
+            "weak_narrow_range_ratio": float(getattr(self.p, "weak_narrow_range_ratio", 0.5)),
+            "weak_need_upper_shadow": float(getattr(self.p, "weak_need_upper_shadow", 0.0)),
+            "weak_need_lower_shadow": float(getattr(self.p, "weak_need_lower_shadow", 0.0)),
+            "weak_min_signals": int(getattr(self.p, "weak_min_signals", 1)),
         }
         st = fibp._compute_arrays(df, None, **params)
         i = len(df) - 1
@@ -5126,6 +5141,12 @@ STRATEGIES = {
             {"key": "sr_lookback", "label": "S/R: окно поиска пивотов, свечей", "type": "int", "default": 120},
             {"key": "sr_tolerance_atr", "label": "S/R: допуск кластера, ATR", "type": "float", "default": 0.5},
             {"key": "sr_buffer_atr", "label": "S/R-стоп: буфер за уровнем, ATR", "type": "float", "default": 0.25},
+            {"key": "weak_need_doji", "label": "Слабость: макс. тело/диапазон для доджи (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "weak_need_consolidation_atr", "label": "Слабость: консолидация range<=k*ATR (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "weak_narrow_range_ratio", "label": "Слабость: range<=ratio*prev_range (если ATR не задан)", "type": "float", "default": 0.5},
+            {"key": "weak_need_upper_shadow", "label": "Шорт-слабость: мин. доля верхней тени (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "weak_need_lower_shadow", "label": "Лонг-слабость: мин. доля нижней тени (0 = выкл)", "type": "float", "default": 0.0},
+            {"key": "weak_min_signals", "label": "Слабость: сколько признаков нужно", "type": "int", "default": 1},
         ],
     },
     "elliott_candles": {

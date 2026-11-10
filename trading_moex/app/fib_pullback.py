@@ -206,6 +206,76 @@ def _confirmation_masks(o, h, l, c, confirm_candle: int) -> tuple[np.ndarray, np
     return bull, bear
 
 
+def weakness_masks(
+    o, h, l, c,
+    *,
+    consolidation_atr: float = 0.0,
+    narrow_range_ratio: float = 0.5,
+    doji_body_ratio: float = 0.0,
+    upper_shadow_ratio: float = 0.0,
+    lower_shadow_ratio: float = 0.0,
+    atr_arr=None,
+    prev_range=None,
+    bar_range=None,
+) -> dict:
+    """Причинные маски «ослабления тренда» на баре (без lookahead).
+
+    Каждая маска — про *данные текущего бара* и (для сжатия диапазона)
+    предыдущего: показывает, что покупатели/продавцы «кончились».
+
+    - ``doji``: тело мало относительно диапазона (нерешительность).
+      ``doji_body_ratio`` — макс. доля тела в диапазоне (0 = выкл).
+    - ``consolidation``: диапазон бара сжат (range <= ratio * средний range).
+      ``consolidation_atr`` — порог в ATR (0 = выкл), ``narrow_range_ratio`` —
+      множитель к среднему диапазону за ``consolidation_period`` (если ATR не задан).
+    - ``upper_shadow``: длинная верхняя тень — отказ от роста (можно измерить в
+      долях диапазона; ``upper_shadow_ratio`` = мин. доля верхней тени, 0 = выкл).
+    - ``lower_shadow``: длинная нижняя тень — отказ от падения.
+
+    Возвращает dict булевых numpy-массивов длиной ``len(o)``.
+    """
+    n = len(o)
+    o = np.asarray(o, dtype=float)
+    h = np.asarray(h, dtype=float)
+    l = np.asarray(l, dtype=float)
+    c = np.asarray(c, dtype=float)
+    rng = h - l
+    body = np.abs(c - o)
+    safe_rng = np.where(rng > 0, rng, np.nan)
+
+    doji = np.zeros(n, dtype=bool)
+    if doji_body_ratio and doji_body_ratio > 0:
+        doji = (rng > 0) & (body <= float(doji_body_ratio) * rng)
+
+    upper_shadow = np.zeros(n, dtype=bool)
+    if upper_shadow_ratio and upper_shadow_ratio > 0:
+        upper = h - np.maximum(o, c)
+        upper_shadow = (rng > 0) & (upper >= float(upper_shadow_ratio) * rng)
+
+    lower_shadow = np.zeros(n, dtype=bool)
+    if lower_shadow_ratio and lower_shadow_ratio > 0:
+        lower = np.minimum(o, c) - l
+        lower_shadow = (rng > 0) & (lower >= float(lower_shadow_ratio) * rng)
+
+    consolidation = np.zeros(n, dtype=bool)
+    if consolidation_atr and consolidation_atr > 0 and atr_arr is not None:
+        atr_a = np.asarray(atr_arr, dtype=float)
+        consolidation = (rng > 0) & np.isfinite(atr_a) & (rng <= float(consolidation_atr) * atr_a)
+    elif narrow_range_ratio and narrow_range_ratio > 0 and prev_range is not None:
+        prev_a = np.asarray(prev_range, dtype=float)
+        consolidation = (rng > 0) & np.isfinite(prev_a) & (rng <= float(narrow_range_ratio) * prev_a)
+
+    return {
+        "doji": doji,
+        "consolidation": consolidation,
+        "upper_shadow": upper_shadow,
+        "lower_shadow": lower_shadow,
+        "range": rng,
+        "body": body,
+        "body_ratio": np.where(rng > 0, body / safe_rng, 0.0),
+    }
+
+
 def _compute_arrays(
     df: pd.DataFrame,
     htf_df: pd.DataFrame | None = None,
@@ -231,6 +301,16 @@ def _compute_arrays(
     vol_max_rel: float = 0.0,   # макс. относительный объём (0 = без потолка)
     long_need_bull_vol: float = 0.0,   # мин. доля быков на баре лонга (0 = выкл)
     short_need_bear_vol: float = 0.0,  # макс. доля быков на баре шорта (0 = выкл)
+    # ── Свечи ослабления тренда (0/выкл — поведение прод не меняется) ────────
+    # Требовать на баре входа признак «продавцы/покупатели кончились»:
+    # доджи (тело <= доля диапазона), консолидация (range <= ATR*k), длинная
+    # верхняя тень (отказ от роста — для шорта), нижняя (для лонга).
+    weak_need_doji: float = 0.0,        # макс. body_ratio для «доджи» (0 = выкл)
+    weak_need_consolidation_atr: float = 0.0,  # range <= k*ATR (0 = выкл)
+    weak_narrow_range_ratio: float = 0.5,      # range <= ratio*prev_range (для консолидации без ATR)
+    weak_need_upper_shadow: float = 0.0,  # мин. доля верхней тени для шорта (0 = выкл)
+    weak_need_lower_shadow: float = 0.0,  # мин. доля нижней тени для лонга (0 = выкл)
+    weak_min_signals: int = 1,          # сколько признаков слабости нужно (ИЛИ-логика, если >0)
 ) -> dict:
     """Векторизованный предрасчёт состояния сигнала на каждом баре.
 
@@ -344,8 +424,52 @@ def _compute_arrays(
     if short_need_bear_vol and short_need_bear_vol > 0:
         bear_vol_ok &= bull_bear <= short_need_bear_vol
 
+    # ── Свечи ослабления тренда (доджи / консолидация / тени) ───────────────
+    # средний диапазон за 20 баров — для консолидации без ATR
+    prev_range = pd.Series(bar_rng, index=idx).rolling(20, min_periods=5).mean().shift(1).values
+    weakness = weakness_masks(
+        o, h, l, c,
+        consolidation_atr=weak_need_consolidation_atr,
+        narrow_range_ratio=weak_narrow_range_ratio,
+        doji_body_ratio=weak_need_doji,
+        upper_shadow_ratio=weak_need_upper_shadow,
+        lower_shadow_ratio=weak_need_lower_shadow,
+        atr_arr=atr_arr,
+        prev_range=prev_range,
+        bar_range=bar_rng,
+    )
+    # Слабость в пользу шорта (покупатели кончились): доджи, консолидация,
+    # длинная верхняя тень. В пользу лонга — зеркально (нижняя тень).
+    short_weak_parts = [weakness["doji"], weakness["consolidation"], weakness["upper_shadow"]]
+    long_weak_parts = [weakness["doji"], weakness["consolidation"], weakness["lower_shadow"]]
+    short_weak = np.sum([p.astype(int) for p in short_weak_parts], axis=0)
+    long_weak = np.sum([p.astype(int) for p in long_weak_parts], axis=0)
+    need_weak_short = (
+        (weak_need_doji > 0) or (weak_need_consolidation_atr > 0)
+        or (weak_need_upper_shadow > 0)
+    )
+    need_weak_long = (
+        (weak_need_doji > 0) or (weak_need_consolidation_atr > 0)
+        or (weak_need_lower_shadow > 0)
+    )
+    min_sig = max(1, int(weak_min_signals))
+    short_weak_ok = np.ones(n, dtype=bool)
+    if need_weak_short:
+        short_weak_ok = short_weak >= min_sig
+    long_weak_ok = np.ones(n, dtype=bool)
+    if need_weak_long:
+        long_weak_ok = long_weak >= min_sig
+
     return {
         "trend_up": trend_up,
+        "weak_short_ok": short_weak_ok,
+        "weak_long_ok": long_weak_ok,
+        "weak_short_count": short_weak,
+        "weak_long_count": long_weak,
+        "weak_doji": weakness["doji"],
+        "weak_consolidation": weakness["consolidation"],
+        "weak_upper_shadow": weakness["upper_shadow"],
+        "weak_lower_shadow": weakness["lower_shadow"],
         "vol_ok": vol_ok,
         "bull_vol_ok": bull_vol_ok,
         "bear_vol_ok": bear_vol_ok,
@@ -385,6 +509,8 @@ def _entry_ok(st: dict, i: int) -> bool:
         return False
     if not bool(st.get("bull_vol_ok", np.ones(1, dtype=bool))[i]):
         return False
+    if not bool(st.get("weak_long_ok", np.ones(1, dtype=bool))[i]):
+        return False
     if not st["in_discount"][i]:
         return False
     seg = st["seg"][i]
@@ -416,6 +542,8 @@ def _entry_ok_short(st: dict, i: int) -> bool:
     if bool(st["trend_up"][i]) or not bool(st["vol_ok"][i]) or not bool(st["adx_ok"][i]):
         return False
     if not bool(st.get("bear_vol_ok", np.ones(1, dtype=bool))[i]):
+        return False
+    if not bool(st.get("weak_short_ok", np.ones(1, dtype=bool))[i]):
         return False
     if not st["in_premium"][i]:
         return False

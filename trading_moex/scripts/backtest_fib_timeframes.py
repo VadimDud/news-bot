@@ -137,7 +137,9 @@ def main() -> None:
         if not all_trades:
             print(f"{tf:<7} (нет сделок)")
             continue
-        s = {name: summarize(name, build_ledger(all_trades, weekend, cm), len(all_trades) * CASH_PER_TICKER)
+        # Капитал = тикеры × 100k (выделен на тикер), а не на сделку.
+        capital = max(used, 1) * CASH_PER_TICKER
+        s = {name: summarize(name, build_ledger(all_trades, weekend, cm), capital)
              for name, cm in legs.items()}
         n = len(all_trades)
         gross = sum(x["pnl_gross"] for x in all_trades)

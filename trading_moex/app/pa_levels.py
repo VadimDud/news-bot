@@ -45,18 +45,23 @@ class PALevelParams:
     equal_level_atr: float = 0.25
     sweep_max_return_bars: int = 3
     pattern_atr_tol: float = 0.5
-    rr_min: float = 1.5
+    rr_min: float = 2.0
     stop_buffer_atr: float = 0.2
     breakeven_r: float = 1.0
     trail_look: int = 5
+    bailout_on_drawdown: int = 0  # принудительный выход, если цена пошла к стопу, не дойдя до цели
     direction: int = 0  # 0=оба, 1=лонг, -1=шорт
     range_mult: float = 1.0  # расширение зоны уровня в ATR
     # ── Из видео (0/выкл — поведение прежнего PA-LEVELS не меняется) ────────
-    use_htf: int = 0           # старший ТФ: лонг только в тренде вверх, шорт — вниз
-    htf_ema_period: int = 50   # EMA тренда старшего ТФ
-    require_compression: int = 0  # требовать сжатие диапазона (триггер из видео)
+    # Порядок: пробой (импульс) → быстрый возврат → сжатие ПОСЛЕ возврата → вход.
+    require_compression: int = 0  # требовать сжатие (триггер из видео)
     compress_body_ratio: float = 0.35   # тело <= доли диапазона (сжатие)
     compress_range_atr: float = 0.6     # диапазон <= k*ATR (сжатие)
+    compress_after_return: int = 1      # сжатие ищем ПОСЛЕ возврата (в окне), не на том же баре
+    impulse_atr_min: float = 0.0        # глубина пробоя >= k*ATR (импульсный); 0 = без порога
+    # ── HTF (старший ТФ) — по закрытым свечам ───────────────────────────────
+    use_htf: int = 0           # старший ТФ: лонг только в тренде вверх, шорт — вниз
+    htf_ema_period: int = 50   # EMA тренда старшего ТФ
 
 
 @dataclass
@@ -223,23 +228,46 @@ def compression_mask(df: pd.DataFrame, atr: np.ndarray, p: PALevelParams) -> np.
     return body_ok & range_ok
 
 
+def _htf_close_times(htf: pd.DataFrame) -> pd.DatetimeIndex:
+    """Моменты *закрытия* HTF-баров (когда их close уже известен).
+
+    ``begin`` каждого HTF-бара — время его открытия. Значение close становится
+    доступным только к закрытию интервала. Оцениваем закрытие как начало
+    следующего бара, а для последнего бара — как ``begin + медианный интервал``.
+    Так LTF-бар, попавший внутрь формирующегося HTF-бара, видит предыдущий
+    закрытый HTF-бар, а не текущий незавершённый.
+    """
+    idx = htf.index
+    if len(idx) >= 2:
+        step = pd.Series(idx[1:] - idx[:-1]).median()
+    else:
+        step = pd.Timedelta(0)
+    close_times = np.empty(len(idx), dtype="datetime64[ns]")
+    if len(idx) >= 2:
+        close_times[:-1] = idx[1:].to_numpy()
+    close_times[-1] = (idx[-1] + (step if step > pd.Timedelta(0) else pd.Timedelta(0))).to_numpy()
+    return pd.DatetimeIndex(close_times)
+
+
 def htf_trend_at(htf_df: pd.DataFrame, ltf_index, ema_period: int) -> np.ndarray:
     """Причинный HTF-тренд: на каждый LTF-бар — направление (1/0/-1).
 
-    Для LTF-бара ``i`` берётся последний *закрытый* HTF-бар с ``htf.begin <=
-    begin_i`` (merge_asof, backward) — не подсматривает будущее. Тренд ``+1``,
-    если close > EMA, ``-1`` если <, иначе ``0``. Возвращает массив длиной LTF.
+    Направление HTF-бара засчитывается LTF-бару, только если HTF-бар **уже
+    закрылся** к моменту LTF-бара (сравнение с ``_htf_close_times``, merge_asof
+    backward). Так незавершённая HTF-свеча не подсматривает свой будущий close.
+    Тренд ``+1``, если close > EMA, ``-1`` если <, иначе ``0``. Длина = len(LTF).
     """
     htf = prepare_ohlc(htf_df)
     if htf.empty:
         return np.zeros(len(ltf_index), int)
     ema = htf["close"].ewm(span=int(ema_period), adjust=False).mean()
-    dirs = pd.Series(np.where(htf["close"] > ema, 1,
-                              np.where(htf["close"] < ema, -1, 0)), index=htf.index)
+    dirs = np.where(htf["close"] > ema, 1, np.where(htf["close"] < ema, -1, 0)).astype(int)
+    dirs_df = pd.DataFrame({"t": _htf_close_times(htf), "dir": dirs}).sort_values("t")
     ltf = pd.DataFrame({"t": pd.DatetimeIndex(ltf_index)}).sort_values("t")
-    dirs_df = pd.DataFrame({"t": dirs.index, "dir": dirs.values}).sort_values("t")
+    dirs_df["t"] = pd.Series(dirs_df["t"].to_numpy()).astype("datetime64[ns]")
+    ltf["t"] = pd.Series(ltf["t"].to_numpy()).astype("datetime64[ns]")
     merged = pd.merge_asof(ltf, dirs_df, on="t", direction="backward")
-    return merged["dir"].fillna(0).to_numpy(int)
+    return merged["dir"].fillna(0).astype(int).to_numpy()
 
 
 # ── 3. Свечные паттерны на уровне ────────────────────────────────────────────
@@ -310,7 +338,7 @@ def detect_false_breakouts(
     df = prepare_ohlc(df)
     n = len(df)
     cols = ["level_pos", "broke_idx", "known_at_idx", "side", "depth_atr",
-            "return_vol_ratio", "is_sweep"]
+            "return_vol_ratio", "is_sweep", "breakout_extreme", "impulse_atr"]
     if sr.empty or n == 0:
         return pd.DataFrame(columns=cols)
 
@@ -345,13 +373,16 @@ def detect_false_breakouts(
         for li in hi_idx:
             price = float(lv_price[li])
             level_pos = int(lv_known[li])
+            # экстремум пробоя — максимальный high от бара пробоя до возврата
             if c[i] < price:  # вернулись на том же баре
                 depth = (h[i] - price) / a if np.isfinite(a) else np.nan
                 rows.append({
-                    "level_pos": level_pos, "broke_idx": i - 1,
+                    "level_pos": level_pos, "broke_idx": i,
                     "known_at_idx": i, "side": -1, "depth_atr": depth,
                     "return_vol_ratio": float(relvol[i] / (relvol[i - 1] + 1e-9)),
                     "is_sweep": bool(relvol[i - 1] >= p.vol_mult and c[i] < price),
+                    "breakout_extreme": float(h[i]),
+                    "impulse_atr": float((h[i] - price) / a) if np.isfinite(a) else np.nan,
                 })
             else:
                 for r in range(1, k + 1):
@@ -359,12 +390,15 @@ def detect_false_breakouts(
                     if j >= n:
                         break
                     if c[j] < price:
-                        depth = (h[i] - price) / a if np.isfinite(a) else np.nan
+                        brk_hi = float(h[i:j + 1].max())
+                        depth = (brk_hi - price) / a if np.isfinite(a) else np.nan
                         rows.append({
                             "level_pos": level_pos, "broke_idx": i,
                             "known_at_idx": j, "side": -1, "depth_atr": depth,
                             "return_vol_ratio": float(relvol[j] / (relvol[i] + 1e-9)),
                             "is_sweep": bool(relvol[i] >= p.vol_mult and relvol[j] < relvol[i]),
+                            "breakout_extreme": brk_hi,
+                            "impulse_atr": depth,
                         })
                         break
         for li in lo_idx:
@@ -373,10 +407,12 @@ def detect_false_breakouts(
             if c[i] > price:
                 depth = (price - l[i]) / a if np.isfinite(a) else np.nan
                 rows.append({
-                    "level_pos": level_pos, "broke_idx": i - 1,
+                    "level_pos": level_pos, "broke_idx": i,
                     "known_at_idx": i, "side": 1, "depth_atr": depth,
                     "return_vol_ratio": float(relvol[i] / (relvol[i - 1] + 1e-9)),
                     "is_sweep": bool(relvol[i - 1] >= p.vol_mult and c[i] > price),
+                    "breakout_extreme": float(l[i]),
+                    "impulse_atr": float((price - l[i]) / a) if np.isfinite(a) else np.nan,
                 })
             else:
                 for r in range(1, k + 1):
@@ -384,12 +420,15 @@ def detect_false_breakouts(
                     if j >= n:
                         break
                     if c[j] > price:
-                        depth = (price - l[i]) / a if np.isfinite(a) else np.nan
+                        brk_lo = float(l[i:j + 1].min())
+                        depth = (price - brk_lo) / a if np.isfinite(a) else np.nan
                         rows.append({
                             "level_pos": level_pos, "broke_idx": i,
                             "known_at_idx": j, "side": 1, "depth_atr": depth,
                             "return_vol_ratio": float(relvol[j] / (relvol[i] + 1e-9)),
                             "is_sweep": bool(relvol[i] >= p.vol_mult and relvol[j] < relvol[i]),
+                            "breakout_extreme": brk_lo,
+                            "impulse_atr": depth,
                         })
                         break
     return pd.DataFrame(rows, columns=cols)
@@ -483,12 +522,35 @@ def generate_signals(
     o, c = df["open"].to_numpy(float), df["close"].to_numpy(float)
     h, l = df["high"].to_numpy(float), df["low"].to_numpy(float)
     idx = df.index
+    n = len(df)
 
     # быстрый доступ: для бара сколько сильных уровней рядом
     strong = sr[sr["touches"] >= p.min_touches].copy()
     strong["vol_ok"] = strong["vol_reaction"] >= p.vol_mult
 
+    # Сжатие ПОСЛЕ возврата: для каждого бара-возврата (known_at) ближайший
+    # бар сжатия в окне (return_bar, return_bar + sweep_max_return_bars].
+    # Причина: возврат произошёл на `known_at`; сжатие ищется на последующих
+    # барах, а не на том же. Вход — на баре сжатия.
+    def _compression_after_return(return_pos: int) -> int | None:
+        if comp is None:
+            return None
+        end = min(n, return_pos + int(p.sweep_max_return_bars) + 1)
+        for j in range(return_pos + 1, end):
+            if comp[j]:
+                return j
+        return None
+
     signals = []
+    # sweep-события по бару возврата → поиск сжатия после возврата.
+    sweep_after: dict[int, list[dict]] = {}
+    if not fbo.empty and p.require_compression and p.compress_after_return:
+        for _, ev in fbo[fbo["is_sweep"]].iterrows():
+            rp = int(ev["known_at_idx"])
+            cj = _compression_after_return(rp)
+            if cj is not None:
+                sweep_after.setdefault(cj, []).append(ev.to_dict())
+
     for i in range(1, n):
         a = atr[i]
         if not np.isfinite(a) or a <= 0:
@@ -497,8 +559,10 @@ def generate_signals(
         # HTF-фильтр: лонг разрешён при тренде вверх, шорт — вниз (видео п.1.3)
         allow_long = htf_dir is None or htf_dir[i] > 0
         allow_short = htf_dir is None or htf_dir[i] < 0
-        # Триггер-сжатие: если включён — вход только на сжимающемся баре
-        comp_ok = (comp[i] if comp is not None else True)
+        # Триггер-сжатие: если включён и НЕ ищем «сжатие после возврата» — вход
+        # только на сжимающемся баре (старое поведение).
+        comp_ok = (comp[i] if (comp is not None and not (p.compress_after_return and not fbo.empty))
+                   else True)
         known = strong[strong["known_pos"] <= i]
         if known.empty:
             continue
@@ -509,9 +573,9 @@ def generate_signals(
         res = known[(known["side"] == "high") & (known["vol_ok"])
                     & (np.abs(known["price"] - price) <= tol)]
 
-        # --- лонг ---
+        # --- лонг по паттерну (требуем подтверждение объёмом на баре входа) ---
         if (p.direction >= 0 and allow_long and comp_ok and not sup.empty
-                and patterns.iloc[i]["bullish_reversal"]):
+                and patterns.iloc[i]["bullish_reversal"] and relvol[i] >= p.vol_mult):
             lvl = float(sup.iloc[-1]["price"])
             stop = l[i] - p.stop_buffer_atr * a
             risk = price - stop
@@ -532,27 +596,46 @@ def generate_signals(
                         "reasons": [f"support@{lvl:.2f}", str(patterns.iloc[i]["pattern"]),
                                     f"vol={relvol[i]:.2f}"],
                     })
-        # sweep-лонг (без обязательного паттерна, но с is_sweep)
-        if (p.direction >= 0 and allow_long and comp_ok and not fbo.empty
-                and not sup.empty):
-            ev = fbo[(fbo["known_at_idx"] == i) & (fbo["side"] == 1) & fbo["is_sweep"]]
-            if not ev.empty:
+        # sweep-лонг (без паттерна, с is_sweep; стоп — за экстремумом пробоя).
+        if (p.direction >= 0 and allow_long and not fbo.empty and not sup.empty):
+            if p.require_compression and p.compress_after_return:
+                evs = sweep_after.get(i, [])
+                evs = [e for e in evs if e["side"] == 1]
+                # импульсный пробой: глубина >= impulse_atr_min * ATR
+                evs = [e for e in evs if (p.impulse_atr_min <= 0
+                       or (np.isfinite(e.get("depth_atr") or np.nan)
+                           and e["depth_atr"] >= p.impulse_atr_min))]
+                use_ev = evs[0] if evs else None
+            elif comp_ok:
+                ev = fbo[(fbo["known_at_idx"] == i) & (fbo["side"] == 1) & fbo["is_sweep"]]
+                use_ev = ev.iloc[0].to_dict() if not ev.empty else None
+            else:
+                use_ev = None
+            if use_ev is not None:
                 lvl = float(sup.iloc[-1]["price"])
-                stop = l[i] - p.stop_buffer_atr * a
+                ext = float(use_ev.get("breakout_extreme", l[i]))
+                stop = min(ext, l[i]) - p.stop_buffer_atr * a
                 risk = price - stop
                 if risk > 0:
                     obstacles = known[(known["side"] == "high") & (known["price"] > price)]["price"]
-                    target = min(obstacles) if not obstacles.empty else price + p.rr_min * risk
+                    vp = find_liquidity_clusters(df, i, p)
+                    cand = list(obstacles)
+                    for key in ("vah", "poc"):
+                        v = vp.get(key)
+                        if v is not None and v > price:
+                            cand.append(v)
+                    target = min(cand) if cand else price + p.rr_min * risk
                     if target - price >= p.rr_min * risk:
                         signals.append({
                             "idx": i, "time": idx[i], "side": 1, "price": price,
                             "stop": float(stop), "target": float(target),
-                            "reasons": [f"sweep_ssl@{lvl:.2f}", f"vol={relvol[i]:.2f}"],
+                            "reasons": [f"sweep_ssl@{lvl:.2f}", f"vol={relvol[i]:.2f}",
+                                        f"ret={use_ev.get('known_at_idx')}"],
                         })
 
-        # --- шорт ---
+        # --- шорт по паттерну (требуем подтверждение объёмом) ---
         if (p.direction <= 0 and allow_short and comp_ok and not res.empty
-                and patterns.iloc[i]["bearish_reversal"]):
+                and patterns.iloc[i]["bearish_reversal"] and relvol[i] >= p.vol_mult):
             lvl = float(res.iloc[-1]["price"])
             stop = h[i] + p.stop_buffer_atr * a
             risk = stop - price
@@ -572,24 +655,44 @@ def generate_signals(
                         "reasons": [f"resistance@{lvl:.2f}", str(patterns.iloc[i]["pattern"]),
                                     f"vol={relvol[i]:.2f}"],
                     })
-        if (p.direction <= 0 and allow_short and comp_ok and not fbo.empty and not res.empty):
-            ev = fbo[(fbo["known_at_idx"] == i) & (fbo["side"] == -1) & fbo["is_sweep"]]
-            if not ev.empty:
+        # sweep-шорт (стоп — за экстремумом пробоя).
+        if (p.direction <= 0 and allow_short and not fbo.empty and not res.empty):
+            if p.require_compression and p.compress_after_return:
+                evs = sweep_after.get(i, [])
+                evs = [e for e in evs if e["side"] == -1]
+                evs = [e for e in evs if (p.impulse_atr_min <= 0
+                       or (np.isfinite(e.get("depth_atr") or np.nan)
+                           and e["depth_atr"] >= p.impulse_atr_min))]
+                use_ev = evs[0] if evs else None
+            elif comp_ok:
+                ev = fbo[(fbo["known_at_idx"] == i) & (fbo["side"] == -1) & fbo["is_sweep"]]
+                use_ev = ev.iloc[0].to_dict() if not ev.empty else None
+            else:
+                use_ev = None
+            if use_ev is not None:
                 lvl = float(res.iloc[-1]["price"])
-                stop = h[i] + p.stop_buffer_atr * a
+                ext = float(use_ev.get("breakout_extreme", h[i]))
+                stop = max(ext, h[i]) + p.stop_buffer_atr * a
                 risk = stop - price
                 if risk > 0:
                     obstacles = known[(known["side"] == "low") & (known["price"] < price)]["price"]
-                    target = max(obstacles) if not obstacles.empty else price - p.rr_min * risk
+                    vp = find_liquidity_clusters(df, i, p)
+                    cand = list(obstacles)
+                    for key in ("val", "poc"):
+                        v = vp.get(key)
+                        if v is not None and v < price:
+                            cand.append(v)
+                    target = max(cand) if cand else price - p.rr_min * risk
                     if price - target >= p.rr_min * risk:
                         signals.append({
                             "idx": i, "time": idx[i], "side": -1, "price": price,
                             "stop": float(stop), "target": float(target),
-                            "reasons": [f"sweep_bsl@{lvl:.2f}", f"vol={relvol[i]:.2f}"],
+                            "reasons": [f"sweep_bsl@{lvl:.2f}", f"vol={relvol[i]:.2f}",
+                                        f"ret={use_ev.get('known_at_idx')}"],
                         })
     out = pd.DataFrame(signals)
     if out.empty:
         return pd.DataFrame(columns=["idx", "time", "side", "price", "stop", "target", "reasons"])
-    # один сигнал на бар (приоритет паттерну над sweep) — берём первый
+    # один сигнал на бар-сторону (приоритет паттерну над sweep) — берём первый
     out = out.drop_duplicates(subset=["idx", "side"], keep="first")
     return out.sort_values("idx").reset_index(drop=True)

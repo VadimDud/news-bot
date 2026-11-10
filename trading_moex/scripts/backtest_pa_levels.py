@@ -34,8 +34,48 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from app.pa_levels import PALevelParams, generate_signals  # noqa: E402
+from app.pa_levels import _atr  # noqa: E402
 
 ALL_TICKERS = ["SBER", "LKOH", "GAZP", "TATN", "NVTK", "CHMF", "NLMK", "MOEX", "T", "MTSS"]
+
+
+def chrono_split(trades: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Делит сделки на раннюю/позднюю половины по времени входа (хроно-раздел)."""
+    if not trades:
+        return [], []
+    ordered = sorted(trades, key=lambda t: t["entry_time"])
+    mid = len(ordered) // 2
+    return ordered[:mid], ordered[mid:]
+
+
+def random_control_signals(df: pd.DataFrame, n_signals: int, seed: int,
+                            rr: float = 2.0, vol_mult: float = 1.5) -> pd.DataFrame:
+    """Случайные входы той же частоты, стоп/тейк по ATR (независимый контроль).
+
+    Нужен, чтобы проверить: даёт ли реальная логика уровней edge сверх
+    случайного входа с сопоставимой частотой и RRR.
+    """
+    rng = np.random.default_rng(seed)
+    p = PALevelParams()
+    atr = _atr(df, p.atr_period).to_numpy(float)
+    n = len(df)
+    lo_i = max(p.atr_period, 5)
+    if n <= lo_i + 1 or n_signals <= 0:
+        return pd.DataFrame(columns=["idx", "time", "side", "price", "stop", "target", "reasons"])
+    picks = rng.choice(np.arange(lo_i, n - 1), size=min(n_signals, n - lo_i - 1), replace=False)
+    rows = []
+    for i in sorted(picks.tolist()):
+        a = atr[i]
+        if not np.isfinite(a) or a <= 0:
+            continue
+        side = 1 if rng.random() < 0.5 else -1
+        price = float(df["close"].iloc[i])
+        risk = a * vol_mult
+        stop = price - side * risk
+        target = price + side * rr * risk
+        rows.append({"idx": int(i), "time": df.index[i], "side": side, "price": price,
+                     "stop": stop, "target": target, "reasons": ["random"]})
+    return pd.DataFrame(rows, columns=["idx", "time", "side", "price", "stop", "target", "reasons"])
 
 
 def load_df(db: str, ticker: str, period: str) -> pd.DataFrame:
@@ -82,7 +122,19 @@ def simulate_trades(
     commission: float,
     slippage: float,
 ) -> list[dict]:
-    """Прогон управления сделкой по каждому сигналу (вход по следующему open)."""
+    """Прогон управления сделкой по каждому сигналу (вход по следующему open).
+
+    Исполнение:
+    * вход по open следующего бара; слип учитывается ОДИН раз на сторону
+      (в `cost`), цена входа/выхода — чистые;
+    * внутри бара сначала проверяется стоп (консервативно), затем тейк (OCO);
+    * безубыток после ``breakeven_r`` R; трейлинг за ``trail_look`` барами;
+    * принудительный выход (правило пользователя): если бар закрылся по
+      обратную сторону от входа (цена пошла к стопу), не дойдя до цели —
+      закрываем по close этого бара (reason="bailout");
+    * одна позиция на тикер: новый сигнал на тикере игнорируется, пока
+      предыдущая не закрыта (нет наложения/одновременных сделок).
+    """
     o = df["open"].to_numpy(float)
     h = df["high"].to_numpy(float)
     l = df["low"].to_numpy(float)
@@ -90,13 +142,14 @@ def simulate_trades(
     idx = df.index
     n = len(df)
     trades = []
-    for _, s in signals.iterrows():
+    busy_until = -1  # бар, до которого тикер занят (нет наложения позиций)
+    for _, s in sorted(signals.iterrows(), key=lambda r: int(r[1]["idx"])):
         i = int(s["idx"])
         entry_bar = i + 1
-        if entry_bar >= n:
+        if entry_bar >= n or entry_bar <= busy_until:
             continue
         side = int(s["side"])
-        entry = o[entry_bar] * (1 + slippage * side)  # слип против нас
+        entry = o[entry_bar]  # чистая цена входа; слип — в cost
         stop = float(s["stop"])
         target = float(s["target"])
         risk = (entry - stop) if side == 1 else (stop - entry)
@@ -119,6 +172,11 @@ def simulate_trades(
                 exit_price, exit_bar, exit_reason = target, j, "target"; break
             if side == -1 and lo <= target:
                 exit_price, exit_bar, exit_reason = target, j, "target"; break
+            # --- принудительный выход: цена закрылась против позиции, не дойдя
+            #     до цели (движение к стопу) ---
+            if p.bailout_on_drawdown and j > entry_bar:
+                if (side == 1 and c[j] < entry) or (side == -1 and c[j] > entry):
+                    exit_price, exit_bar, exit_reason = c[j], j, "bailout"; break
             # --- безубыток после breakeven_r ---
             if not moved_be:
                 if (side == 1 and hi >= be_level) or (side == -1 and lo <= be_level):
@@ -134,7 +192,9 @@ def simulate_trades(
                     stop = min(stop, trail)
         if exit_price is None:
             exit_price, exit_bar, exit_reason = c[-1], n - 1, "eod"
+        busy_until = exit_bar  # тикер занят до выхода
         gross = (exit_price - entry) * side
+        # слип один раз на сторону (вход + выход); цена входа/выхода чистая
         cost = (entry + exit_price) * commission + (entry + exit_price) * slippage
         net = gross - cost
         trades.append({
@@ -188,13 +248,23 @@ def main() -> None:
     parser.add_argument("--direction", type=int, default=0, help="0=оба, 1=только лонг, -1=только шорт")
     parser.add_argument("--min-touches", type=int, default=3)
     parser.add_argument("--vol-mult", type=float, default=1.5)
-    parser.add_argument("--rr-min", type=float, default=1.5)
+    parser.add_argument("--rr-min", type=float, default=2.0)
     parser.add_argument("--use-htf", type=int, default=0,
                         help="Фильтр тренда старшего ТФ (видео п.1.3)")
     parser.add_argument("--require-compression", type=int, default=0,
                         help="Триггер сжатия диапазона (видео п.2.4)")
     parser.add_argument("--compress-body-ratio", type=float, default=0.35)
     parser.add_argument("--compress-range-atr", type=float, default=0.6)
+    parser.add_argument("--compress-after-return", type=int, default=1,
+                        help="Сжатие ищем ПОСЛЕ возврата (последовательность видео)")
+    parser.add_argument("--impulse-atr-min", type=float, default=0.0,
+                        help="Мин. глубина пробоя в ATR (импульсный); 0 = без порога")
+    parser.add_argument("--bailout-on-drawdown", type=int, default=0,
+                        help="Принудительный выход при движении к стопу (правило пользователя)")
+    parser.add_argument("--chrono", type=int, default=0,
+                        help="Печать хроно-разбиения (ранняя/поздняя половины)")
+    parser.add_argument("--random-seed", type=int, default=-1,
+                        help="≥0: контроль случайных входов с этим seed")
     parser.add_argument("--run-dir", default=None)
     args = parser.parse_args()
 
@@ -203,7 +273,10 @@ def main() -> None:
                       rr_min=args.rr_min, direction=args.direction,
                       use_htf=args.use_htf, require_compression=args.require_compression,
                       compress_body_ratio=args.compress_body_ratio,
-                      compress_range_atr=args.compress_range_atr)
+                      compress_range_atr=args.compress_range_atr,
+                      compress_after_return=args.compress_after_return,
+                      impulse_atr_min=args.impulse_atr_min,
+                      bailout_on_drawdown=args.bailout_on_drawdown)
 
     print(f"PA levels | период={args.period} | direction={args.direction} | "
           f"min_touches={args.min_touches} vol_mult={args.vol_mult} rr_min={args.rr_min}")
@@ -229,6 +302,35 @@ def main() -> None:
     total = metrics(all_trades)
     print(f"\nИТОГО сделок={total['trades']} win={total['winrate']}% PF={total['pf']} "
           f"avgR={total['avg_r']:+.3f} maxDD={total['max_dd']:,.0f} NET={total['net']:+,.0f}")
+
+    chrono = {}
+    if args.chrono and all_trades:
+        early, late = chrono_split(all_trades)
+        for name, part in (("ранняя", early), ("поздняя", late)):
+            m = metrics(part)
+            chrono[name] = m
+            print(f"  хроно {name:<8}: сделок={m['trades']:>3} PF={str(m['pf']):>6} "
+                  f"avgR={m['avg_r']:>+6.2f} NET={m['net']:>+9,.0f}")
+
+    random_m = None
+    if args.random_seed >= 0 and all_trades:
+        rand_trades = []
+        for t in tickers:
+            df = load_df(args.db, t, args.period)
+            if df.empty:
+                continue
+            n_real = sum(1 for tr in all_trades if tr.get("ticker") == t)
+            sig = random_control_signals(df, n_real, args.random_seed, rr=args.rr_min,
+                                         vol_mult=args.vol_mult)
+            if sig.empty:
+                continue
+            rt = simulate_trades(df, sig, p, args.commission, args.slippage)
+            for tr in rt:
+                tr["ticker"] = t
+            rand_trades.extend(rt)
+        random_m = metrics(rand_trades)
+        print(f"  контроль random: сделок={random_m['trades']:>3} PF={str(random_m['pf']):>6} "
+              f"avgR={random_m['avg_r']:>+6.2f} NET={random_m['net']:>+9,.0f}")
 
     # таблица сделок (кратко)
     if all_trades:

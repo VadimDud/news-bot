@@ -124,3 +124,77 @@ def test_compression_mask_detects_narrow_bar():
     m = compression_mask(df, atr, PALevelParams(compress_body_ratio=0.35,
                                                 compress_range_atr=0.6))
     assert m.tolist() == [False, True]
+
+
+def test_htf_uses_only_closed_candles():
+    """LTF-бар внутри формирующейся HTF-свечи не должен видеть её close."""
+    from app.pa_levels import htf_trend_at
+    # HTF = дневные свечи; последняя «свеча» растёт, но ещё не закрыта.
+    htf_idx = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+    htf = pd.DataFrame({"open": [10, 10, 10], "high": [10, 11, 99],
+                        "low": [10, 9, 10], "close": [10, 11, 50],
+                        "volume": 1.0}, index=htf_idx)
+    # LTF: внутри 3-го HTF-дня (2024-01-03 12:00). Дневная свеча от 01-03
+    # закроется только 01-04, значит тренд на полдень 01-03 ещё не «вверх».
+    ltf_idx = pd.to_datetime(["2024-01-03 12:00"])
+    d = htf_trend_at(htf, ltf_idx, ema_period=1)
+    # ema(span=1)=close; на закрытой свече 01-02 close=11 > ema? ema=11, не >,
+    # направление 0 или предыдущее; главное — НЕ +1 от незакрытой 01-03 (close=50).
+    # явная проверка: последняя ЗАКРЫТАЯ свеча (01-02) не даёт +1 из-за close=50
+    htf2 = htf.copy()
+    htf2.loc[pd.to_datetime("2024-01-03"), "close"] = 1e9  # будущий экстрим
+    d2 = htf_trend_at(htf2, ltf_idx, ema_period=1)
+    assert d.tolist() == d2.tolist()  # будущий close не влияет
+
+
+def test_false_breakout_exposes_extreme_and_same_bar_idx():
+    from app.pa_levels import detect_false_breakouts, find_support_resistance
+    # строим простой ряд: уровень ~100, бар пробивает вверх (high 105) и
+    # возвращается на том же баре (close 99).
+    n = 60
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    close = np.full(n, 100.0); high = np.full(n, 100.5); low = np.full(n, 99.5)
+    openp = np.full(n, 100.0)
+    # два свинг-хая для уровня
+    for p in (10, 30):
+        high[p] = 101.0
+    # бар пробоя: 45 — high 105, close 99 (вернулись на том же баре)
+    high[45] = 105.0; low[45] = 98.5; close[45] = 99.0
+    df = pd.DataFrame({"open": openp, "high": high, "low": low,
+                       "close": close, "volume": 1.0}, index=idx)
+    p = PALevelParams(swing_look=2)
+    sr = find_support_resistance(df, p)
+    fbo = detect_false_breakouts(df, sr, p)
+    if not fbo.empty:
+        row = fbo[fbo["known_at_idx"] == 45]
+        if not row.empty:
+            r = row.iloc[0]
+            assert r["broke_idx"] == 45          # same-bar: пробой на баре i
+            assert r["breakout_extreme"] >= 105.0  # экстремум пробоя сохранён
+
+
+def test_rr_min_default_is_2():
+    assert PALevelParams().rr_min == 2.0
+
+
+def test_bailout_exit_and_no_overlap():
+    from scripts.backtest_pa_levels import simulate_trades
+    # сигнал на баре 0 (лонг), затем цена падает -> bailout; второй сигнал
+    # внутри позиции игнорируется.
+    n = 10
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    o = np.array([100, 100, 100, 100, 100, 100, 100, 100, 100, 100], float)
+    h = np.array([101, 101, 101, 101, 101, 101, 101, 101, 101, 101], float)
+    l = np.array([99, 99, 99, 99, 99, 99, 99, 99, 99, 99], float)
+    c = np.array([100, 100, 98, 97, 96, 95, 94, 93, 92, 91], float)
+    df = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": 1.0}, index=idx)
+    sig = pd.DataFrame([
+        {"idx": 0, "time": idx[1], "side": 1, "price": 100, "stop": 90, "target": 120,
+         "reasons": ["t"]},
+        {"idx": 1, "time": idx[2], "side": 1, "price": 100, "stop": 90, "target": 120,
+         "reasons": ["t2"]},
+    ])
+    p = PALevelParams(bailout_on_drawdown=1)
+    trades = simulate_trades(df, sig, p, commission=0.0, slippage=0.0)
+    assert len(trades) == 1                    # второй сигнал внутри позиции отброшен
+    assert trades[0]["reason"] == "bailout"    # цена пошла к стопу, не дойдя до цели

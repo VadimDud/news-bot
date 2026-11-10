@@ -51,6 +51,12 @@ class PALevelParams:
     trail_look: int = 5
     direction: int = 0  # 0=оба, 1=лонг, -1=шорт
     range_mult: float = 1.0  # расширение зоны уровня в ATR
+    # ── Из видео (0/выкл — поведение прежнего PA-LEVELS не меняется) ────────
+    use_htf: int = 0           # старший ТФ: лонг только в тренде вверх, шорт — вниз
+    htf_ema_period: int = 50   # EMA тренда старшего ТФ
+    require_compression: int = 0  # требовать сжатие диапазона (триггер из видео)
+    compress_body_ratio: float = 0.35   # тело <= доли диапазона (сжатие)
+    compress_range_atr: float = 0.6     # диапазон <= k*ATR (сжатие)
 
 
 @dataclass
@@ -197,6 +203,43 @@ def _bar_metrics(df: pd.DataFrame) -> dict[str, np.ndarray]:
     lower = np.minimum(o, c) - l
     return {"o": o, "h": h, "l": l, "c": c, "rng": rng,
             "body": body, "upper": upper, "lower": lower}
+
+
+def compression_mask(df: pd.DataFrame, atr: np.ndarray, p: PALevelParams) -> np.ndarray:
+    """Причинная маска «сжатия диапазона» (триггер из видео, п.2.4).
+
+    Бар ``i`` — сжатие, если его тело ``<= compress_body_ratio`` диапазона
+    (мелкая свеча/нерешительность) и диапазон ``<= compress_range_atr * ATR``.
+    Только текущий бар, future не используется.
+    """
+    m = _bar_metrics(df)
+    rng, body = m["rng"], m["body"]
+    atr_a = np.asarray(atr, float)
+    body_ok = body <= float(p.compress_body_ratio) * rng
+    if p.compress_range_atr and p.compress_range_atr > 0:
+        range_ok = np.isfinite(atr_a) & (atr_a > 0) & (rng <= float(p.compress_range_atr) * atr_a)
+    else:
+        range_ok = np.ones(len(rng), bool)
+    return body_ok & range_ok
+
+
+def htf_trend_at(htf_df: pd.DataFrame, ltf_index, ema_period: int) -> np.ndarray:
+    """Причинный HTF-тренд: на каждый LTF-бар — направление (1/0/-1).
+
+    Для LTF-бара ``i`` берётся последний *закрытый* HTF-бар с ``htf.begin <=
+    begin_i`` (merge_asof, backward) — не подсматривает будущее. Тренд ``+1``,
+    если close > EMA, ``-1`` если <, иначе ``0``. Возвращает массив длиной LTF.
+    """
+    htf = prepare_ohlc(htf_df)
+    if htf.empty:
+        return np.zeros(len(ltf_index), int)
+    ema = htf["close"].ewm(span=int(ema_period), adjust=False).mean()
+    dirs = pd.Series(np.where(htf["close"] > ema, 1,
+                              np.where(htf["close"] < ema, -1, 0)), index=htf.index)
+    ltf = pd.DataFrame({"t": pd.DatetimeIndex(ltf_index)}).sort_values("t")
+    dirs_df = pd.DataFrame({"t": dirs.index, "dir": dirs.values}).sort_values("t")
+    merged = pd.merge_asof(ltf, dirs_df, on="t", direction="backward")
+    return merged["dir"].fillna(0).to_numpy(int)
 
 
 # ── 3. Свечные паттерны на уровне ────────────────────────────────────────────
@@ -399,6 +442,7 @@ def find_liquidity_clusters(
 def generate_signals(
     df: pd.DataFrame,
     p: PALevelParams | None = None,
+    htf_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Собирает детекторы в причинные сигналы входа (пункт 6 промта).
 
@@ -430,6 +474,12 @@ def generate_signals(
     patterns = pats.set_index(df.index)
     fbo_by_time = fbo.set_index(fbo["known_at_idx"]) if not fbo.empty else pd.DataFrame()
 
+    # Триггер-сжатие (видео п.2.4) и фильтр HTF-тренда (видео п.1.3) — опционально.
+    comp = compression_mask(df, atr, p) if p.require_compression else None
+    htf_dir = (htf_trend_at(htf_df, df.index, p.htf_ema_period)
+               if (p.use_htf and htf_df is not None and not htf_df.empty)
+               else None)
+
     o, c = df["open"].to_numpy(float), df["close"].to_numpy(float)
     h, l = df["high"].to_numpy(float), df["low"].to_numpy(float)
     idx = df.index
@@ -444,6 +494,11 @@ def generate_signals(
         if not np.isfinite(a) or a <= 0:
             continue
         price = c[i]
+        # HTF-фильтр: лонг разрешён при тренде вверх, шорт — вниз (видео п.1.3)
+        allow_long = htf_dir is None or htf_dir[i] > 0
+        allow_short = htf_dir is None or htf_dir[i] < 0
+        # Триггер-сжатие: если включён — вход только на сжимающемся баре
+        comp_ok = (comp[i] if comp is not None else True)
         known = strong[strong["known_pos"] <= i]
         if known.empty:
             continue
@@ -455,7 +510,8 @@ def generate_signals(
                     & (np.abs(known["price"] - price) <= tol)]
 
         # --- лонг ---
-        if p.direction >= 0 and not sup.empty and patterns.iloc[i]["bullish_reversal"]:
+        if (p.direction >= 0 and allow_long and comp_ok and not sup.empty
+                and patterns.iloc[i]["bullish_reversal"]):
             lvl = float(sup.iloc[-1]["price"])
             stop = l[i] - p.stop_buffer_atr * a
             risk = price - stop
@@ -477,7 +533,7 @@ def generate_signals(
                                     f"vol={relvol[i]:.2f}"],
                     })
         # sweep-лонг (без обязательного паттерна, но с is_sweep)
-        if (p.direction >= 0 and not fbo.empty
+        if (p.direction >= 0 and allow_long and comp_ok and not fbo.empty
                 and not sup.empty):
             ev = fbo[(fbo["known_at_idx"] == i) & (fbo["side"] == 1) & fbo["is_sweep"]]
             if not ev.empty:
@@ -495,7 +551,8 @@ def generate_signals(
                         })
 
         # --- шорт ---
-        if p.direction <= 0 and not res.empty and patterns.iloc[i]["bearish_reversal"]:
+        if (p.direction <= 0 and allow_short and comp_ok and not res.empty
+                and patterns.iloc[i]["bearish_reversal"]):
             lvl = float(res.iloc[-1]["price"])
             stop = h[i] + p.stop_buffer_atr * a
             risk = stop - price
@@ -515,7 +572,7 @@ def generate_signals(
                         "reasons": [f"resistance@{lvl:.2f}", str(patterns.iloc[i]["pattern"]),
                                     f"vol={relvol[i]:.2f}"],
                     })
-        if (p.direction <= 0 and not fbo.empty and not res.empty):
+        if (p.direction <= 0 and allow_short and comp_ok and not fbo.empty and not res.empty):
             ev = fbo[(fbo["known_at_idx"] == i) & (fbo["side"] == -1) & fbo["is_sweep"]]
             if not ev.empty:
                 lvl = float(res.iloc[-1]["price"])

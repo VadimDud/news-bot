@@ -51,6 +51,30 @@ def load_df(db: str, ticker: str, period: str) -> pd.DataFrame:
     return df[~df.index.duplicated(keep="last")]
 
 
+# LTF → HTF (следующий старший ТФ для фильтра тренда из видео п.1.3).
+_HTF_MAP = {"15min": "60min", "30min": "2h", "60min": "4h", "2h": "4h",
+            "4h": "1day", "1day": None, "5min": "30min", "1min": "15min"}
+
+
+def resample_htf(db: str, ticker: str, period: str) -> pd.DataFrame | None:
+    """Старший ТФ из БД, если есть; иначе ресемпл LTF в 4x по времени."""
+    htf = _HTF_MAP.get(period, None)
+    if htf:
+        cand = load_df(db, ticker, htf)
+        if not cand.empty:
+            return cand
+    base = load_df(db, ticker, period)
+    if base.empty:
+        return None
+    rule = {"15min": "1h", "30min": "2h", "60min": "4h", "2h": "8h",
+            "4h": "1D", "5min": "20min", "1min": "5min"}.get(period)
+    if not rule:
+        return None
+    agg = base.resample(rule).agg({"open": "first", "high": "max", "low": "min",
+                                   "close": "last", "volume": "sum"}).dropna()
+    return agg
+
+
 def simulate_trades(
     df: pd.DataFrame,
     signals: pd.DataFrame,
@@ -165,12 +189,21 @@ def main() -> None:
     parser.add_argument("--min-touches", type=int, default=3)
     parser.add_argument("--vol-mult", type=float, default=1.5)
     parser.add_argument("--rr-min", type=float, default=1.5)
+    parser.add_argument("--use-htf", type=int, default=0,
+                        help="Фильтр тренда старшего ТФ (видео п.1.3)")
+    parser.add_argument("--require-compression", type=int, default=0,
+                        help="Триггер сжатия диапазона (видео п.2.4)")
+    parser.add_argument("--compress-body-ratio", type=float, default=0.35)
+    parser.add_argument("--compress-range-atr", type=float, default=0.6)
     parser.add_argument("--run-dir", default=None)
     args = parser.parse_args()
 
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     p = PALevelParams(min_touches=args.min_touches, vol_mult=args.vol_mult,
-                      rr_min=args.rr_min, direction=args.direction)
+                      rr_min=args.rr_min, direction=args.direction,
+                      use_htf=args.use_htf, require_compression=args.require_compression,
+                      compress_body_ratio=args.compress_body_ratio,
+                      compress_range_atr=args.compress_range_atr)
 
     print(f"PA levels | период={args.period} | direction={args.direction} | "
           f"min_touches={args.min_touches} vol_mult={args.vol_mult} rr_min={args.rr_min}")
@@ -182,7 +215,8 @@ def main() -> None:
         df = load_df(args.db, t, args.period)
         if df.empty:
             continue
-        sig = generate_signals(df, p)
+        htf_df = resample_htf(args.db, t, args.period) if args.use_htf else None
+        sig = generate_signals(df, p, htf_df)
         sig["ticker"] = t
         trades = simulate_trades(df, sig, p, args.commission, args.slippage)
         all_trades.extend(trades)

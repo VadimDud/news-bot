@@ -87,3 +87,40 @@ def test_direction_filter(frame):
     sig_short = generate_signals(frame, PALevelParams(direction=-1))
     assert all(sig_long["side"] == 1) or len(sig_long) == 0
     assert all(sig_short["side"] == -1) or len(sig_short) == 0
+
+
+def test_htf_trend_is_causal(frame):
+    from app.pa_levels import htf_trend_at
+    # HTF-тренд берёт только закрытые HTF-бары (merge_asof backward): будущий
+    # рост не должен менять направление на более раннем LTF-баре.
+    idx = pd.date_range("2024-01-01", periods=20, freq="D")
+    close = np.full(20, 100.0)
+    close[10:] = 200.0  # резкий разворот с бара 10
+    htf = pd.DataFrame({"open": close, "high": close, "low": close,
+                        "close": close, "volume": 1.0}, index=idx)
+    d = htf_trend_at(htf, idx, ema_period=5)
+    assert d[0] == 0          # до разворота — без тренда (флэт)
+    assert d[-1] == 1         # после разворота — вверх
+    assert d[8] == 0          # бар до разворота не «знает» о будущем росте
+
+
+def test_video_flags_default_off(frame):
+    p = PALevelParams()
+    assert p.use_htf == 0
+    assert p.require_compression == 0
+    # отключённые флаги не меняют сигналы
+    base = generate_signals(frame, PALevelParams())
+    same = generate_signals(frame, PALevelParams(use_htf=0, require_compression=0))
+    assert len(base) == len(same)
+
+
+def test_compression_mask_detects_narrow_bar():
+    from app.pa_levels import compression_mask
+    df = pd.DataFrame({
+        "open": [100.0, 100.0], "high": [110.0, 100.2],
+        "low": [90.0, 99.9], "close": [105.0, 100.1], "volume": 1.0,
+    })
+    atr = np.array([5.0, 5.0])
+    m = compression_mask(df, atr, PALevelParams(compress_body_ratio=0.35,
+                                                compress_range_atr=0.6))
+    assert m.tolist() == [False, True]

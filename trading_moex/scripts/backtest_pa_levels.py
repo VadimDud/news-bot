@@ -263,6 +263,8 @@ def main() -> None:
                         help="Принудительный выход при движении к стопу (правило пользователя)")
     parser.add_argument("--chrono", type=int, default=0,
                         help="Печать хроно-разбиения (ранняя/поздняя половины)")
+    parser.add_argument("--oos-split", default="",
+                        help="Дата YYYY-MM-DD: сделки до = train, от неё = OOS")
     parser.add_argument("--random-seed", type=int, default=-1,
                         help="≥0: контроль случайных входов с этим seed")
     parser.add_argument("--run-dir", default=None)
@@ -310,6 +312,20 @@ def main() -> None:
             m = metrics(part)
             chrono[name] = m
             print(f"  хроно {name:<8}: сделок={m['trades']:>3} PF={str(m['pf']):>6} "
+                  f"avgR={m['avg_r']:>+6.2f} NET={m['net']:>+9,.0f}")
+
+    random_m = None
+    if args.oos_split and all_trades:
+        cut = pd.Timestamp(args.oos_split)
+        train = [t for t in all_trades if pd.Timestamp(t["entry_time"]) < cut]
+        oos = [t for t in all_trades if pd.Timestamp(t["entry_time"]) >= cut]
+        for name, part in (("train", train), (f"OOS≥{args.oos_split}", oos)):
+            if not part:
+                print(f"  {name:<18}: нет сделок")
+                continue
+            m = metrics(part)
+            chrono[name] = m
+            print(f"  {name:<18}: сделок={m['trades']:>3} PF={str(m['pf']):>6} "
                   f"avgR={m['avg_r']:>+6.2f} NET={m['net']:>+9,.0f}")
 
     random_m = None

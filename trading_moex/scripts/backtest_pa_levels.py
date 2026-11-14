@@ -121,6 +121,8 @@ def simulate_trades(
     p: PALevelParams,
     commission: float,
     slippage: float,
+    *,
+    bailout_entry_bar: bool = False,
 ) -> list[dict]:
     """Прогон управления сделкой по каждому сигналу (вход по следующему open).
 
@@ -131,7 +133,7 @@ def simulate_trades(
     * безубыток после ``breakeven_r`` R; трейлинг за ``trail_look`` барами;
     * принудительный выход (правило пользователя): если бар закрылся по
       обратную сторону от входа (цена пошла к стопу), не дойдя до цели —
-      закрываем по close этого бара (reason="bailout");
+       закрываем по следующему open (reason="bailout");
     * одна позиция на тикер: новый сигнал на тикере игнорируется, пока
       предыдущая не закрыта (нет наложения/одновременных сделок).
     """
@@ -153,15 +155,23 @@ def simulate_trades(
         stop = float(s["stop"])
         target = float(s["target"])
         risk = (entry - stop) if side == 1 else (stop - entry)
-        if risk <= 0:
+        if risk <= 0 or side * (target - entry) <= 0:
             continue
         be_level = entry + side * p.breakeven_r * risk
         moved_be = False
         exit_price = None
         exit_bar = None
         exit_reason = None
+        bailout_pending = False
         for j in range(entry_bar, n):
             hi, lo = h[j], l[j]
+            # Resting stop executes at the open through a gap, not at a stale price.
+            if side * (o[j] - stop) <= 0:
+                exit_price, exit_bar, exit_reason = o[j], j, "stop_gap"; break
+            if bailout_pending:
+                exit_price, exit_bar, exit_reason = o[j], j, "bailout"; break
+            if side * (o[j] - target) >= 0:
+                exit_price, exit_bar, exit_reason = target, j, "target"; break
             # --- проверка стопа (консервативно — первым) ---
             if side == 1 and lo <= stop:
                 exit_price, exit_bar, exit_reason = stop, j, "stop"; break
@@ -174,9 +184,9 @@ def simulate_trades(
                 exit_price, exit_bar, exit_reason = target, j, "target"; break
             # --- принудительный выход: цена закрылась против позиции, не дойдя
             #     до цели (движение к стопу) ---
-            if p.bailout_on_drawdown and j > entry_bar:
+            if p.bailout_on_drawdown and (j > entry_bar or bailout_entry_bar):
                 if (side == 1 and c[j] < entry) or (side == -1 and c[j] > entry):
-                    exit_price, exit_bar, exit_reason = c[j], j, "bailout"; break
+                    bailout_pending = True
             # --- безубыток после breakeven_r ---
             if not moved_be:
                 if (side == 1 and hi >= be_level) or (side == -1 and lo <= be_level):
@@ -199,6 +209,10 @@ def simulate_trades(
         net = gross - cost
         trades.append({
             "ticker": s.get("ticker", ""),
+            "signal_idx": i,
+            "entry_idx": entry_bar,
+            "exit_idx": exit_bar,
+            "signal_time": idx[i],
             "side": "L" if side == 1 else "S",
             "entry_time": idx[entry_bar],
             "exit_time": idx[exit_bar],
@@ -207,7 +221,13 @@ def simulate_trades(
             "stop": round(float(s["stop"]), 4),
             "target": round(float(s["target"]), 4),
             "bars": exit_bar - entry_bar,
-            "r_multiple": round(net / risk, 4),
+            "initial_risk": float(risk),
+            "commission": float((entry + exit_price) * commission),
+            "slippage": float((entry + exit_price) * slippage),
+            "gross": float(gross),
+            "r_multiple": float(net / risk),
+            "net_exact": float(net),
+            "bailout_pending_at_end": bool(bailout_pending and exit_reason == "eod"),
             "pnl": round(net, 2),
             "reason": exit_reason,
             "reasons": "; ".join(s["reasons"]) if isinstance(s.get("reasons"), list) else s.get("reasons", ""),

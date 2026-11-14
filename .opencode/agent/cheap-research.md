@@ -1,7 +1,7 @@
 ---
 description: Low-cost read-only fallback researcher when DeepSeek Flash and MiMo are unavailable. Use for repository discovery and compact test plans.
 mode: all
-model: opencode/big-pickle
+model: relaymodels/claude-haiku-4-5
 permission:
   read:
     "*": allow

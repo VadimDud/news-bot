@@ -1,7 +1,7 @@
 ---
 description: Backup fast read-only researcher for trading_moex when DeepSeek Flash is unavailable. Use for code discovery and test-plan preparation.
 mode: all
-model: opencode/mimo-v2.5-free
+model: relaymodels/mimo-v2.5
 permission:
   read:
     "*": allow

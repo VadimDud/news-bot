@@ -5,6 +5,22 @@ run outputs belong under `artifacts/runs/` and are intentionally not committed.
 
 ## Studies
 
+**PA-LEVELS strict research (2026-11-10):** `pa_levels/strict_results.md`
+documents STRICT-005, a separate opt-in operational interpretation with mandatory
+completed weekly/daily HTF and no pattern bypass. Daily n5 mean -0.181906R;
+4h n10 mean -0.363504R; 42 tests and causal prefix checks pass. Sparse reused
+history, **inconclusive**, not OOS and not evidence of absence of edge.
+No live promotion. See `pa_levels/strict_spec.md` for pre-run assumptions.
+
+**PA-LEVELS correction (2026-11-10):** the historical row below is superseded by
+`pa_levels/diagnostic_results.md` (DIAG-004). Current conclusion: **inconclusive**,
+not proof of absence/presence of edge. Fixed daily video: n15, mean +0.305988R,
+PF_R 1.604577; removing the largest R winner gives mean -0.050392R. Matched
+20-seed random-entry means span [-0.600389, +0.653258]R. Earlier daily HTF was
+inactive, reused-data splits were not OOS, and per-share NET sums were not
+comparable. New execution audit/tests and frozen diagnostic artifacts are
+documented there; no live promotion and no best-selection.
+
 | Study | Hypothesis | Status | Current conclusion | Source |
 |---|---|---|---|---|
 | `SR-001` | Higher-timeframe support/resistance breakout with lower-timeframe retest is robust after costs | archived | rejected; negative in every cost cell including zero commission | `sr/` |
@@ -23,6 +39,9 @@ run outputs belong under `artifacts/runs/` and are intentionally not committed.
 | `FIB-SR-001` | S/R levels from confirmed swing pivots improve a Fib-short TP/SL bracket | reviewed | supported: best sr_min_sl cuts 1day net loss (NET −126,625 vs −363,512, PF 1.41 vs 1.12) and, with carry removed, roughly 6x gross (+46,835 vs +7,628). Chrono split positive in both halves (+14,509 train, +8,666 test Δgross); random-level control p=0.05 | `fib_sr_bracket/` |
 | `PA-LEVELS-001` | Price-action on volume-confirmed R/S levels (levels + patterns + sweep + volume profile + liquidity clusters) has a positive per-trade edge | reviewed | rejected: 1day 374 trades PF 0.83 avgR −0.112, 4h 972 trades PF 0.34 avgR −0.598; real levels indistinguishable from a random-level control (avgR −0.153, real inside the random distribution); reproduces LEVEL-TEST/ICT-SWEEP/VOL/SR rejections. Follow-up (video elements: HTF trend filter + range-compression trigger) partially rescues 4h (PF 0.34→0.74, avgR −0.598→−0.217, beats random levels −0.563) but stays unprofitable (PF<1, avgR<0 in both chrono halves, NET sign flips). Follow-up 2 (bug fixes: causal HTF close-only, impulse-breakout→return→post-return compression sequence, stop beyond breakout extreme, 2R + VP target, single slippage, OCO/no-overlap, forced bailout exit): 1day video variant turns PF 1.50 avgR +0.252 NET +984 and beats random control (PF 0.13), but n=16, all profit in one chrono half / 3 trades — statistically insignificant and fragile; 4h still unprofitable (PF 0.65). Stays rejected / inconclusive pending forward OOS | `pa_levels/` |
 | `FIB-WEAK-001` | Trend-weakness candles (doji, range consolidation, long upper shadow) at the Fib-short entry bar carry reversal information | reviewed | rejected: on 1day stocks the filter "improves" NET only by trading less (less carry); the signal-only edge (`fut_no_lqdt` with futures+LQDT) does not improve (baseline +13,636 vs upshadow +12,377) and total futures NET drops (241k→182k) from lost LQDT income. Per-trade gross gain is inside the random-drop distribution (upshadow +118/tr at 69th percentile). Chrono stability (−34/+166 baseline vs +117/+118 filter) is a small-N artifact | `fib_weakness_candles/` |
+| `VOL-ISLAND-001` | Predominantly one-colour 4H volume islands predict continuation and have a stable correction distribution | archived | rejected for this OHLCV proxy: baseline is -0.0340% at 4 bars, pullback levels are near zero, and a 27-cell sensitivity grid changes sign across nearby definitions; no costs applied; further OHLCV optimization stopped after data audit | `volume_islands/` |
+| `ORDERFLOW-SCENARIOS-001` | 15m trade direction plus top-five book imbalance predicts next-bar continuation or conflict outcomes beyond OHLCV | proposed | no market evidence yet; raw T-Bank trade/book tables are empty in the checked local databases; fixed scenario analyzer and causal tests are ready | `orderflow_scenarios/` |
+| `LSTM-BASELINE-001` | Causal OHLCV sequence features carry forward directional information after costs | proposed | corrected causal tensor assembly and diagnostic logistic baseline; no neural model, executable return study, or edge claim | `lstm_baseline/` |
 
 ## Overall State
 

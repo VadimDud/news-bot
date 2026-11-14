@@ -19,6 +19,7 @@ from pathlib import Path
 for _name in (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",
+    "NO_PROXY", "no_proxy",
 ):
     os.environ.pop(_name, None)
 

@@ -1,5 +1,25 @@
 # PA-LEVELS-001: Price Action на уровнях R/S с анализом ликвидности
 
+## Текущий статус: диагностический, inconclusive (2026-11-10)
+
+**Strict opt-in:** [STRICT-005 specification](strict_spec.md),
+[results and audit](strict_results.md). Separate research state machine enforces
+breakout -> return -> later compression, immutable validated level identity,
+breakout-candle stop and mandatory explicitly completed HTF. Daily n5 mean
+-0.181906R; 4h n10 mean -0.363504R. Sparse reused-history diagnostic, NOT OOS
+or proof of no edge; no live/default change or parameter selection.
+
+**Новый аудит и результаты:** [DIAG-004](diagnostic_results.md),
+[заранее зафиксированный протокол](diagnostic_spec.md).
+Этот раздел отменяет категорические выводы ниже: исторические результаты
+сохранены как журнал, но не доказывают наличия или отсутствия edge.
+Follow-up 3 использовал уже просмотренные данные, поэтому это НЕ OOS.
+`use_htf=1` на 1day ранее фактически не работал. Суммы NET на одну акцию
+разных тикеров несопоставимы; концентрацию теперь измеряем в R.
+Фраза «статистически незначимо» не была подкреплена корректным тестом;
+n=16 само по себе не является ни p-value, ни доказательством отсутствия edge.
+Новый запуск исправляет исполнение и остаётся диагностическим, без live.
+
 ## Origin
 
 Запрос пользователя: реализовать и **проверить** стратегию из промта

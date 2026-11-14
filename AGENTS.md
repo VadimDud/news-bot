@@ -4,6 +4,27 @@
 
 Telegram bot for thematic news feeds with AI analysis. Python 3.12+ (Docker uses 3.12-slim, README claims 3.14+). SQLite via aiosqlite, aiogram 3.30, APScheduler.
 
+## Agent Management
+
+- Act as the agent manager: decompose non-trivial work, delegate bounded tasks,
+  integrate results, and remain responsible for correctness and verification.
+- Use configured RelayModels agents by default to reduce main-agent context and
+  token usage. Prefer `explore` or `deepseek-flash` for read-only discovery,
+  `cheap-research` for compact checks, `mimo-fast` as a research fallback, and
+  `general` for scoped implementation or independent review.
+- Delegate meaningful research or implementation in non-trivial tasks. Handle
+  trivial edits directly when delegation would cost more tokens than it saves.
+- Give agents only the relevant paths, requirements and acceptance checks;
+  request concise findings with file/line references and test results. Never
+  include secrets, credentials, full logs or unrelated conversation history.
+- Do not repeat delegated exploration. Independently verify critical claims,
+  inspect resulting changes, and run appropriate tests before reporting success.
+- Keep delegated write scopes separate. Research agents stay read-only; do not
+  delegate production changes, deployment or live trading without authorization.
+- If an agent/model is unavailable, use another configured RelayModels agent;
+  avoid repeated failed calls. Report blockers honestly. Do not claim measured
+  token or monetary savings unless usage/cost evidence is available.
+
 ## Commands
 
 ```bash

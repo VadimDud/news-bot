@@ -1,7 +1,7 @@
 ---
 description: Fast read-only researcher for trading_moex strategies, backtests, signal pipelines, and test design. Use for repository exploration before implementation.
 mode: all
-model: deepseek/deepseek-v4-flash
+model: relaymodels/deepseek-v4-flash
 permission:
   read:
     "*": allow

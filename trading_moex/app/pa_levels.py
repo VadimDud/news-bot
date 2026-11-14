@@ -238,14 +238,11 @@ def _htf_close_times(htf: pd.DataFrame) -> pd.DatetimeIndex:
     закрытый HTF-бар, а не текущий незавершённый.
     """
     idx = htf.index
-    if len(idx) >= 2:
-        step = pd.Series(idx[1:] - idx[:-1]).median()
-    else:
-        step = pd.Timedelta(0)
     close_times = np.empty(len(idx), dtype="datetime64[ns]")
     if len(idx) >= 2:
         close_times[:-1] = idx[1:].to_numpy()
-    close_times[-1] = (idx[-1] + (step if step > pd.Timedelta(0) else pd.Timedelta(0))).to_numpy()
+    # Without an explicit end time, the final bar cannot be proven closed.
+    close_times[-1] = pd.Timestamp.max.to_datetime64()
     return pd.DatetimeIndex(close_times)
 
 
@@ -500,6 +497,8 @@ def generate_signals(
     p = p or PALevelParams()
     df = prepare_ohlc(df)
     n = len(df)
+    if p.use_htf and (htf_df is None or htf_df.empty):
+        raise ValueError("use_htf requires nonempty higher-timeframe data")
     if n < max(2 * p.swing_look + 1, p.vol_period + 1):
         return pd.DataFrame(columns=["idx", "time", "side", "price", "stop", "target", "reasons"])
 
@@ -561,7 +560,7 @@ def generate_signals(
         allow_short = htf_dir is None or htf_dir[i] < 0
         # Триггер-сжатие: если включён и НЕ ищем «сжатие после возврата» — вход
         # только на сжимающемся баре (старое поведение).
-        comp_ok = (comp[i] if (comp is not None and not (p.compress_after_return and not fbo.empty))
+        comp_ok = (comp[i] if (comp is not None and not p.compress_after_return)
                    else True)
         known = strong[strong["known_pos"] <= i]
         if known.empty:

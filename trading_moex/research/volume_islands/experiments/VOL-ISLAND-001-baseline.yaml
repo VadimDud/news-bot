@@ -1,0 +1,14 @@
+study_id: VOL-ISLAND-001
+timeframe: 4h
+hypothesis: predominantly one-colour volume islands predict continuation and have a measurable correction distribution
+detector:
+  volume_window: 20
+  separator_quantile: 0.2
+  min_length: 2
+  dominance_threshold: 0.6
+  max_neutral_share: 0.3
+  atr_period: 14
+horizons_bars: [1, 2, 4, 8, 12, 20]
+splits: chronological train/validation/test/forward
+costs: must be supplied from the instrument and execution venue; never assume zero
+status: proposed

@@ -68,13 +68,15 @@ Key properties:
 - Fingerprints consumed rows only; appended rows have no effect
 - Manifest records `evaluation_mode: "validation-only"` and `run_class: "diagnostic"`
 - Fit scaler on train partition; evaluate validation partition only
-- No model selection, candidate search, or persistence implemented
+- This mode does not select candidates; it persists a replayable diagnostic model
+  artifact for one fixed configuration.
 - Fail-closed: invalid scaler or partition constraints halt execution
 
 ## Validation and prospective gate
 
-This is a procedural specification, not an implemented selection command.
-No new historical sweep or model selection was performed when writing it.
+The finite validation selector is now implemented in
+`scripts/select_lstm_baseline.py`. It is still a diagnostic screening tool, not
+an OOS result or a trading approval.
 
 - Keep the target, horizon, costs, sequence length, feature definitions, split
   boundaries and training algorithm fixed before comparing candidates. Do not
@@ -85,10 +87,59 @@ No new historical sweep or model selection was performed when writing it.
   finite metrics, both label classes and passing sanity checks; otherwise stop.
 - A candidate must strictly improve validation log loss over the baseline to
   advance. This is an engineering screening gate, not statistical proof of edge.
-- Implement a validation-only mode before selection: the current runner exposes
-  test/forward results and must not be used for iterative parameter selection.
-  Freeze the selected model, scaler, code commit and configuration before any
-  final evaluation. Do not refit after inspecting evaluation outcomes.
+- The selector requires a predeclared JSON list of at most 10 distinct positive
+  finite `l2` values. It loads only train+validation rows, ranks by validation
+  log loss, preserves declaration order on ties, and requires strict improvement
+  over the training-prevalence baseline. No test/forward data is read.
+- Optimizer settings are explicitly passed and recorded: learning rate 0.05,
+  300 epochs. The manifest also records the selection metric, baseline,
+  strict-improvement requirement and first-declared tie rule, including failures.
+- Freeze the selected model, scaler, code commit and configuration before any
+  final evaluation. Do not refit after inspecting evaluation outcomes. A
+  rejected selector run is a valid result and produces no model artifact.
+- Feature/scaler preparation and partition/class/baseline failures preserve
+  failed-run artifacts; model-save
+  failures clear the selected winner in manifest and metrics, and mark checks
+  and the run log as failed. Candidate specifications are retained locally.
+
+### Selector artifact replay compatibility
+
+When a selector run selects a winner, it now persists:
+- **model.json**: Serialized weights, bias, scaler (same format as runner)
+- **predictions.jsonl**: Validation predictions ledger (line-delimited JSON)
+- **manifest.json**: Run metadata with model_artifact and resolved_boundaries
+
+Both runner and selector artifacts are compatible with `app.model_loader.load_and_predict()`:
+
+```python
+from pathlib import Path
+from app.model_loader import load_and_predict
+
+# Load selector artifact (same interface as runner)
+run_dir = Path("artifacts/runs/lstm_baseline/<selector_run_id>")
+probs, artifact, manifest = load_and_predict(run_dir)
+
+# Probabilities exactly match validation predictions from predictions.jsonl
+```
+
+Rejected selector runs do not produce model artifacts or predictions ledgers. Model loader validates:
+- Run was validation-only with zero exit status
+- Model SHA256 matches manifest
+- Data SHA256 matches consumed candles
+- All numeric values are finite
+- Dimensions and schema are compatible
+- Ledger timestamps, labels and probabilities match reconstructed validation samples
+
+Exact replay requires a compatible numerical environment. These integrity checks
+do not authenticate artifacts or establish profitability. Argument/data-loading
+errors still return before a run directory is created. A failed input's
+fingerprint records consumed rows, not proof of data validity.
+Artifact I/O errors return structured stderr and exit 1. Partial run directories
+are preserved, not removed; a storage failure can prevent writing failure metadata.
+Do not treat an incomplete directory or a nonzero-exit run as a successful freeze.
+
+### Prospective limitations
+
 - All previously explored historical blocks remain diagnostic, including those
   named `test` or `forward`. No clean commit can make that history untouched.
 - Prospective enrollment is not yet active. Before enrollment, record an
@@ -137,5 +188,5 @@ sample containment/order checks. The `forward` block is a historical holdout,
 not untouched prospective data. These artifacts remain diagnostic, not a full
 execution study or evidence of profitability.
 
-Next step: implement and test validation-only selection with a persisted frozen
-model/configuration before enrolling a new prospective period.
+Next step: audit selector provenance and failure handling before requesting a
+clean-commit freeze; do not inspect historical test/forward metrics for selection.

@@ -31,12 +31,15 @@ def _fingerprint_frame(frame: pd.DataFrame) -> str:
 def load_and_predict(
     artifact_dir: Path,
 ) -> tuple[np.ndarray, ModelArtifact, dict]:
-    """Load a persisted validation-only run and replay exact validation predictions.
+    """Load a persisted validation-only or selector run and replay exact validation predictions.
     
     This function reads the manifest.json to determine run parameters, validates
     the model artifact SHA256, loads the model, and regenerates the exact
     validation probabilities from the original run.
     
+    Supports both runner (run_lstm_baseline.py) and selector (select_lstm_baseline.py)
+    artifacts. Both must be validation-only evaluation_mode with a model_artifact entry.
+
     Args:
         artifact_dir: Path to the run artifact directory (must contain manifest.json and model.json)
     

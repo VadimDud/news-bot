@@ -175,6 +175,24 @@ not beat majority accuracy. These are diagnostic results, not an OOS trading
 claim; the copied database snapshot and command provenance are not stored as a
 reproducible committed run artifact.
 
+### Artifact Atomicity and Manifest Guarantee
+
+The selector writes manifest.json **only after ALL outputs are complete and verified**:
+
+- **Early failures** (scaler/partition errors before fitting): diagnostics and a
+  manifest with `exit_status=1` are written; loader rejects the run.
+- **Model save or predictions write errors**: exception caught, error.json and a
+  manifest with `exit_status=1` are written. Partial directory is preserved.
+- **Successful selection**: all outputs written (model.json, predictions.jsonl,
+  metrics.json, checks.json), then manifest.json written **atomically** via temp
+  file + os.replace(). No intermediate success state if os.replace fails.
+- **Rejected selection** (no winner passes baseline): manifest.json written atomically
+  with selection.status="rejected", exit_status=0.
+
+The loader validates exit_status=0 and presence of manifest.json before accepting
+an artifact. A failed run directory is preserved with diagnostics but never passes
+loader validation. This prevents incomplete artifacts from being used in production.
+
 ## Limitations and next step
 
 OHLCV direction labels do not represent executable orders, queue position,

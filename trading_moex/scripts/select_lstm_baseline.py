@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import numbers
+import os
 import shlex
 import sqlite3
 import subprocess
@@ -50,6 +51,28 @@ def _json_safe(value):
 
 def _write_json(path: Path, value) -> None:
     path.write_text(json.dumps(_json_safe(value), indent=2, allow_nan=False))
+
+
+def _write_manifest_atomic(output: Path, manifest: dict) -> None:
+    """Write manifest.json atomically using temp file and os.replace().
+
+    Ensures manifest is never left in incomplete or partially-written state.
+
+    Args:
+        output: Directory where manifest.json will be written
+        manifest: Complete manifest dict with all required fields
+
+    Raises:
+        OSError: if temp file write or replace fails (manifest.json not updated)
+    """
+    temp_manifest = output / "manifest.json.tmp"
+    final_manifest = output / "manifest.json"
+
+    # Write to temp file
+    temp_manifest.write_text(json.dumps(_json_safe(manifest), indent=2, allow_nan=False))
+
+    # Atomically replace final manifest with temp file (or create if missing)
+    os.replace(str(temp_manifest), str(final_manifest))
 
 
 def _fingerprint_frame(frame: pd.DataFrame) -> str:
@@ -411,11 +434,6 @@ def _run_selection(frame: pd.DataFrame, args: argparse.Namespace, candidates: li
         manifest["candidates"]["artifact_path"] = "candidates.json"
         _write_json(output / "candidates.json", candidates)
         _write_json(output / "error.json", {"error": early_error})
-        _write_json(output / "manifest.json", {
-            **manifest,
-            "data_sha256": fingerprint,
-            "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-        })
         _write_json(output / "checks.json", {"selection_preconditions": False})
         _write_json(output / "metrics.json", {
             "baseline": {"validation_log_loss": baseline_log_loss},
@@ -428,6 +446,10 @@ def _run_selection(frame: pd.DataFrame, args: argparse.Namespace, candidates: li
             f"command={shlex.join(sys.argv)}\nselection_status={manifest['selection']['status']}\n"
         )
         _write_json(output / "candidate_scores.json", candidate_scores)
+        _write_manifest_atomic(output, {
+            **manifest, "data_sha256": fingerprint,
+            "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        })
         return 1
 
     # Success path: compute checks and finalize artifacts
@@ -473,9 +495,10 @@ def _run_selection(frame: pd.DataFrame, args: argparse.Namespace, candidates: li
 
     # Write candidate scores
     _write_json(output / "candidate_scores.json", candidate_scores)
-    _write_json(output / "manifest.json", {
-        **manifest, "data_sha256": fingerprint,
-        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+    _write_manifest_atomic(output, {
+        **manifest, "data_sha256": fingerprint, "exit_status": 1,
+        "failed_checks": ["run_incomplete"],
+        "selection": {"status": "incomplete", "winner_index": None, "winner_l2": None},
     })
 
     # If winner selected, save model artifact and predictions ledger
@@ -512,7 +535,8 @@ def _run_selection(frame: pd.DataFrame, args: argparse.Namespace, candidates: li
                     }
                     f.write(json.dumps(record, allow_nan=False) + "\n")
 
-            _write_json(output / "manifest.json", {
+            # All outputs written successfully; write manifest atomically
+            _write_manifest_atomic(output, {
                 **manifest,
                 "data_sha256": fingerprint,
                 "finished_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -537,10 +561,17 @@ def _run_selection(frame: pd.DataFrame, args: argparse.Namespace, candidates: li
                 f"validation-only candidate selection\nrun_id={run_id}\n"
                 f"command={shlex.join(sys.argv)}\nselection_status=failed\n"
             )
-            _write_json(output / "manifest.json", {
+            _write_manifest_atomic(output, {
                 **manifest, "data_sha256": fingerprint,
                 "finished_at_utc": datetime.now(timezone.utc).isoformat(),
             })
+    else:
+        # No winner selected; write final manifest for rejected run
+        _write_manifest_atomic(output, {
+            **manifest,
+            "data_sha256": fingerprint,
+            "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        })
 
     # Output summary to stdout
     summary = {

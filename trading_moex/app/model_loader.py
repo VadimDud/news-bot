@@ -28,6 +28,42 @@ def _fingerprint_frame(frame: pd.DataFrame) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _validate_prediction_ledger(
+    artifact_dir: Path, partition, probabilities: np.ndarray
+) -> None:
+    """Validate the persisted validation ledger against reconstructed samples."""
+    ledger_file = artifact_dir / "predictions.jsonl"
+    if not ledger_file.exists():
+        raise ValueError("predictions.jsonl not found")
+    try:
+        records = [json.loads(line) for line in ledger_file.read_text().splitlines()]
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"predictions.jsonl is invalid: {e}")
+    if any(not isinstance(record, dict) for record in records):
+        raise ValueError("prediction ledger record must be an object")
+    records = [record for record in records if record.get("partition") == "validation"]
+    if len(records) != len(probabilities):
+        raise ValueError("validation prediction ledger length does not match reconstructed partition")
+    for record, decision, outcome, label, probability in zip(
+        records, partition.decision_timestamps, partition.outcome_timestamps,
+        partition.y, probabilities, strict=True,
+    ):
+        if not isinstance(record, dict):
+            raise ValueError("prediction ledger record must be an object")
+        if record.get("decision_timestamp") != decision.isoformat():
+            raise ValueError("prediction ledger decision timestamp mismatch")
+        if record.get("outcome_timestamp") != outcome.isoformat():
+            raise ValueError("prediction ledger outcome timestamp mismatch")
+        if record.get("label") != float(label):
+            raise ValueError("prediction ledger label mismatch")
+        try:
+            finite_probability = np.isfinite(record.get("probability", np.nan))
+        except TypeError:
+            finite_probability = False
+        if not finite_probability or record["probability"] != float(probability):
+            raise ValueError("prediction ledger probability mismatch")
+
+
 def load_and_predict(
     artifact_dir: Path,
 ) -> tuple[np.ndarray, ModelArtifact, dict]:
@@ -213,5 +249,6 @@ def load_and_predict(
         artifact.weights,
         artifact.bias,
     )
-    
+    _validate_prediction_ledger(artifact_dir, validation_partition, probabilities)
+
     return probabilities, artifact, manifest

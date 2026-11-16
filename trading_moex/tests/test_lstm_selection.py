@@ -805,6 +805,17 @@ class TestSelectorArtifactReplay:
         assert loaded_manifest["exit_status"] == 0
         assert artifact is not None
 
+        lines = predictions_file.read_text().splitlines()
+        predictions_file.write_text("\n".join(lines[:-1]) + "\n")
+        with pytest.raises(ValueError, match="ledger length"):
+            load_and_predict(run_dir)
+        predictions_file.write_text("\n".join(lines) + "\n")
+        altered = json.loads(lines[0])
+        altered["probability"] = 0.0 if altered["probability"] != 0.0 else 1.0
+        predictions_file.write_text(json.dumps(altered) + "\n" + "\n".join(lines[1:]) + "\n")
+        with pytest.raises(ValueError, match="probability mismatch"):
+            load_and_predict(run_dir)
+
     def test_selector_rejection_no_predictions_ledger(self, tmp_path, selector_db_with_candles):
         """Test that rejected selector run does not create predictions ledger."""
         db_path, candles = selector_db_with_candles

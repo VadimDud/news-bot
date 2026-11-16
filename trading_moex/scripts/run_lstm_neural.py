@@ -20,7 +20,7 @@ import shlex
 import subprocess
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -61,6 +61,34 @@ def _write_json(path: Path, value) -> None:
     temporary.replace(path)
 
 
+def _load_dividend_calendar(connection, ticker: str) -> tuple[list[dict], list[pd.Timestamp]]:
+    rows = connection.execute(
+        "SELECT cutoff_date, source FROM dividends WHERE ticker = ? ORDER BY cutoff_date",
+        (ticker,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("dividend exclusion requested but no calendar rows exist for ticker")
+    calendar = []
+    cutoffs = []
+    for cutoff, source in rows:
+        if not isinstance(cutoff, str):
+            raise ValueError(f"invalid dividend cutoff date: {cutoff!r}")
+        try:
+            parsed = date.fromisoformat(cutoff)
+        except ValueError as exc:
+            raise ValueError(f"invalid dividend cutoff date: {cutoff!r}") from exc
+        if parsed.isoformat() != cutoff:
+            raise ValueError(f"dividend cutoff must be YYYY-MM-DD: {cutoff!r}")
+        calendar.append({"cutoff_date": cutoff, "source": source})
+        cutoffs.append(pd.Timestamp(cutoff))
+    return calendar, cutoffs
+
+
+def _calendar_sha256(calendar: list[dict]) -> str:
+    payload = json.dumps(calendar, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _fingerprint_frame(frame: pd.DataFrame) -> str:
     selected = frame.loc[:, ["open", "high", "low", "close", "volume"]]
     payload = selected.to_csv(index=True, date_format="%Y-%m-%dT%H:%M:%S.%f").encode()
@@ -97,6 +125,12 @@ def _write_failure_manifest(run_dir: Path, args, error: str, commit: str, data_s
         "horizon": args.horizon,
         "threshold": args.threshold,
         "cost_rate": args.cost_rate,
+        "dividend_label_policy": getattr(args, "dividend_label_policy", "none"),
+        "dividend_calendar": getattr(args, "dividend_calendar", []),
+        "dividend_calendar_sha256": getattr(args, "dividend_calendar_sha256", None),
+        "dividend_calendar_read_utc": getattr(args, "dividend_calendar_read_utc", None),
+        "dividend_date_semantics": "unverified_cutoff_date_proxy_not_confirmed_ex_date",
+        "dividend_samples_excluded": getattr(args, "dividend_samples_excluded", {}),
         "lstm_config": {
             "hidden_size": args.hidden_size,
             "num_layers": args.num_layers,
@@ -124,6 +158,8 @@ def main() -> int:
     parser.add_argument("--sequence-length", type=int, default=50)
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--cost-rate", type=float, default=0.001)
+    parser.add_argument("--exclude-dividend-labels", action="store_true",
+                        help="Exclude samples whose outcome window crosses a stored dividend cutoff")
     parser.add_argument("--threshold", type=float, default=0.003)
     parser.add_argument("--hidden-size", type=int, default=32)
     parser.add_argument("--num-layers", type=int, default=2)
@@ -134,6 +170,11 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--artifacts-dir", default="artifacts/runs/lstm_neural")
     args = parser.parse_args()
+    args.dividend_label_policy = "exclude_outcome_windows" if args.exclude_dividend_labels else "none"
+    args.dividend_calendar = []
+    args.dividend_calendar_sha256 = None
+    args.dividend_calendar_read_utc = None
+    args.dividend_samples_excluded = {"train": 0, "validation": 0}
 
     # Create run directory with microsecond timestamp
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -145,6 +186,19 @@ def main() -> int:
     run_dir = Path(args.artifacts_dir) / f"{run_id}_LSTM-NEURAL_{commit}_{args.ticker.upper()}"
     run_dir.mkdir(parents=True, exist_ok=False)
     _write_failure_manifest(run_dir, args, "run_incomplete", commit, None)
+
+    dividend_cutoffs = []
+    if args.exclude_dividend_labels:
+        try:
+            with sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=ro", uri=True) as connection:
+                args.dividend_calendar, dividend_cutoffs = _load_dividend_calendar(connection, args.ticker.upper())
+            args.dividend_calendar_sha256 = _calendar_sha256(args.dividend_calendar)
+            args.dividend_calendar_read_utc = datetime.now(timezone.utc).isoformat()
+        except (sqlite3.Error, ValueError) as e:
+            error = f"Failed to load usable dividend calendar: {e}"
+            _write_failure_manifest(run_dir, args, error, commit, None)
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
 
     # Check PyTorch availability first
     if not TORCH_AVAILABLE:
@@ -241,8 +295,16 @@ def main() -> int:
             horizon=args.horizon,
             threshold=args.threshold,
             cost_rate=args.cost_rate,
+            excluded_outcome_dates=dividend_cutoffs,
             scaler=scaler,
         )
+        if dividend_cutoffs:
+            unmasked_train = make_sequence_partition(
+                frame, feature_start=0, decision_start=train_start, decision_end=train_end,
+                sequence_length=args.sequence_length, horizon=args.horizon,
+                threshold=args.threshold, cost_rate=args.cost_rate, scaler=scaler,
+            )
+            args.dividend_samples_excluded["train"] = len(unmasked_train.y) - len(train_partition.y)
         log(f"Train partition: {len(train_partition.X)} samples")
     except Exception as e:
         error = f"Failed to create train partition: {e}"
@@ -263,8 +325,16 @@ def main() -> int:
             horizon=args.horizon,
             threshold=args.threshold,
             cost_rate=args.cost_rate,
+            excluded_outcome_dates=dividend_cutoffs,
             scaler=scaler,
         )
+        if dividend_cutoffs:
+            unmasked_validation = make_sequence_partition(
+                frame, feature_start=0, decision_start=train_end, decision_end=validation_end,
+                sequence_length=args.sequence_length, horizon=args.horizon,
+                threshold=args.threshold, cost_rate=args.cost_rate, scaler=scaler,
+            )
+            args.dividend_samples_excluded["validation"] = len(unmasked_validation.y) - len(val_partition.y)
         log(f"Validation partition: {len(val_partition.X)} samples")
     except Exception as e:
         error = f"Failed to create validation partition: {e}"
@@ -573,8 +643,6 @@ def main() -> int:
             "data_sha256": data_sha256,
             "window_start_bar": args.start_bar,
             "window_end_bar": window_end,
-            "resolved_window_start": args.window_start_timestamp,
-            "resolved_window_end": args.window_end_timestamp,
             "storage_timezone": "UTC-naive",
             "market_timezone": "Europe/Moscow",
             "train_bars": args.train_bars,
@@ -590,6 +658,12 @@ def main() -> int:
             "horizon": args.horizon,
             "threshold": args.threshold,
             "cost_rate": args.cost_rate,
+            "dividend_label_policy": args.dividend_label_policy,
+            "dividend_calendar": args.dividend_calendar,
+            "dividend_calendar_sha256": args.dividend_calendar_sha256,
+            "dividend_calendar_read_utc": args.dividend_calendar_read_utc,
+            "dividend_date_semantics": "unverified_cutoff_date_proxy_not_confirmed_ex_date",
+            "dividend_samples_excluded": args.dividend_samples_excluded,
             "lstm_config": {
                 "hidden_size": args.hidden_size,
                 "num_layers": args.num_layers,

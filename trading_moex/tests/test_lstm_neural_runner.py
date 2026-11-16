@@ -55,6 +55,11 @@ def tmp_sqlite_db(tmp_path):
                 UNIQUE(ticker, period, begin)
             )
         """)
+        conn.execute("""
+            CREATE TABLE dividends (
+                ticker TEXT NOT NULL, cutoff_date TEXT NOT NULL, source TEXT
+            )
+        """)
 
         # Generate synthetic OHLCV data
         np.random.seed(42)
@@ -90,6 +95,8 @@ def tmp_sqlite_db(tmp_path):
             "INSERT INTO candles (ticker, period, begin, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             candles,
         )
+        conn.execute("INSERT INTO dividends VALUES ('SBER', '2024-01-03', 'test-calendar')")
+        conn.execute("INSERT INTO dividends VALUES ('SBER', '2024-01-07', 'empty-window-calendar')")
         conn.commit()
 
     return db_path
@@ -115,7 +122,8 @@ def run_runner(script_path, args, timeout=120):
     cmd = [sys.executable, str(script_path)]
     for key, value in args.items():
         cmd.append(f"--{key}")
-        cmd.append(str(value))
+        if value is not None:
+            cmd.append(str(value))
 
     result = subprocess.run(
         cmd,
@@ -205,6 +213,42 @@ class TestRunnerBasicExecution:
         assert manifest["study_id"] == "LSTM-BASELINE-001"
         assert manifest["evaluation_mode"] == "validation-only"
         assert manifest["data_sha256"] is not None
+
+    def test_dividend_mask_records_calendar_and_excluded_samples(self, tmp_sqlite_db, tmp_path, lstm_runner_script):
+        artifacts_dir = tmp_path / "dividend-mask"
+        code, _, stderr = run_runner(lstm_runner_script, {
+            "db": str(tmp_sqlite_db), "ticker": "SBER", "train-bars": 500,
+            "validation-bars": 100, "exclude-dividend-labels": None,
+            "artifacts-dir": str(artifacts_dir),
+        })
+        assert code == 0, stderr
+        run_dir = list(artifacts_dir.glob("*_LSTM-NEURAL_*"))[0]
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert manifest["dividend_label_policy"] == "exclude_outcome_windows"
+        assert manifest["dividend_calendar"] == [
+            {"cutoff_date": "2024-01-03", "source": "test-calendar"},
+            {"cutoff_date": "2024-01-07", "source": "empty-window-calendar"},
+        ]
+        assert manifest["dividend_samples_excluded"]["train"] == 5
+
+    def test_dividend_mask_missing_calendar_table_writes_failure_manifest(
+        self, tmp_sqlite_db, tmp_path, lstm_runner_script
+    ):
+        with sqlite3.connect(tmp_sqlite_db) as conn:
+            conn.execute("DROP TABLE dividends")
+        artifacts_dir = tmp_path / "missing-dividends"
+        code, _, stderr = run_runner(lstm_runner_script, {
+            "db": str(tmp_sqlite_db), "ticker": "SBER", "train-bars": 500,
+            "validation-bars": 100, "exclude-dividend-labels": None,
+            "artifacts-dir": str(artifacts_dir),
+        })
+        assert code == 1
+        assert "no such table" in stderr
+        run_dir = list(artifacts_dir.glob("*_LSTM-NEURAL_*"))[0]
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert manifest["exit_status"] == 1
+        assert manifest["dividend_label_policy"] == "exclude_outcome_windows"
+        assert "no such table" in manifest["failure_reason"]
 
     def test_start_bar_selects_later_rows_with_causal_warmup(self, tmp_sqlite_db, tmp_path, lstm_runner_script):
         artifacts_dir = tmp_path / "windowed"

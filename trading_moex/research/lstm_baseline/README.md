@@ -25,6 +25,23 @@ for trading. There is no live connection or automatic training scheduler.
   does not place orders.
 - No shuffled time split, parameter selection on test/forward data, or live
   promotion.
+- Candle OHLCV is raw and not dividend-adjusted. For a diagnostic comparison,
+  `scripts/run_lstm_neural.py --exclude-dividend-labels` excludes a sample when
+  its decision-to-outcome interval crosses an ex-date from the database's
+  `dividends` table; timestamps are mapped from UTC-naive storage into
+  `Europe/Moscow` calendar dates. Decision is at candle close, so an ex-date
+  already completed before the decision is not masked. This masks labels only:
+  it does not change features or simulate receiving dividend cash. The runner
+  fails with an artifact if the requested calendar cannot be loaded or is empty.
+  Calendar dates and sources plus excluded sample counts are recorded in the
+  manifest. Current SBER rows are marked `smartlab`, not independently verified
+  against an official source; results using them remain diagnostic only.
+- The stored `cutoff_date` field is treated as a date proxy for this diagnostic;
+  the manifest explicitly marks that it is not confirmed to be an ex-date.
+  The frozen 2026-11-16 SBER 15min windows had dividend exclusions only at
+  offset 17000 (5 training samples); offsets 1000, 5000, 9000, and 13000 had
+  no applicable exclusions. Offset 5000 still failed closed because validation
+  contained one class. These are audit counts, not model results.
 - Walk-forward folds use a fixed training window by default, advance by one
   test block, and fit a new scaler inside each fold. Expanding windows are
   available explicitly but must be declared in the run manifest.

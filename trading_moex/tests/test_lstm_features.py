@@ -47,6 +47,32 @@ def test_dataset_shape_and_train_only_scaler():
     np.testing.assert_allclose(scaler.mean, expected_mean)
 
 
+def test_sequence_partition_excludes_only_outcomes_crossing_moscow_ex_date():
+    frame = candles(100)
+    frame.index = pd.date_range("2024-07-10 09:00", periods=100, freq="h")
+    scaler = FeatureScaler.fit(candle_features(frame).iloc[:70])
+    cutoff = "2024-07-13"
+    partition = make_sequence_partition(
+        frame, feature_start=0, decision_start=20, decision_end=70,
+        sequence_length=20, horizon=5, scaler=scaler,
+        excluded_outcome_dates=[cutoff],
+    )
+
+    baseline = make_sequence_partition(
+        frame, feature_start=0, decision_start=20, decision_end=70,
+        sequence_length=20, horizon=5, scaler=scaler,
+    )
+    kept = set(partition.decision_timestamps)
+    expected_excluded = {
+        decision for decision, outcome in zip(baseline.decision_timestamps, baseline.outcome_timestamps)
+        if decision.tz_localize("UTC").tz_convert("Europe/Moscow").date()
+        < pd.Timestamp(cutoff).date()
+        <= outcome.tz_localize("UTC").tz_convert("Europe/Moscow").date()
+    }
+    assert set(baseline.decision_timestamps) - kept == expected_excluded
+    assert expected_excluded
+
+
 def test_invalid_dataset_parameters_fail():
     with pytest.raises(ValueError, match="train_end"):
         make_lstm_dataset(candles(), train_end=0)

@@ -7,9 +7,12 @@ fit on the supplied training prefix to avoid leaking future distribution data.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
+
+from app.timezones import MARKET_TZ, as_utc
 
 
 FEATURE_COLUMNS = (
@@ -177,6 +180,7 @@ def make_sequence_partition(
     horizon: int = 5,
     threshold: float = 0.0,
     cost_rate: float = 0.0,
+    excluded_outcome_dates: Sequence[pd.Timestamp] = (),
     scaler: FeatureScaler,
 ) -> SequencePartition:
     """Build samples for a decision range using a caller-supplied train scaler."""
@@ -187,12 +191,21 @@ def make_sequence_partition(
     raw = candle_features(candles)
     scaled = scaler.transform(raw)
     close = candles["close"].astype(float).to_numpy()
+    excluded_dates = [
+        pd.Timestamp(value).date() if isinstance(value, str) and len(value) == 10
+        else as_utc(pd.Timestamp(value).to_pydatetime()).astimezone(MARKET_TZ).date()
+        for value in excluded_outcome_dates
+    ]
     X, y, decision_timestamps, outcome_timestamps = [], [], [], []
     first_end = max(sequence_length, decision_start + 1)
     for end in range(first_end, min(decision_end + 1, len(candles) - horizon + 1)):
         decision_at = end - 1
         label_at = end + horizon - 1
         if decision_at < decision_start or label_at >= decision_end:
+            continue
+        decision_day = as_utc(candles.index[decision_at].to_pydatetime()).astimezone(MARKET_TZ).date()
+        outcome_day = as_utc(candles.index[label_at].to_pydatetime()).astimezone(MARKET_TZ).date()
+        if len(excluded_dates) and any(decision_day < event_date <= outcome_day for event_date in excluded_dates):
             continue
         window = scaled.iloc[end - sequence_length:end].to_numpy(float)
         if not np.isfinite(window).all():

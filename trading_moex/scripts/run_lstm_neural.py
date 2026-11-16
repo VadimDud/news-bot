@@ -90,6 +90,9 @@ def _write_failure_manifest(run_dir: Path, args, error: str, commit: str, data_s
         "data_sha256": data_sha256,
         "train_bars": args.train_bars,
         "validation_bars": args.validation_bars,
+        "start_bar": args.start_bar,
+        "window_start_timestamp": getattr(args, "window_start_timestamp", None),
+        "window_end_timestamp": getattr(args, "window_end_timestamp", None),
         "sequence_length": args.sequence_length,
         "horizon": args.horizon,
         "threshold": args.threshold,
@@ -116,6 +119,8 @@ def main() -> int:
     parser.add_argument("--period", default="15m")
     parser.add_argument("--train-bars", type=int, default=500)
     parser.add_argument("--validation-bars", type=int, required=True)
+    parser.add_argument("--start-bar", type=int, default=0,
+                        help="Zero-based training-window row offset; prior rows are feature warmup only")
     parser.add_argument("--sequence-length", type=int, default=50)
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--cost-rate", type=float, default=0.001)
@@ -149,20 +154,20 @@ def main() -> int:
         return 1
 
     # Validation constraints
-    if not (args.train_bars > 0 and args.validation_bars > 0):
-        error = "--train-bars and --validation-bars must be positive"
+    if not (args.train_bars > 0 and args.validation_bars > 0 and args.start_bar >= 0):
+        error = "--train-bars and --validation-bars must be positive; --start-bar must be non-negative"
         _write_failure_manifest(run_dir, args, error, commit, None)
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     # Load candles (train + validation only) with read-only mode
-    limit = args.train_bars + args.validation_bars
+    window_end = args.start_bar + args.train_bars + args.validation_bars
     try:
         with sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=ro", uri=True) as connection:
             frame = pd.read_sql_query(
                 "SELECT begin AS timestamp, open, high, low, close, volume "
                 "FROM candles WHERE ticker = ? AND period = ? ORDER BY begin LIMIT ?",
-                connection, params=(args.ticker.upper(), args.period, limit), parse_dates=["timestamp"],
+                connection, params=(args.ticker.upper(), args.period, window_end), parse_dates=["timestamp"],
             ).set_index("timestamp")
     except Exception as e:
         error = f"Failed to load candles: {e}"
@@ -176,14 +181,17 @@ def main() -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
-    if len(frame) < limit:
-        error = f"insufficient data: requested {limit} candles, got {len(frame)}"
+    if len(frame) < window_end:
+        error = f"insufficient data: requested {window_end} candles, got {len(frame)}"
         _write_failure_manifest(run_dir, args, error, commit, None)
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     # Fingerprint data
-    data_sha256 = _fingerprint_frame(frame)
+    window_frame = frame.iloc[args.start_bar:window_end]
+    args.window_start_timestamp = window_frame.index[0].isoformat()
+    args.window_end_timestamp = window_frame.index[-1].isoformat()
+    data_sha256 = _fingerprint_frame(window_frame)
 
     log_path = run_dir / "run.log"
     log_file = log_path.open("w")
@@ -200,15 +208,19 @@ def main() -> int:
     log(f"Threshold: {args.threshold}, Cost rate: {args.cost_rate}")
     log(f"LSTM config: hidden={args.hidden_size}, layers={args.num_layers}, dropout={args.dropout}")
     log(f"Training: lr={args.learning_rate}, batch={args.batch_size}, epochs={args.epochs}, seed={args.seed}")
-    log(f"Loaded {len(frame)} candles")
+    log(f"Loaded {len(frame)} candles including {args.start_bar} warmup rows")
+    log(f"Window rows: {args.start_bar}:{window_end}")
+    log(f"Window timestamps: {window_frame.index[0]} .. {window_frame.index[-1]}")
     log(f"Data SHA256: {data_sha256}")
     log(f"Storage timezone: UTC-naive (see research/protocol.md)")
 
     # Compute features and fit scaler on train prefix only
     try:
         raw_features = candle_features(frame)
-        train_end = args.train_bars
-        scaler = FeatureScaler.fit(raw_features.iloc[:train_end])
+        train_start = args.start_bar
+        train_end = train_start + args.train_bars
+        validation_end = train_end + args.validation_bars
+        scaler = FeatureScaler.fit(raw_features.iloc[train_start:train_end])
         log("Fitted scaler on training prefix only")
     except Exception as e:
         error = f"Feature computation failed: {e}"
@@ -223,7 +235,7 @@ def main() -> int:
         train_partition = make_sequence_partition(
             frame,
             feature_start=0,
-            decision_start=0,
+            decision_start=train_start,
             decision_end=train_end,
             sequence_length=args.sequence_length,
             horizon=args.horizon,
@@ -246,7 +258,7 @@ def main() -> int:
             frame,
             feature_start=0,
             decision_start=train_end,
-            decision_end=len(frame),
+            decision_end=validation_end,
             sequence_length=args.sequence_length,
             horizon=args.horizon,
             threshold=args.threshold,
@@ -433,6 +445,8 @@ def main() -> int:
         metrics = {
             "train_samples": len(train_partition.y),
             "validation_samples": len(val_partition.y),
+            "window_start_bar": args.start_bar,
+            "window_end_bar": window_end,
             "train_positive_rate": train_pos_rate,
             "validation_positive_rate": val_pos_rate,
             "logistic": {
@@ -522,7 +536,7 @@ def main() -> int:
             ]),
             "pytorch_available": True,
             "read_only_db": True,
-            "exact_row_count": len(frame) == limit,
+            "exact_row_count": len(frame) == window_end,
         }
         _write_json(run_dir / "checks.json", checks)
         if not all(checks.values()):
@@ -557,10 +571,21 @@ def main() -> int:
             "ticker": args.ticker.upper(),
             "period": args.period,
             "data_sha256": data_sha256,
+            "window_start_bar": args.start_bar,
+            "window_end_bar": window_end,
+            "resolved_window_start": args.window_start_timestamp,
+            "resolved_window_end": args.window_end_timestamp,
             "storage_timezone": "UTC-naive",
             "market_timezone": "Europe/Moscow",
             "train_bars": args.train_bars,
             "validation_bars": args.validation_bars,
+            "start_bar": args.start_bar,
+            "resolved_window_start": str(window_frame.index[0]),
+            "resolved_window_end": str(window_frame.index[-1]),
+            "train_decision_start": str(train_partition.decision_timestamps[0]),
+            "train_decision_end": str(train_partition.decision_timestamps[-1]),
+            "validation_decision_start": str(val_partition.decision_timestamps[0]),
+            "validation_decision_end": str(val_partition.decision_timestamps[-1]),
             "sequence_length": args.sequence_length,
             "horizon": args.horizon,
             "threshold": args.threshold,

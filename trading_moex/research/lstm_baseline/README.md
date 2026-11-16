@@ -268,6 +268,7 @@ python3 scripts/run_lstm_neural.py \
   --period 15m \
   --train-bars 500 \
   --validation-bars 100 \
+  --start-bar 0 \
   --sequence-length 50 \
   --horizon 5 \
   --threshold 0.003 \
@@ -313,6 +314,8 @@ python3 scripts/run_lstm_neural.py \
 ```
 
 - Loads only `train_bars + validation_bars` rows
+- `--start-bar` selects a later chronological window; earlier rows are feature
+  warmup only, and the fingerprint covers the selected train+validation candles.
 - Fits scaler on training partition only
 - Evaluates on validation partition only
 - Records mode as `validation-only` in manifest
@@ -372,6 +375,18 @@ After running LSTM validation and logistic baseline on the same data:
 5. If no improvement, stop and document why the neural model did not help
 
 This is a diagnostic comparison, not proof of profitability or edge.
+
+### Frozen Multi-Window Diagnostic (2026-11-16)
+
+To assess stability without retuning, run five chronologically spaced,
+non-overlapping 600-row windows at offsets 1000, 5000, 9000, 13000, and
+17000 from the ordered SBER `15min` history. Each window uses 500 train bars
+followed by 100 validation bars. Keep every model/target parameter above fixed;
+do not select epochs or other parameters from validation results. The runner's
+`--start-bar` treats earlier rows only as causal feature warmup and fingerprints
+the selected window. Each run is diagnostic; repeated historical validation is
+not prospective evidence, and no profitability claim is possible from these
+classification metrics.
 
 ## Limitations and next step
 

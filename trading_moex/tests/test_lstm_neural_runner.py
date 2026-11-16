@@ -206,6 +206,40 @@ class TestRunnerBasicExecution:
         assert manifest["evaluation_mode"] == "validation-only"
         assert manifest["data_sha256"] is not None
 
+    def test_start_bar_selects_later_rows_with_causal_warmup(self, tmp_sqlite_db, tmp_path, lstm_runner_script):
+        artifacts_dir = tmp_path / "windowed"
+        exit_code, _, stderr = run_runner(lstm_runner_script, {
+            "db": str(tmp_sqlite_db), "ticker": "SBER", "period": "15m",
+            "train-bars": 100, "validation-bars": 100, "start-bar": 400,
+            "epochs": 2, "artifacts-dir": str(artifacts_dir),
+        })
+        assert exit_code == 0, stderr
+        run_dir = list(artifacts_dir.glob("*_LSTM-NEURAL_*"))[0]
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        checks = json.loads((run_dir / "checks.json").read_text())
+        train = pd.read_csv(run_dir / "train_predictions.csv")
+        validation = pd.read_csv(run_dir / "validation_predictions.csv")
+        assert manifest["start_bar"] == 400
+        assert manifest["window_start_bar"] == 400
+        assert manifest["window_end_bar"] == 600
+        assert manifest["resolved_window_start"] == "2024-01-05 13:30:00"
+        assert checks["exact_row_count"] is True
+        assert pd.Timestamp(train.decision_timestamp.min()) >= pd.Timestamp(manifest["resolved_window_start"])
+        assert pd.Timestamp(train.decision_timestamp.max()) < pd.Timestamp(validation.decision_timestamp.min())
+
+    def test_start_bar_negative_fails_closed(self, tmp_sqlite_db, tmp_path, lstm_runner_script):
+        artifacts_dir = tmp_path / "negative-offset"
+        code, _, stderr = run_runner(lstm_runner_script, {
+            "db": str(tmp_sqlite_db), "ticker": "SBER", "train-bars": 300,
+            "validation-bars": 100, "start-bar": -1,
+            "artifacts-dir": str(artifacts_dir),
+        })
+        assert code == 1
+        run_dir = list(artifacts_dir.glob("*_LSTM-NEURAL_*"))[0]
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert manifest["exit_status"] == 1
+        assert "non-negative" in stderr
+
     def test_metrics_json_structure(self, tmp_sqlite_db, tmp_path, lstm_runner_script):
         """Verify metrics.json contains baseline, logistic, and LSTM results."""
         artifacts_dir = tmp_path / "artifacts"

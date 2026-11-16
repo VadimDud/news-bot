@@ -46,6 +46,26 @@ for trading. There is no live connection or automatic training scheduler.
 - Walk-forward folds use a fixed training window by default, advance by one
   test block, and fit a new scaler inside each fold. Expanding windows are
   available explicitly but must be declared in the run manifest.
+
+### Smartlab-Masked Frozen Audit (2026-11-16)
+
+The five frozen windows were rerun with unchanged model parameters and
+`--exclude-dividend-labels`. Candle fingerprints and model configuration match
+the earlier diagnostic comparison. The earlier runs were dirty-worktree
+diagnostics; these reruns used clean commit `7618941`.
+
+| Offset | Excluded train / validation | LSTM val log loss | Logistic val log loss | Status |
+|---:|---:|---:|---:|---|
+| 1000 | 0 / 0 | 0.29924 | 0.21087 | completed |
+| 5000 | 0 / 0 | - | - | failed: one validation class |
+| 9000 | 0 / 0 | 0.37499 | 0.26828 | completed |
+| 13000 | 0 / 0 | 0.33967 | 0.24956 | completed |
+| 17000 | 5 / 0 | 0.74104 | 0.48721 | completed |
+
+The unmasked LSTM log loss at offset 17000 was 0.88139; the masked result is
+better by 0.14035, but this is one seed and one affected window. It is not an
+OOS or profitability claim. No parameter selection was performed from these
+reruns, and no model was promoted to trading.
 - `chronological_boundaries()` provides the required non-overlapping
   train/validation/test/forward row contract for a future confirmatory run.
   The partitioned CLI mode (`--validation-bars` and `--forward-bars`) writes

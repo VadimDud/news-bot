@@ -271,7 +271,7 @@ class TestSelectionIntegration:
             # We skip DB call by making the test recognize insufficient classes
             assert True  # Placeholder
 
-    @pytest.mark.parametrize("mode", ["normal", "fit_failure", "tie", "partition_failure", "save_failure", "feature_failure", "scaler_failure", "invalid_candle_failure", "write_failure"])
+    @pytest.mark.parametrize("mode", ["normal", "fit_failure", "tie", "partition_failure", "save_failure", "feature_failure", "scaler_failure", "invalid_candle_failure", "write_failure", "replace_failure"])
     def test_selection_minimum_log_loss_with_tie_breaking(self, tmp_path, temp_db_with_candles, monkeypatch, mode, capsys):
         """Test that selection picks minimum log_loss and ties preserve order."""
         db_path, candles = temp_db_with_candles
@@ -330,7 +330,28 @@ class TestSelectionIntegration:
         if mode == "invalid_candle_failure":
             with sqlite3.connect(db_path) as connection:
                 connection.execute("UPDATE candles SET volume = -1 WHERE ticker = 'TEST'")
+        if mode == "replace_failure":
+            original_replace = selector.os.replace
+            replacements = []
+            def fail_final_replace(source, destination):
+                replacements.append(destination)
+                if len(replacements) > 1:
+                    raise OSError("synthetic late replacement failure")
+                return original_replace(source, destination)
+            monkeypatch.setattr(selector.os, "replace", fail_final_replace)
         exit_code = select_main()
+        if mode == "replace_failure":
+            assert exit_code == 1
+            output = next(artifacts_dir.iterdir())
+            manifest = json.loads((output / "manifest.json").read_text())
+            assert manifest["exit_status"] == 1
+            assert manifest["failed_checks"] == ["run_incomplete"]
+            assert manifest["selection"]["status"] == "incomplete"
+            assert (output / "model.json").exists()
+            assert (output / "predictions.jsonl").exists()
+            with pytest.raises(ValueError):
+                load_and_predict(output)
+            return
         if mode == "write_failure":
             assert exit_code == 1
             error = json.loads(capsys.readouterr().err)
@@ -347,6 +368,7 @@ class TestSelectionIntegration:
             assert manifest["parameters"]["optimizer"] == {"learning_rate": 0.05, "epochs": 300}
             assert manifest["selection_rule"]["tie_break"] == "first_declared"
             assert manifest["selection"]["winner_index"] is None
+            assert not (output / "manifest.json.tmp").exists()
             checks = json.loads((output / "checks.json").read_text())
             assert manifest["failed_checks"]
             assert all(checks[name] is False for name in manifest["failed_checks"])
@@ -371,6 +393,10 @@ class TestSelectionIntegration:
 
         manifest = json.loads((run_dir / "manifest.json").read_text())
         assert manifest["selection"]["status"] == "selected"
+        assert manifest["exit_status"] == 0
+        assert not (run_dir / "manifest.json.tmp").exists()
+        assert (run_dir / "model.json").exists()
+        assert (run_dir / "predictions.jsonl").exists()
         assert manifest["parameters"]["optimizer"] == {"learning_rate": 0.05, "epochs": 300}
         assert manifest["selection_rule"] == {
             "metric": "validation_log_loss", "direction": "minimize",
@@ -429,6 +455,8 @@ class TestSelectionIntegration:
         run_dir = runs[0]
         manifest = json.loads((run_dir / "manifest.json").read_text())
         assert manifest["selection"]["status"] == "rejected"
+        assert manifest["exit_status"] == 0
+        assert not (run_dir / "manifest.json.tmp").exists()
         assert manifest["selection"]["winner_index"] is None
         assert not (run_dir / "model.json").exists()
 

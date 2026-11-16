@@ -129,7 +129,7 @@ def _write_failure_manifest(run_dir: Path, args, error: str, commit: str, data_s
         "dividend_calendar": getattr(args, "dividend_calendar", []),
         "dividend_calendar_sha256": getattr(args, "dividend_calendar_sha256", None),
         "dividend_calendar_read_utc": getattr(args, "dividend_calendar_read_utc", None),
-        "dividend_date_semantics": "unverified_cutoff_date_proxy_not_confirmed_ex_date",
+        "dividend_date_semantics": "smartlab_trusted_cutoff_date_used_as_ex_date",
         "dividend_samples_excluded": getattr(args, "dividend_samples_excluded", {}),
         "lstm_config": {
             "hidden_size": args.hidden_size,
@@ -662,7 +662,7 @@ def main() -> int:
             "dividend_calendar": args.dividend_calendar,
             "dividend_calendar_sha256": args.dividend_calendar_sha256,
             "dividend_calendar_read_utc": args.dividend_calendar_read_utc,
-            "dividend_date_semantics": "unverified_cutoff_date_proxy_not_confirmed_ex_date",
+            "dividend_date_semantics": "smartlab_trusted_cutoff_date_used_as_ex_date",
             "dividend_samples_excluded": args.dividend_samples_excluded,
             "lstm_config": {
                 "hidden_size": args.hidden_size,

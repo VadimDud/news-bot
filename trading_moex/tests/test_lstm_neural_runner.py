@@ -225,6 +225,7 @@ class TestRunnerBasicExecution:
         run_dir = list(artifacts_dir.glob("*_LSTM-NEURAL_*"))[0]
         manifest = json.loads((run_dir / "manifest.json").read_text())
         assert manifest["dividend_label_policy"] == "exclude_outcome_windows"
+        assert manifest["dividend_date_semantics"] == "smartlab_trusted_cutoff_date_used_as_ex_date"
         assert manifest["dividend_calendar"] == [
             {"cutoff_date": "2024-01-03", "source": "test-calendar"},
             {"cutoff_date": "2024-01-07", "source": "empty-window-calendar"},

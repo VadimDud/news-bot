@@ -79,6 +79,11 @@ It does not provide executable return simulation or fully protocol-compliant
 artifacts; the separate neural runner is described below. Failed recorded sanity checks now
 produce a nonzero exit status while retaining diagnostic artifacts.
 
+The frozen prospective paper-evaluation contract is documented in
+`research/lstm_baseline/PROSPECTIVE_SBER_15MIN.md`. Enrollment is not active:
+the current runners do not yet combine timestamp-based enrollment, exactly
+2,000 completed forward candles, and Smartlab masking in one confirmatory path.
+
 ## Validation-only mode
 
 Validation-only mode is a procedural step to isolate validation metrics before

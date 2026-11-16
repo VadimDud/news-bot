@@ -1,8 +1,8 @@
 # LSTM-BASELINE-001: causal feature and dataset preparation
 
-Status: diagnostic linear baseline completed; no neural model or strategy
-promotion. This study prepares OHLCV inputs and evaluates a logistic baseline
-only; it does not connect to live trading.
+Status: diagnostic linear baseline completed; a separate PyTorch LSTM runner
+is implemented with synthetic integration coverage. Neither model is approved
+for trading. There is no live connection or automatic training scheduler.
 
 ## Frozen setup
 
@@ -38,7 +38,7 @@ only; it does not connect to live trading.
 The current runner evaluates validation and historical test/forward partitions,
 but does not implement parameter selection or a prospective evaluation gate.
 It does not provide executable return simulation or fully protocol-compliant
-artifacts; no neural network is implemented. Failed recorded sanity checks now
+artifacts; the separate neural runner is described below. Failed recorded sanity checks now
 produce a nonzero exit status while retaining diagnostic artifacts.
 
 ## Validation-only mode
@@ -193,12 +193,191 @@ The loader validates exit_status=0 and presence of manifest.json before acceptin
 an artifact. A failed run directory is preserved with diagnostics but never passes
 loader validation. This prevents incomplete artifacts from being used in production.
 
+## PyTorch LSTM Neural Network Implementation
+
+A PyTorch LSTM neural classifier is now available for comparison with the logistic
+baseline. This implementation is **unvalidated research code** and must follow the
+same protocols as the logistic baseline.
+
+### Installation
+
+PyTorch is an optional dependency. To run LSTM experiments, install CPU PyTorch:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+For GPU support (NVIDIA only):
+```bash
+pip install torch
+```
+
+### Key Properties
+
+- **Optional dependency**: if PyTorch is not available, `app.lstm_neural` fails
+  gracefully with `TORCH_AVAILABLE = False`; runner handles missing torch by
+  reporting an error and exiting with status 1
+- **Deterministic training**: fixed random seed (default 42) ensures reproducible
+  model initialization and weight updates
+- **Input validation**: model rejects non-finite data, wrong dimensions, mismatched
+  label lengths, non-binary labels, and insufficient training data before training
+- **Sequence-based**: model expects 3D input `(batch, sequence_length, n_features)`
+  with consistent sequence length within training/validation batches
+- **Binary classification**: outputs probabilities in [0, 1] for class 1; class
+  probabilities are `[1 - prob, prob]`
+- **Eval mode after training**: model is set to `torch.no_grad()` eval mode after
+  training to ensure deterministic inference (no dropout)
+- **Weights persistence**: trained state dictionaries saved as `lstm_weights.pt`;
+  loading uses `torch.load(..., weights_only=True)`.
+
+### Architecture
+
+- **Input size**: 10 (causal OHLCV features from `app/lstm_features.py`)
+- **Sequence length**: 50 bars (configurable)
+- **Hidden size**: 32 units (configurable, default)
+- **Layers**: 2 LSTM layers (configurable, default)
+- **Dropout**: 0.2 (configurable, default; applied between LSTM layers)
+- **Output**: single sigmoid neuron for binary classification
+
+### Configuration and Hyperparameters
+
+See `app/lstm_neural.py::LSTMConfig` for all tunable parameters:
+
+```python
+LSTMConfig(
+    input_size=10,           # Fixed to feature count
+    hidden_size=32,          # LSTM hidden dimension
+    num_layers=2,            # Stacked LSTM layers
+    dropout=0.2,             # Between-layer dropout (0 if single layer)
+    learning_rate=0.001,     # Adam optimizer learning rate
+    batch_size=32,           # Training batch size
+    epochs=50,               # Training epochs
+    seed=42,                 # Random seed for reproducibility
+)
+```
+
+### Runner
+
+`scripts/run_lstm_neural.py` runs the LSTM classifier on chronological validation
+folds. Invocation:
+
+```bash
+python3 scripts/run_lstm_neural.py \
+  --db data/trader.db \
+  --ticker SBER \
+  --period 15m \
+  --train-bars 500 \
+  --validation-bars 100 \
+  --sequence-length 50 \
+  --horizon 5 \
+  --threshold 0.003 \
+  --cost-rate 0.001 \
+  --artifacts-dir artifacts/runs/lstm_neural
+```
+
+**Output artifacts** (on success):
+
+- `manifest.json`: Run metadata, command, commit, timestamp, exit_status
+- `metrics.json`: ClassificationMetrics (accuracy, balanced_accuracy, log_loss,
+  confusion matrix, precision, recall, f1)
+- `checks.json`: Sanity checks (row count, both classes present, non-finite
+  values, causality)
+- `lstm_weights.pt`: Saved LSTM model weights (PyTorch format)
+- `train_predictions.csv` and `validation_predictions.csv`: decision/outcome
+  timestamps, labels, and probabilities from all three models
+- `scaler.json`: FeatureScaler state and ordered feature names
+- `run.log`: Training history and diagnostics
+
+**Output artifacts** (on failure):
+
+- `manifest.json`: Run metadata with exit_status=1
+- `run.log`: Diagnostics when execution reached feature preparation
+- Other partial artifacts as available
+
+### Validation-Only Mode
+
+Same as logistic baseline:
+
+```bash
+python3 scripts/run_lstm_neural.py \
+  --db data/trader.db \
+  --ticker SBER \
+  --period 15m \
+  --train-bars 500 \
+  --validation-bars 100 \
+  --sequence-length 50 \
+  --horizon 5 \
+  --threshold 0.003 \
+  --cost-rate 0.001 \
+  --artifacts-dir artifacts/runs/lstm_neural
+```
+
+- Loads only `train_bars + validation_bars` rows
+- Fits scaler on training partition only
+- Evaluates on validation partition only
+- Records mode as `validation-only` in manifest
+- Does not select or promote candidates
+
+### Research Protocols
+
+The LSTM implementation is **unvalidated and must not be promoted to live
+trading**:
+
+- **No profitability claim**: classification accuracy does not imply executable
+  returns. Missing: commission simulation, slippage, queue position, spread,
+  market impact, regime detection.
+- **Validation-only**: run on held-out validation data using the same protocol
+  as the logistic baseline before any comparative claims. Test/forward data
+  remain historical diagnostics.
+- **Parameter freeze**: before evaluation, freeze all hyperparameters (learning
+  rate, hidden size, layers, dropout, training epochs, batch size, seed).
+  Do not refit or retune after inspecting results.
+- **Sanity checks**: verify sufficient samples, both classes present, no
+  lookahead, non-finite values detected, timestamp causality preserved.
+- **Finite metrics required**: log loss, accuracy, balanced accuracy must be
+  finite and properly computed before comparing to baseline.
+- **Baseline comparison**: compare log loss (primary metric) against
+  training-prevalence majority-class predictor. Strict improvement required to
+  advance. Tied metrics favor declared order.
+- **Comparison scope**: train on same data, use same features, same scaler
+  (fit on training only), same split boundaries, same target definition,
+  predeclared regularization (LSTM dropout versus logistic L2 penalty).
+
+### Limitations
+
+- **Neural network does not guarantee edge**: LSTM is more expressive than
+  logistic regression but overfits more readily on small datasets. Validation
+  metrics may not transfer to held-out prospective data.
+- **Not a trading strategy**: direction predictions do not include execution
+  cost, risk, or market microstructure. A profitable LSTM classifier on
+  historical validation folds is not evidence of executable returns.
+- **Determinism assumes CPU PyTorch**: GPU training may introduce
+  non-deterministic numerical behavior even with fixed seeds (cuDNN).
+- **Sequence assumptions**: model expects fixed sequence length and sufficient
+  historical context (50 bars). Sparse or gappy data may require preprocessing.
+- **No class balancing**: model trains on imbalanced labels without
+  resampling/weighting. If labels are highly skewed, validation metrics may
+  be dominated by the majority class.
+
+### Next Step
+
+After running LSTM validation and logistic baseline on the same data:
+
+1. Compare validation log loss, balanced accuracy, and confusion matrices
+2. Verify both models pass sanity checks (causality, sufficient data, both
+   classes, finite metrics)
+3. If LSTM strictly improves log loss over majority baseline and logistic
+   baseline, record the freeze point (commit, hyperparameters, data boundaries)
+4. **Do not** inspect test/forward metrics before freezing
+5. If no improvement, stop and document why the neural model did not help
+
+This is a diagnostic comparison, not proof of profitability or edge.
+
 ## Limitations and next step
 
 OHLCV direction labels do not represent executable orders, queue position,
 spread, market impact, or regime shifts. Class balancing must not be performed
-by duplicating/shuffling test examples. The model architecture itself is not
-implemented until a chronological baseline experiment is specified.
+by duplicating/shuffling test examples.
 
 Partitioned runs now use training labels for the prior baseline, encode undefined
 metrics as JSON null, fingerprint the consumed OHLCV rows, and record actual
@@ -206,5 +385,7 @@ sample containment/order checks. The `forward` block is a historical holdout,
 not untouched prospective data. These artifacts remain diagnostic, not a full
 execution study or evidence of profitability.
 
-Next step: audit selector provenance and failure handling before requesting a
-clean-commit freeze; do not inspect historical test/forward metrics for selection.
+Next step: run LSTM validation experiment on SBER 15m with 500-bar training and
+100-bar validation; compare log loss and balanced accuracy against logistic
+baseline and majority predictor. Record all three run artifacts and document
+whether neural model justifies further investigation.

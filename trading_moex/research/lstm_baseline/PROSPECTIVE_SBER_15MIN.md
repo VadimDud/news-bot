@@ -34,6 +34,9 @@ move the start boundary, retune parameters, or extend the evaluation period.
 - Ticker: `SBER`.
 - Stored period: `15min`.
 - Evaluation length: exactly 2,000 completed candles.
+- Training prefix: exactly the last 500 completed historical candles before
+  enrollment freeze; earlier rows are causal feature warmup only. The scaler is
+  fitted on those 500 training rows only.
 - Storage timestamps: UTC-naive SQLite values.
 - Market calendar: `Europe/Moscow`.
 - Historical rows before enrollment: feature warmup only.
@@ -103,7 +106,41 @@ Enrollment must not start until one runner supports all of these together:
 The current neural runner has Smartlab masking but only train/validation
 windows. The current partitioned baseline runner has chronological partitions
 but no Smartlab masking or prospective enrollment controls. Therefore this
-protocol is intentionally **not yet executable** as a confirmatory run.
+protocol was not executable with those runners. The separate
+`scripts/run_lstm_prospective.py` now implements `enroll`, `check`, and
+`evaluate`; it has synthetic coverage but still needs a PyTorch-enabled
+integration test before a real enrollment. No real enrollment has been made.
+
+### Prospective Runner
+
+- All commands require a clean committed worktree and recorded numpy, pandas,
+  PyTorch and Python versions. Evaluation requires the same commit, environment,
+  database path and unchanged Smartlab calendar as enrollment.
+- `enroll --prior-inspected-watermark <aware-UTC-timestamp>` requires an audited
+  maximum previously inspected candle timestamp. It combines this with the
+  database watermark, freezes historical OHLCV, and records the actual freeze
+  time. It does not require future candles or train a model. Operators must not
+  create replacement enrollments to evade a failed evaluation.
+- The final 500 completed historical rows define training decisions and scaler
+  fitting. Earlier rows provide causal feature warmup. Training outcomes must
+  remain within the frozen history. No forward tensors enter the training API;
+  its required validation argument receives training tensors only, and the
+  fixed-epoch history is discarded (no early stopping or selection).
+- `check --enrollment <directory>` reports readiness without metrics.
+  `evaluate --enrollment <directory>` waits until the first 2,000 completed
+  rows strictly after both boundaries exist, then evaluates once. Session gaps
+  do not count as rows. Later rows do not extend the evaluation window.
+- All commands also require `--db` and `--artifacts-dir`. Each invocation writes
+  a new output directory. A permanent exclusive `evaluation.claim` inside the
+  enrollment directory prevents concurrent or repeated terminal evaluations,
+  including retries after errors. Never remove that claim to rerun a study.
+- An unchanged calendar is required; a new or revised dividend invalidates this
+  implementation's run rather than silently changing labels. Missing forward
+  rows produce `waiting`; invalid data/classes produce `inconclusive`; execution
+  errors produce `failed`. Final classification metrics compare LSTM, logistic
+  (learning rate 0.05, 300 epochs, L2 1.0) and training prevalence.
+- This runner does not provide execution returns, trade ledgers, model promotion,
+  or protection against deliberate editing/copying of enrollment artifacts.
 
 ## Resource And Token Budget
 

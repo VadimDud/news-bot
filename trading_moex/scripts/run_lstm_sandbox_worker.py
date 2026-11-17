@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 ROOT = Path(__file__).resolve().parents[1]
 
 # Frozen artifacts for git validation and evaluation
-FROZEN_ROOT = ROOT / "artifacts/lstm_frozen/trading_moex"
+FROZEN_ROOT = ROOT / "artifacts/lstm_frozen/trading_moex/trading_moex"
 DB = ROOT / "artifacts/runs/sber_research_20261117T091017677811Z/research.db"
 ENROLL = ROOT / "artifacts/runs/lstm_prospective/20261117T091059077116Z_LSTM-PROSPECTIVE_enroll"
 
@@ -68,10 +68,10 @@ def _run() -> int:
         
         # Git validation
         commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ["git", "rev-parse", "HEAD"], cwd=FROZEN_ROOT, text=True
         ).strip()
         dirty = subprocess.check_output(
-            ["git", "status", "--porcelain"], cwd=ROOT, text=True
+            ["git", "status", "--porcelain"], cwd=FROZEN_ROOT, text=True
         ).strip()
         if commit != enrollment["git_commit"] or dirty:
             raise ValueError("frozen checkout changed")
@@ -103,7 +103,7 @@ def _run() -> int:
             raise ValueError("source calendar changed; review required")
         
         # Get latest timestamp from research DB
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB.resolve().as_uri() + "?mode=rw", uri=True)
         cursor = conn.execute(
             "SELECT MAX(begin) FROM candles WHERE ticker=? AND period=?",
             ("SBER", "15min")
@@ -117,16 +117,25 @@ def _run() -> int:
         # Download new candles starting 1 day before latest (overlap for safety)
         start = datetime.fromisoformat(latest).replace(tzinfo=timezone.utc) - timedelta(days=1)
         
-        collector = subprocess.run(
-            ["docker", "exec", "-i", "trader-bot-engine", "python", "-", start.isoformat()],
-            stdin=(ROOT / "scripts/lstm_sandbox_collect.py").open("rb"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=300,
-        )
+        status.update(frozen_commit=commit, database_identifier=str(DB.resolve()),
+                      storage_timezone="UTC-naive", market_timezone="Europe/Moscow",
+                      requested_start_utc=start.isoformat(),
+                      worker_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        collector_path = ROOT / "scripts/lstm_sandbox_collect.py"
+        status["collector_sha256"] = hashlib.sha256(collector_path.read_bytes()).hexdigest()
+        with collector_path.open("rb") as script:
+            try:
+                collector = subprocess.run(
+                    ["docker", "exec", "-i", "trader-bot-engine", "python", "-", start.isoformat()],
+                    stdin=script, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                collector = subprocess.CompletedProcess([], 1, stdout="")
         
         # Transient download errors: don't STOP, just retry next cycle
+        if collector.returncode == 2:
+            raise ValueError("collector rejected invalid market data")
         if collector.returncode:
             status.update(status="download_failed", reason="sandbox API unavailable")
             (run / "status.json").write_text(json.dumps(status, indent=2))
@@ -148,6 +157,8 @@ def _run() -> int:
         status["source_sha256"] = payload["source_sha256"]
         
         rows = payload["rows"]
+        if hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest() != payload["source_sha256"]:
+            raise ValueError("batch hash mismatch")
         
         # Validate sorted timestamps
         for i in range(len(rows) - 1):
@@ -162,6 +173,8 @@ def _run() -> int:
             for row in rows:
                 timestamp_str = row[0]
                 stamp = datetime.fromisoformat(timestamp_str)
+                if stamp.isoformat(" ") != timestamp_str or stamp.replace(tzinfo=timezone.utc) < start:
+                    raise ValueError("noncanonical or out-of-range timestamp")
                 values = row[1:]
                 
                 # Validate timestamp normalization
@@ -202,9 +215,7 @@ def _run() -> int:
                 
                 # Prevent late historical insertion
                 if timestamp_str <= latest:
-                    # This is expected during overlap window - skip silently
-                    skipped_existing += 1
-                    continue
+                    raise ValueError("late historical insertion")
                 
                 # Explicit column INSERT to prevent schema drift
                 conn.execute(
@@ -233,12 +244,12 @@ def _run() -> int:
             destination = run / action
             result = subprocess.run(
                 [
-                    PYTHON, str(ROOT / "scripts/run_lstm_prospective.py"), action,
+                    PYTHON, str(FROZEN_ROOT / "scripts/run_lstm_prospective.py"), action,
                     "--db", str(DB),
                     "--enrollment", str(ENROLL),
                     "--artifacts-dir", str(destination),
                 ],
-                cwd=ROOT,
+                cwd=FROZEN_ROOT,
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -258,6 +269,8 @@ def _run() -> int:
             # If check says "waiting", don't evaluate yet
             if action == "check" and result_manifest["status"] != "ready":
                 break
+            if action == "check" and result_manifest.get("completed_forward_bars") != 2000:
+                raise ValueError("ready without exactly 2000 forward bars")
     
     except Exception as exc:
         status.update(status="stopped", reason=str(exc))

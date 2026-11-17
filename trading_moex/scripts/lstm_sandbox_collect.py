@@ -109,7 +109,9 @@ def main() -> int:
                 ).hexdigest()
                 break
             
-            except Exception as e:
+            except ValueError:
+                raise
+            except Exception:
                 retry_count += 1
                 if retry_count < MAX_RETRIES:
                     time_module.sleep(RETRY_BACKOFF_SEC)
@@ -129,6 +131,9 @@ def main() -> int:
         print(json.dumps(output))
         return 0
     
+    except ValueError:
+        print('{"error":"invalid_market_data"}')
+        return 2
     except Exception:
         # Do not expose SDK errors, credentials, or internal details
         print('{"error":"sandbox_download_failed"}')

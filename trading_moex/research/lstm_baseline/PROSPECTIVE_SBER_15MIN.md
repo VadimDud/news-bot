@@ -156,6 +156,19 @@ warning remains unrelated to these synchronous tests.
 - This runner does not provide execution returns, trade ledgers, model promotion,
   or protection against deliberate editing/copying of enrollment artifacts.
 
+### Automated Collection
+
+The enrolled run is collected by `scripts/run_lstm_sandbox_worker.py` from the
+T-Bank sandbox only. The user-level `lstm-sandbox-worker.timer` runs hourly and
+appends only new, completed, immutable OHLCV rows to the separate research DB.
+It validates the frozen `8829ecc` checkout in
+`artifacts/lstm_frozen/trading_moex/trading_moex`, records source-batch hashes,
+and runs `check` without metrics until exactly 2,000 forward rows exist. A
+permanent enrollment claim and a process lock make terminal evaluation
+single-use. Transient sandbox failures retry on the next timer invocation;
+validation or calendar changes stop the worker for review. No orders or live
+signals are enabled.
+
 ## Resource And Token Budget
 
 Use a two-stage workflow to avoid wasting computation and context:

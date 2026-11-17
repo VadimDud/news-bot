@@ -340,7 +340,7 @@ def test_ready_evaluate_once(temp_workspace: tuple, source_db: Path):
             run_dir.mkdir(parents=True)
             manifest = {
                 "status": "ready" if action == "check" else "completed",
-                "completed_forward_bars": 96,
+                    "completed_forward_bars": 2000,
             }
             (run_dir / "manifest.json").write_text(json.dumps(manifest))
             return result

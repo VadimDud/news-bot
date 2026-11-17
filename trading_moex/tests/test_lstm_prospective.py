@@ -85,7 +85,14 @@ def test_enroll_wait_hash_and_duplicate_evaluation(tmp_path, monkeypatch):
     assert "hash mismatch" in manifest["failure_reason"]
 
 
-def test_complete_forward_and_permanent_claim(tmp_path, monkeypatch):
+@pytest.mark.parametrize("real_training", [False, True], ids=["mock", "pytorch"])
+def test_complete_forward_and_permanent_claim(tmp_path, monkeypatch, request, real_training):
+    if real_training:
+        torch = pytest.importorskip("torch")
+        previous_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        # Restore global thread settings even if an assertion fails.
+        request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
     class Clock(datetime):
         current = datetime(2020, 2, 1, tzinfo=timezone.utc)
 
@@ -96,7 +103,8 @@ def test_complete_forward_and_permanent_claim(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "datetime", Clock)
     monkeypatch.setattr(runner, "_git", lambda *args: "" if args[0] == "status" else "abc123")
-    monkeypatch.setattr(runner.importlib.metadata, "version", lambda name: "test")
+    if not real_training:
+        monkeypatch.setattr(runner.importlib.metadata, "version", lambda name: "test")
     db = tmp_path / "db.sqlite"
     root = tmp_path / "runs"
 
@@ -128,14 +136,24 @@ def test_complete_forward_and_permanent_claim(tmp_path, monkeypatch):
         assert train.outcome_timestamps.max() < forward.decision_timestamps.min()
         return {"mock_only": True}
 
-    monkeypatch.setattr(runner, "evaluate", fake_evaluate)
+    if not real_training:
+        monkeypatch.setattr(runner, "evaluate", fake_evaluate)
     code, output, manifest = invoke("evaluate", "--enrollment", str(enrollment))
     assert code == 0, manifest
     assert manifest["status"] == "completed"
     assert manifest["completed_forward_bars"] == 2000
     assert len(pd.read_csv(output / "forward.csv")) == 2000
-    assert calls == [1995]
+    if real_training:
+        metrics = json.loads((output / "metrics.json").read_text())
+        assert set(metrics) == {"lstm", "logistic", "prevalence"}
+        for values in metrics.values():
+            assert values["samples"] == 1995
+            assert np.isfinite(values["log_loss"])
+            assert np.asarray(values["confusion_matrix"]).sum() == 1995
+        assert manifest["parameters"]["epochs"] == 50
+    else:
+        assert calls == [1995]
     code, output, manifest = invoke("evaluate", "--enrollment", str(enrollment))
     assert code == 1
-    assert calls == [1995]
+    assert calls == ([] if real_training else [1995])
     assert not (output / "metrics.json").exists()

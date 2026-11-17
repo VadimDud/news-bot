@@ -108,8 +108,19 @@ windows. The current partitioned baseline runner has chronological partitions
 but no Smartlab masking or prospective enrollment controls. Therefore this
 protocol was not executable with those runners. The separate
 `scripts/run_lstm_prospective.py` now implements `enroll`, `check`, and
-`evaluate`; it has synthetic coverage but still needs a PyTorch-enabled
-integration test before a real enrollment. No real enrollment has been made.
+`evaluate`; its PyTorch-enabled synthetic integration test passes with the
+frozen architecture and all 50 epochs. No real enrollment has been made.
+
+Integration verification: the five targeted modules (`test_lstm_prospective`,
+`test_prospective_enrollment`, `test_lstm_features`, `test_lstm_neural`, and
+`test_lstm_neural_runner`) passed 84 tests without skips using Python 3.14.4,
+PyTorch 2.15.0+cpu, numpy 2.5.5 and pandas 3.1.1 in an isolated environment.
+The prospective test uses a temporary synthetic SQLite database, a simulated
+clock and git state, actual dependency versions, one CPU thread, and real
+training and inference. It checks all three final metric sets and the permanent
+evaluation claim. These are dirty-worktree implementation checks, not study
+runs or profitability evidence. A pytest-asyncio fixture-scope deprecation
+warning remains unrelated to these synchronous tests.
 
 ### Prospective Runner
 

@@ -105,6 +105,31 @@ windows. The current partitioned baseline runner has chronological partitions
 but no Smartlab masking or prospective enrollment controls. Therefore this
 protocol is intentionally **not yet executable** as a confirmatory run.
 
+## Resource And Token Budget
+
+Use a two-stage workflow to avoid wasting computation and context:
+
+1. `scripts/enroll_prospective_lstm.py` currently records only a diagnostic
+   pre-enrollment snapshot (`status=snapshot_recorded`,
+   `enrollment_authorized=false`, no enrollment freeze). It preserves OHLCV CSV
+   and calendar hashes from one read-only SQLite transaction. Review only
+   `manifest.json` and `checks.json`. Its watermark covers database candles,
+   not an audit of prior artifacts. Actual enrollment remains blocked by the
+   Implementation Gate above and requires a new freeze after that gate passes.
+   The 2,000-candle requirement is future evaluation length, not a minimum
+   historical row count. The future end timestamp cannot yet be determined.
+2. Until all 2,000 candles are collected, perform only cheap checks: latest
+   completed timestamp, row count, calendar hash, and database freshness.
+3. Do not train, recompute historical windows, or ask agents to summarize the
+   same artifacts repeatedly. Pass run IDs, hashes, and a small metrics table
+   instead of raw logs.
+4. After the evaluation end rule is reached, run the frozen command once and
+   inspect `manifest.json`, `checks.json`, and `metrics.json` first. Read
+   predictions or logs only when a check fails or a specific anomaly requires
+   diagnosis.
+5. Delegate bounded read-only reviews with exact paths and request concise
+   findings; never include secrets, full database exports, or environment dumps.
+
 ## Acceptance And Stop Rules
 
 Before enrollment, predeclare the primary metric and baseline. The primary

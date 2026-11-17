@@ -79,6 +79,23 @@ def test_enroll_wait_hash_and_duplicate_evaluation(tmp_path, monkeypatch):
     assert code == 0 and manifest["status"] == "waiting"
     assert not (output / "metrics.json").exists()
     assert not (enrollment / "evaluation.claim").exists()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE candles SET begin='invalid-time' WHERE rowid=1")
+    code, output, manifest = invoke("check", "--enrollment", str(enrollment))
+    assert code == 1
+    assert "invalid candle timestamp" in manifest["failure_reason"]
+    assert not (output / "metrics.json").exists()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE candles SET begin='2020-01-01 00:00:00' WHERE rowid=1")
+    enrollment_manifest = enrollment / "manifest.json"
+    saved = enrollment_manifest.read_text()
+    changed = json.loads(saved)
+    changed["dividend_date_semantics"] = "different_semantics"
+    enrollment_manifest.write_text(json.dumps(changed))
+    code, output, manifest = invoke("check", "--enrollment", str(enrollment))
+    assert code == 1
+    assert "contract or environment changed" in manifest["failure_reason"]
+    enrollment_manifest.write_text(saved)
     (enrollment / "history.csv").write_text("tampered")
     code, output, manifest = invoke("check", "--enrollment", str(enrollment))
     assert code == 1

@@ -150,6 +150,9 @@ warning remains unrelated to these synchronous tests.
   rows produce `waiting`; invalid data/classes produce `inconclusive`; execution
   errors produce `failed`. Final classification metrics compare LSTM, logistic
   (learning rate 0.05, 300 epochs, L2 1.0) and training prevalence.
+- The enrollment explicitly records and verifies Smartlab cutoff-as-ex-date
+  semantics. Readiness/evaluation reject source timestamps that SQLite cannot
+  parse, rather than silently skipping those rows in the boundary query.
 - This runner does not provide execution returns, trade ledgers, model promotion,
   or protection against deliberate editing/copying of enrollment artifacts.
 

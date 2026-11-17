@@ -25,6 +25,7 @@ PARAMS = dict(train_bars=500, evaluation_bars=2000, sequence_length=50,
               horizon=5, threshold=0.003, cost_rate=0.001, hidden_size=32,
               num_layers=2, dropout=0.2, learning_rate=0.001, batch_size=32,
               epochs=50, seed=42)
+DIVIDEND_SEMANTICS = "smartlab_trusted_cutoff_date_used_as_ex_date"
 
 
 def digest(payload):
@@ -129,7 +130,8 @@ def main():
                     started_at_utc=now.isoformat(), parameters=PARAMS,
                     command=[sys.executable, *sys.argv], git_commit=_git("rev-parse", "HEAD"),
                     git_status=_git("status", "--porcelain"), database_identifier=str(Path(args.db).resolve()),
-                    storage_timezone="UTC-naive", market_timezone="Europe/Moscow")
+                    storage_timezone="UTC-naive", market_timezone="Europe/Moscow",
+                    dividend_date_semantics=DIVIDEND_SEMANTICS)
     try:
         manifest["dependency_versions"] = {
             name: importlib.metadata.version(name) for name in ("numpy", "pandas", "torch")}
@@ -143,6 +145,7 @@ def main():
             directory = Path(args.enrollment)
             enrollment = json.loads((directory / "manifest.json").read_text())
             if (enrollment["status"] != "enrolled" or enrollment["parameters"] != PARAMS
+                    or enrollment.get("dividend_date_semantics") != DIVIDEND_SEMANTICS
                     or enrollment["git_commit"] != manifest["git_commit"]
                     or enrollment["database_identifier"] != manifest["database_identifier"]
                     or enrollment["dependency_versions"] != manifest["dependency_versions"]):
@@ -163,6 +166,14 @@ def main():
             if enrollment is None:
                 frame = pd.read_sql_query("SELECT begin AS timestamp, open, high, low, close, volume FROM candles WHERE ticker='SBER' AND period='15min' ORDER BY begin", db)
             else:
+                # SQLite maps invalid dates to NULL, silently removing them from
+                # the boundary query. Reject them before selecting a fixed window.
+                invalid = db.execute(
+                    "SELECT 1 FROM candles WHERE ticker='SBER' AND period='15min' "
+                    "AND julianday(begin) IS NULL LIMIT 1"
+                ).fetchone()
+                if invalid:
+                    raise ValueError("invalid candle timestamp in source database")
                 # julianday handles both ISO T and space-separated stored timestamps.
                 frame = pd.read_sql_query("SELECT begin AS timestamp, open, high, low, close, volume FROM candles WHERE ticker='SBER' AND period='15min' AND julianday(begin)>julianday(?) ORDER BY julianday(begin) LIMIT 2000", db, params=(boundary.isoformat(),))
         manifest["dividend_calendar"] = events

@@ -195,3 +195,14 @@ def test_worker_uses_separate_enrollment_and_permanent_claim(tmp_path, monkeypat
     (directory / "evaluation.claim").write_text("terminal")
     assert worker.main() == 0
     assert calls == [directory]
+
+
+def test_worker_surfaces_stop_guard(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("worker5_stop", SCRIPTS / "run_lstm_sandbox_worker_5min.py")
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "STOP").write_text("review required")
+    monkeypatch.setattr(worker, "RUNTIME", runtime)
+    assert worker.main() == 1

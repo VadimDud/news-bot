@@ -48,7 +48,7 @@ def main() -> int:
 
         # Recheck STOP/claim under lock
         if (RUNTIME / "STOP").exists():
-            return 0
+            return 1
 
         # Load enrollment from JSON (frozen at enroll time)
         with ENROLL.open() as stream:

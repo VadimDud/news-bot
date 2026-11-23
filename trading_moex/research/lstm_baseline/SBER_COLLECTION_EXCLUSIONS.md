@@ -15,6 +15,13 @@ frozen evaluation dataset. Re-process archived observations from the original
 boundary once on policy upgrade. Never fill exclusion gaps, and do not treat
 either side of a gap as adjacent in downstream features or outcome windows.
 
+`app.sber_cohort.cohort_partitions` reads bars and explicit exclusions in one
+read-only transaction, splitting each timeframe before feature computation.
+Each segment warms up independently. The caller supplies a scaler fitted on
+separate training history and any dividend dates. Normal session breaks alone
+do not split this bar-based diagnostic. Missing bars without a recorded
+exclusion are not detected by this rule. This loader is not a study enrollment.
+
 Limits: observations outside the collector overlap may not expose a revision.
 STOPs, incident reports, enrollment and evaluation rules of the separate
 frozen prospective studies are unchanged.

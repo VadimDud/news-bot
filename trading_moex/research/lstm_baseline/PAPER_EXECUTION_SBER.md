@@ -97,3 +97,6 @@ probabilities, manually add hashes to old manifests, or modify frozen runners.
 
 The diagnostic export is a separate retraining path, not the original
 prospective model evaluation, and does not authorize execution.
+Its history-only training partition uses the same dividend-outcome exclusion
+as the prospective runner. The enrollment calendar digest must match both
+manifests; full-bar forward inference still emits a probability per bar.

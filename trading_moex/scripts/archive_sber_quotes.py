@@ -17,22 +17,39 @@ def collect():
     from t_tech.invest import Client
     from t_tech.invest.constants import INVEST_GRPC_API_SANDBOX
 
-    with Client(os.environ['TINKOFF_API_TOKEN'], target=INVEST_GRPC_API_SANDBOX) as client:
-        book = client.market_data.get_order_book(instrument_id=UID, depth=1)
-        status = client.market_data.get_trading_status(instrument_id=UID)
     def level(side):
         if not side:
             return None
         p = side[0].price
         return {'price': str(Decimal(p.units) + Decimal(p.nano).scaleb(-9)),
                 'quantity': side[0].quantity}
-    return dict(instrument_uid=UID, ticker='SBER', source=INVEST_GRPC_API_SANDBOX,
+    def quote(uid, ticker):
+        book = client.market_data.get_order_book(instrument_id=uid, depth=1)
+        status = client.market_data.get_trading_status(instrument_id=uid)
+        return dict(instrument_uid=uid, ticker=ticker, source=INVEST_GRPC_API_SANDBOX,
                 book_time=book.orderbook_ts.isoformat() if book.orderbook_ts else None,
                 bid=level(book.bids), ask=level(book.asks),
                 trading_status=status.trading_status.name,
                 api_trading_available=status.api_trade_available_flag,
                 limit_orders_available=status.limit_order_available_flag,
                 market_orders_available=status.market_order_available_flag)
+    with Client(os.environ['TINKOFF_API_TOKEN'], target=INVEST_GRPC_API_SANDBOX) as client:
+        share = quote(UID, 'SBER')
+        candidates = []
+        try:
+            for f in client.instruments.futures().instruments:
+                if f.basic_asset != 'SBER' or not f.api_trade_available_flag:
+                    continue
+                try:
+                    observation = quote(f.uid, f.ticker)
+                    observation['expiration_reported'] = f.expiration_date.isoformat()
+                except Exception as exc:
+                    observation = dict(instrument_uid=f.uid, ticker=f.ticker, error_type=type(exc).__name__)
+                candidates.append(observation)
+        except Exception as exc:
+            share['futures_catalog_error'] = type(exc).__name__
+        share['futures_candidates'] = candidates
+        return share
 
 
 def archive():

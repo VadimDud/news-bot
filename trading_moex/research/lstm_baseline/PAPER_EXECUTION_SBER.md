@@ -10,6 +10,13 @@ models or select thresholds from forward results.
 
 - `p >= 0.55`: buy SBER shares.
 - `p <= 0.45`: sell a SBER futures contract (short futures).
+- Contract selection for future paper studies: rank only T-Bank contracts on
+  ordinary SBER shares, not SBERP. Compare lagged two-sided quote availability,
+  relative spread and executable depth for the intended notional in the Moscow
+  window; confirm traded turnover in comparable RUB units. Prefer a verified
+  perpetual only when liquidity is comparable. Include its funding/carry in
+  costs; do not interpret a far-future API expiry by itself as proof of terms.
+  Archive candidates before choosing; one book snapshot is not a ranking.
 - Otherwise: no position.
 - Enter at the next completed candle open; no same-candle execution.
 - Execution window (Europe/Moscow, no weekday filter): enter no earlier than

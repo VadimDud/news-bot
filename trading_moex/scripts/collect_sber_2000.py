@@ -29,6 +29,14 @@ def update(runs=RUNS, *, init=False):
         db.execute('CREATE TABLE IF NOT EXISTS exclusions(period TEXT, begin TEXT, reason TEXT, first_run TEXT, old_values TEXT, incident_run TEXT, observed_values TEXT, PRIMARY KEY(period,begin))')
         db.execute('CREATE TABLE IF NOT EXISTS batch_errors(run TEXT,period TEXT,reason TEXT, PRIMARY KEY(run,period))')
         counts = dict(db.execute('SELECT period,count(*) FROM bars GROUP BY period'))
+        before = counts.copy()
+        db.execute('CREATE TABLE IF NOT EXISTS first_completion(period TEXT PRIMARY KEY, sha256 TEXT NOT NULL, payload BLOB NOT NULL)')
+        db.execute('''CREATE TRIGGER IF NOT EXISTS lock_first_completion_insert BEFORE INSERT ON first_completion
+                      WHEN EXISTS(SELECT 1 FROM first_completion WHERE period=NEW.period)
+                      BEGIN SELECT RAISE(ABORT, 'immutable first completion'); END''')
+        for verb in ('UPDATE', 'DELETE'):
+            db.execute(f'''CREATE TRIGGER IF NOT EXISTS lock_first_completion_{verb} BEFORE {verb} ON first_completion
+                           BEGIN SELECT RAISE(ABORT, 'immutable first completion'); END''')
         for path in sorted((runs / 'sber_observations').glob('*/manifest.json')):
             run = path.parent.name
             if run < boundary.strftime('%Y%m%dT%H%M%S%fZ') or db.execute('SELECT 1 FROM processed_v2 WHERE run=?',(run,)).fetchone():
@@ -85,7 +93,25 @@ def update(runs=RUNS, *, init=False):
         errors = dict(db.execute('SELECT period,count(*) FROM batch_errors GROUP BY period'))
         status = {p: {'count': counts.get(p, 0), 'target': TARGET,
                       'excluded': exclusions.get(p, 0), 'batch_errors': errors.get(p, 0),
-                      'state': 'complete' if counts.get(p) == TARGET else 'collecting'} for p in PERIODS}
+                       'state': 'complete' if counts.get(p) == TARGET else 'collecting'} for p in PERIODS}
+        for p in PERIODS:
+            frozen = db.execute('SELECT sha256 FROM first_completion WHERE period=?', (p,)).fetchone()
+            if not frozen and counts.get(p) == TARGET and before.get(p, 0) < TARGET:
+                def records(query):
+                    cursor = db.execute(query, (p,))
+                    names = [col[0] for col in cursor.description]
+                    return [dict(zip(names, row)) for row in cursor]
+
+                payload = json.dumps(dict(schema=1, period=p, start_utc=boundary.isoformat(),
+                    policy='exclude-conflicts-v2', manifest_sha256=sha256((cohort / 'manifest.json').read_bytes()).hexdigest(),
+                    counts=status[p], captured_utc=datetime.now(timezone.utc).isoformat(),
+                    bars=records('SELECT * FROM bars WHERE period=? ORDER BY begin'),
+                    exclusions=records('SELECT * FROM exclusions WHERE period=? ORDER BY begin'),
+                    batch_errors=records('SELECT * FROM batch_errors WHERE period=? ORDER BY run')),
+                    sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+                frozen = (sha256(payload).hexdigest(),)
+                db.execute('INSERT INTO first_completion VALUES(?,?,?)', (p, frozen[0], payload))
+            status[p]['first_completion_sha256'] = frozen[0] if frozen else None
     tmp = cohort / 'status.tmp'
     tmp.write_text(json.dumps(dict(policy='exclude-conflicts-v2', start_utc=boundary.isoformat(), updated_utc=datetime.now(timezone.utc).isoformat(),
                                    periods=status), indent=2))

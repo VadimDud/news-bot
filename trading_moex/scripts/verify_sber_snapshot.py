@@ -82,8 +82,9 @@ def verify(runs, period):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('period', choices=PERIODS)
+    parser.add_argument('--runs', type=Path, default=RUNS, help='directory containing the exported cohort and archives')
     args = parser.parse_args()
     try:
-        print(json.dumps(verify(RUNS, args.period)))
+        print(json.dumps(verify(args.runs, args.period)))
     except (ValueError, KeyError, IndexError, TypeError, OSError, sqlite3.Error) as exc:
         parser.exit(1, f'inconclusive: {exc}\n')

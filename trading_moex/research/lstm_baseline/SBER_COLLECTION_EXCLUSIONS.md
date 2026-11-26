@@ -25,3 +25,5 @@ exclusion are not detected by this rule. This loader is not a study enrollment.
 Limits: observations outside the collector overlap may not expose a revision.
 STOPs, incident reports, enrollment and evaluation rules of the separate
 frozen prospective studies are unchanged.
+
+For diagnostic scoring criteria after collection see `SBER_COHORT_EVALUATION.md`.

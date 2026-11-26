@@ -8,11 +8,12 @@ import tempfile
 import zipfile
 
 
-def export():
+def export(output=None):
     here = Path(__file__).resolve().parent
     runs = here.parent / 'artifacts/runs'
     cohort = runs / 'sber_forward_2000_v1'
-    with tempfile.TemporaryDirectory(dir=here) as tmp:
+    output = output or here / 'snapshot.zip'
+    with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
         dbfile = Path(tmp) / 'collection.db'
         db = sqlite3.connect(dbfile)
         src = sqlite3.connect((cohort / dbfile.name).as_uri() + '?mode=ro', uri=True)
@@ -55,7 +56,7 @@ def export():
                             set(json.loads(raw)) != {'source', 'rows', 'source_sha256'}):
                         raise ValueError('unexpected archive payload')
                     out.writestr(str(path.relative_to(runs)), raw)
-        bundle.replace(here / bundle.name)
+        bundle.replace(output)
     print(f'Exported {len(manifests)} SBER observation batches')
 
 

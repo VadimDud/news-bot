@@ -1,0 +1,10 @@
+[Unit]
+Description=Publish SBER research snapshot to GitHub
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B %h/tech_news_bot/trading_moex/cloud_sber/publish.py
+Environment=GIT_TERMINAL_PROMPT=0
+Environment="GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=20"
+UMask=0077
+TimeoutStartSec=5min
